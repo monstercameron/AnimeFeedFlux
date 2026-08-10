@@ -18,6 +18,35 @@ at the end of Phase C.
 
 ## [Unreleased]
 
+## [0.0.2-dev] — 2026-08-09
+
+Repository process, not product. Still no application code.
+
+### Added
+
+- `DEVLOG.md` — the narrative record, including reversals.
+- Commit message convention, derived from the existing history rather than imported, with
+  `.gitmessage` as an opt-in template. Conventional Commits was considered and rejected.
+- `dev`/`main` branch model. `dev` is the working branch and the GitHub default; `main` is what gets
+  released and, once Phase C lands, deployed.
+- Git hooks in `.githooks/`, opt-in per clone via `scripts/setup-hooks.sh`. `pre-commit` refuses
+  staged secrets and databases, then runs gofmt, build, vet, staticcheck and `go test -short` on
+  staged Go. `pre-push` guards `dev` → `main` promotion behind `AFF_PROMOTE=1`.
+- `scripts/test-hooks.sh` — 18 cases across both hooks, in a throwaway repository.
+- Server-side protection on `main`: force push, deletion and non-linear history refused, admins
+  included.
+- Repository description and topics.
+
+### Fixed
+
+- The credential guard matched bare *mentions* of key variable names, which blocked its own commit
+  and would have blocked `PLAN.md` §16 and `SECURITY.md`. It now matches an assignment with a
+  plausible value, with narrow named exclusions for hook tooling.
+- `.gitattributes` did not reach extensionless hook files, so they would have checked out with CRLF
+  and failed as `bad interpreter: /bin/sh^M`.
+- `AGENTS.md` still described a two-document spec and a repository containing only `PLAN.md` and
+  `TODOS.md`.
+
 ## [0.0.1-dev] — 2026-08-09
 
 ### Added

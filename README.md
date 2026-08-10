@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 0.0.1-dev" src="https://img.shields.io/badge/version-0.0.1--dev-blue">
+  <img alt="Version 0.0.2-dev" src="https://img.shields.io/badge/version-0.0.2--dev-blue">
   <img alt="Status: planning" src="https://img.shields.io/badge/status-planning%20%E2%80%94%20no%20code%20yet-orange">
   <img alt="Go 1.26" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white">
   <img alt="Client: Go to WebAssembly" src="https://img.shields.io/badge/client-Go%20%E2%86%92%20WebAssembly-654FF0?logo=webassembly&logoColor=white">
@@ -19,15 +19,15 @@
 
 ---
 
-## Status: `v0.0.1-dev` — planning. There is no code yet.
+## Status: `v0.0.2-dev` — planning. There is no code yet.
 
 This repository currently contains a specification and a build order, nothing else. No `go.mod`, no
 binary, no running instance. The badges above describe what is designed, not what is built, and
 there are deliberately **no CI or demo badges** because there is nothing for them to report on yet.
 
-The version tags the **specification**. `-dev` is deliberate: it sorts below any future `0.0.1`
-under semver precedence, so a real build cannot be shadowed by this tag. The first version meaning
-"you can run this" is cut at the end of Phase C.
+The version tags the **specification**. `-dev` is deliberate: a pre-release sorts below the same
+number without it under semver precedence, so a real build cannot be shadowed by these tags. The
+first version meaning "you can run this" is cut at the end of Phase C.
 
 If you are here expecting software, come back after Phase C. If you are here to read a plan before
 it becomes software, that is exactly what this is.
