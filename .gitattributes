@@ -23,6 +23,12 @@
 *.service   text eol=lf
 *.timer     text eol=lf
 
+# Git hooks have no extension, so the *.sh rule above does not reach them. They
+# are executed by sh on every commit, on Windows and on CI, and a CR at the end
+# of the shebang produces "bad interpreter: /bin/sh^M" — an error that names the
+# wrong problem and stops every commit until someone works out why.
+.githooks/* text eol=lf
+
 # The Makefile is not negotiable in a stronger sense: a recipe line arriving with CRLF makes GNU
 # make pass a trailing \r to the shell, which fails as `command not found: go\r` — an error naming
 # a command nobody typed, sending people to look for a broken toolchain.

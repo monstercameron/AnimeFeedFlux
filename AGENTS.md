@@ -31,6 +31,13 @@ The plan describes the destination; `TODOS.md` describes how far along the road 
 
 ## The things agents get wrong here
 
+- **Branches: `dev` for work, `main` for releases, nothing else.** No feature branches. Promotion
+  `dev` → `main` is a release that **deploys**, and it is Cam's call — never promote on your own
+  initiative. Mechanics and the reasoning: `CONTRIBUTING.md` → "Branches".
+- **Run `sh scripts/setup-hooks.sh` once per clone.** Hook config is per-clone and untracked, so the
+  hooks are *not* live until you opt in. `pre-commit` runs build, vet and short unit tests when Go is
+  staged; `pre-push` refuses accidental pushes to `main`. Never `--no-verify`, and
+  `AFF_SKIP_HOOKS=1` is for emergencies — a red test is not one.
 - **Phase order is a dependency order, not a preference.** Core engine first, UI last (§18). Do not
   start Phase D because it is more fun; every RPC the UI calls is meant to be exercised by the CLI
   first, so the UI is built once against settled semantics rather than twice.

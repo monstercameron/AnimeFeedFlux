@@ -1,0 +1,94 @@
+#!/bin/sh
+# pre-commit — fast local gate. Runs on every commit, so it must stay fast.
+#
+# The rule this hook exists to serve: CONTRIBUTING.md says never use --no-verify.
+# That instruction is only honest if the hook is quick enough that nobody wants
+# to. So this runs build, vet and the SHORT unit tests, and deliberately does not
+# run the race detector, the external feed validator, the soak, or anything that
+# touches the network. Those are CI's job (PLAN.md §17.2), and moving them here
+# would train everyone to bypass the hook.
+#
+# Escape hatch: AFF_SKIP_HOOKS=1 git commit ...
+# Use it for a genuine emergency, not for a red test. A red test is the hook
+# working.
+
+set -e
+
+if [ "$AFF_SKIP_HOOKS" = "1" ]; then
+    echo "pre-commit: skipped (AFF_SKIP_HOOKS=1)"
+    exit 0
+fi
+
+fail() { echo "pre-commit: $1" >&2; exit 1; }
+
+# --- Never commit working state -------------------------------------------
+#
+# RULE-2: no secret enters the repo. .gitignore already covers these, but an
+# explicit `git add -f` walks straight past it, and a committed key is not
+# undone by deleting it in the next commit — it is in the history forever.
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+
+for f in $staged; do
+    case "$f" in
+        .env|.env.*|*.key|recovery-codes*)
+            fail "refusing to commit secret material: $f" ;;
+        *.db|*.db-wal|*.db-shm)
+            fail "refusing to commit a database: $f" ;;
+    esac
+done
+
+# A key can also arrive inside an otherwise innocent file. This is a coarse
+# check, not a secret scanner — it catches the accident, not an adversary.
+#
+# It matches an ASSIGNMENT with a plausible value, never a bare mention. The
+# first version matched the variable names alone and immediately blocked its own
+# commit, and would also have blocked PLAN.md §16, SECURITY.md, and every future
+# doc that names the variable. A guard that fires on documentation gets disabled
+# within a day, which costs more than the guard was ever worth.
+#
+# .githooks/ is excluded because this file necessarily contains the patterns it
+# looks for.
+secret_diff=$(git diff --cached -U0 -- . ':(exclude).githooks/*' || true)
+
+if printf '%s' "$secret_diff" | grep -qE '^\+.*(SCHEMAFLUX_API_KEY|AFF_SECRET_KEY|OPENAI_API_KEY)[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9_/+-]{16,}'; then
+    fail "a staged line assigns a real-looking value to a key variable (RULE-2)"
+fi
+
+# Provider key shapes, which are unambiguous enough to match on their own.
+if printf '%s' "$secret_diff" | grep -qE '^\+.*(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'; then
+    fail "a staged line looks like a credential — check the diff (RULE-2)"
+fi
+
+# --- Go checks -------------------------------------------------------------
+#
+# This repository is a specification until Phase A0 lands. Until go.mod exists
+# there is nothing to build, and a hook that fails on an empty repo is a hook
+# people disable on day one.
+if [ ! -f go.mod ]; then
+    echo "pre-commit: no go.mod yet — skipping Go checks (docs-only repo)"
+    exit 0
+fi
+
+if ! command -v go >/dev/null 2>&1; then
+    fail "go.mod exists but the go toolchain is not on PATH"
+fi
+
+# Only spend time on Go checks when Go actually changed. A docs commit should
+# not pay for a compile.
+if ! echo "$staged" | grep -qE '\.(go|mod|sum)$'; then
+    echo "pre-commit: no Go changes staged — skipping build and test"
+    exit 0
+fi
+
+echo "pre-commit: go build ./..."
+go build ./... || fail "build failed"
+
+echo "pre-commit: go vet ./..."
+go vet ./... || fail "vet failed"
+
+# -short lets slow suites opt out via testing.Short(). The soak (§17.4) and any
+# live-provider test (RULE-1, AFF_LIVE_LLM) must respect it.
+echo "pre-commit: go test -short ./..."
+go test -short ./... || fail "unit tests failed"
+
+echo "pre-commit: ok"

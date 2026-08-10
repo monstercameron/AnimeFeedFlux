@@ -86,6 +86,63 @@ therefore stated plainly:
 - Coverage is a **ratchet, not a target** — it may not go down. Chasing a percentage produces tests
   written to touch lines.
 
+## Branches
+
+**`dev` for work, `main` for releases, nothing else.** No feature branches — this is a
+single-maintainer repository, and a branch per task buys ceremony rather than isolation.
+
+| Branch | Is | Push to it |
+|---|---|---|
+| `dev` | The working branch. Everything lands here first. | Freely |
+| `main` | What is released and deployed. | Only as a deliberate promotion |
+
+### Promotion, `dev` → `main`
+
+Once the Phase C pipeline exists (§15.3), **a push to `main` builds an image and deploys it to
+production.** That makes an accidental push to `main` not an untidy history but a deployment nobody
+decided to make — so promotion is explicit, and it is Cam's call. Never promote on your own
+initiative.
+
+```bash
+git checkout main
+git merge --ff-only dev        # main must never diverge from dev
+AFF_PROMOTE=1 git push origin main
+git checkout dev
+```
+
+`--ff-only` is the important flag. If it refuses, `main` contains something `dev` does not, which
+means production is running code that never sat on the working branch — fix that rather than
+forcing it through with a merge commit.
+
+The `pre-push` hook enforces three things so none of them depend on remembering:
+
+- pushing any ref other than `main` **to** `main` is refused (a refspec typo is how a feature branch
+  becomes production);
+- promoting without `AFF_PROMOTE=1` is refused, so it never happens as a side effect of `git push`;
+- promoting a commit that is not contained in `dev` is refused.
+
+### Hooks
+
+Hook configuration lives in `.git/config`, which is per-clone and not tracked, so a committed file
+cannot enable itself. Opt in once per clone:
+
+```bash
+sh scripts/setup-hooks.sh
+```
+
+That sets `core.hooksPath` to [`.githooks/`](.githooks) and the commit template, and prints what is
+now active. **Verify it took** (`git config core.hooksPath`) — a hook everyone believes is running
+and isn't is worse than no hook at all.
+
+`pre-commit` refuses staged secrets and databases, then — only when Go files are staged — runs
+`go build`, `go vet`, and `go test -short ./...`. It deliberately does **not** run the race detector,
+the feed validator, or the soak; those are CI's job (§17.2), and putting them here would make the
+hook slow enough that people bypass it. While the repository has no `go.mod`, the Go checks skip
+themselves.
+
+`AFF_SKIP_HOOKS=1` exists for genuine emergencies. **A failing test is not an emergency** — it is the
+hook working.
+
 ## Commit messages
 
 The convention here is descriptive of what the history already does, not imported from elsewhere.

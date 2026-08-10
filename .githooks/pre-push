@@ -1,0 +1,68 @@
+#!/bin/sh
+# pre-push — guards the dev -> main promotion.
+#
+# Branch model (CONTRIBUTING.md -> "Branches"): dev is where work happens, main
+# is what gets released and deployed. Once the Phase C pipeline exists, a push to
+# main triggers a build and a deploy to production, which means an accidental
+# push to main is not an untidy history — it is a deployment nobody decided to
+# make.
+#
+# This hook cannot know intent, so it does not try to. It refuses the two pushes
+# that are always mistakes, and makes the deliberate one require saying so.
+#
+# Escape hatch: AFF_PROMOTE=1 git push origin main
+
+set -e
+
+if [ "$AFF_SKIP_HOOKS" = "1" ]; then
+    echo "pre-push: skipped (AFF_SKIP_HOOKS=1)"
+    exit 0
+fi
+
+remote="$1"
+fail() { echo "pre-push: $1" >&2; exit 1; }
+
+# stdin: <local ref> <local sha> <remote ref> <remote sha>
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -z "$remote_ref" ] && continue
+
+    # Deleting a branch is not our business.
+    case "$local_sha" in
+        *[!0]*) ;;
+        *) continue ;;
+    esac
+
+    case "$remote_ref" in
+      refs/heads/main)
+        # 1. Pushing anything other than main to main. Almost always a typo in
+        #    the refspec, and it is how a feature branch becomes production.
+        if [ "$local_ref" != "refs/heads/main" ]; then
+            fail "refusing to push $local_ref to main. Promote by merging into main locally first."
+        fi
+
+        # 2. Promoting without saying so. Promotion deploys, and it is Cam's
+        #    call, so it should never happen as a side effect of `git push`.
+        if [ "$AFF_PROMOTE" != "1" ]; then
+            echo "pre-push: pushing main DEPLOYS to production." >&2
+            echo "          If that is what you intend:  AFF_PROMOTE=1 git push $remote main" >&2
+            fail "promotion refused (set AFF_PROMOTE=1)"
+        fi
+
+        # 3. Promoting something that is not a descendant of dev. main should
+        #    only ever contain work that was on dev first; anything else means
+        #    production is about to run code that never sat on the working
+        #    branch.
+        if git rev-parse --verify --quiet dev >/dev/null; then
+            if ! git merge-base --is-ancestor "$local_sha" dev; then
+                echo "pre-push: main would contain commits that are not on dev." >&2
+                echo "          Merge them into dev first so the working branch is not behind." >&2
+                fail "promotion refused (main not contained in dev)"
+            fi
+        fi
+
+        echo "pre-push: promoting to main — deploy expected."
+        ;;
+    esac
+done
+
+exit 0
