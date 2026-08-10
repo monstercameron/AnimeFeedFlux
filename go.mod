@@ -1,6 +1,6 @@
 module github.com/monstercameron/AnimeFeedFlux
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/oklog/ulid/v2 v2.1.2
@@ -13,6 +13,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -21,11 +22,14 @@ require (
 	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/monstercameron/GoGRPCBridge v1.1.1 // indirect
+	github.com/monstercameron/GoWebComponents/v5 v5.0.1 // indirect
 	github.com/monstercameron/schemaflux v1.1.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pquerna/otp v1.5.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/sashabaranov/go-openai v1.20.4 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
+	github.com/yuin/goldmark v1.8.5 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.38.0 // indirect

@@ -18,6 +18,25 @@ type Session struct {
 	// never a comparison against this cached field, so revocation (which
 	// changes validity without changing ExpiresAt) is caught too.
 	ExpiresAt time.Time
+	// Token is the raw session cookie value ServeHTTP read at upgrade. It is
+	// set by ServeHTTP itself — never by the caller's SessionValidator — and
+	// is ALWAYS populated whenever a Session reaches this field's context,
+	// which is what makes it structurally impossible to stand up a bridge
+	// that authenticates a socket but forwards no token to the RPCs on it:
+	// there is no separate wiring step a composition root can forget, because
+	// the value ServeHTTP already holds (the cookie it just validated) is
+	// what gets attached, unconditionally, every time.
+	//
+	// Token is deliberately NOT a trust decision cached at upgrade — it is
+	// exactly the same opaque bytes a client sends on the cookie, carried
+	// forward so a per-RPC authorizer (internal/rpc's interceptor) can hash
+	// it and look up CURRENT store state on every single call. Caching
+	// "valid" here would let a mid-connection revocation (SEC-41) go
+	// unnoticed until the next periodic revalidation tick; caching the raw
+	// bytes and re-deriving validity per RPC does not have that gap, because
+	// nothing about validity is cached — see interceptor_sectest_test.go for
+	// the test that pins this down.
+	Token string
 }
 
 // SessionValidator checks a raw session cookie value against store state as

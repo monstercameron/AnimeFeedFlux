@@ -89,8 +89,13 @@ type Config struct {
 	// (see defaultKeepaliveServerParams). Nil uses the default.
 	KeepaliveServerParams *keepalive.ServerParameters
 	// GRPCOptions are appended after the keepalive options when building
-	// the grpc.Server, e.g. for internal/rpc's auth interceptor once it
-	// exists. Optional.
+	// the grpc.Server — this is where a caller chains internal/rpc's
+	// per-RPC auth interceptor (authSrv.UnaryInterceptor()/
+	// StreamInterceptor()). That interceptor reads the raw session token
+	// back out via bridge.SessionFromContext(ctx).Token, which ServeHTTP
+	// populates unconditionally (see Session.Token's doc comment) — no
+	// additional GRPCOptions entry or HTTP middleware is needed to make the
+	// token reach it. Optional.
 	GRPCOptions []grpc.ServerOption
 }
 
@@ -174,6 +179,15 @@ type server struct {
 //     moment the session stops validating. The client then reconnects, hits
 //     step 1 again, and gets 401 — the intended visible outcome is the
 //     login screen reappearing (PLAN.md §4), not a silent hang.
+//
+// This background loop is a coarse, connection-level backstop bounded by
+// RevalidateInterval — it is NOT what SEC-41 (a session revoked mid-connection
+// must be refused on the already-open stream) relies on for its guarantee.
+// The tight guarantee comes from step 1's Session.Token riding into every
+// single RPC context (see Session.Token's doc comment): internal/rpc's
+// interceptor re-derives validity from current store state on every call
+// using that token, so a revocation is caught on the very next RPC, not on
+// the next RevalidateInterval tick.
 func NewServer(cfg Config, register func(*grpc.Server)) (http.Handler, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -271,6 +285,14 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
+	// Set unconditionally, overriding anything a Validator implementation
+	// might have put in Token: this is the one place in the whole request
+	// lifecycle that has the raw cookie value in hand, so it is also the
+	// only place allowed to decide what Session.Token is. Doing this here,
+	// rather than documenting it as something every Validator must
+	// remember to do, is what makes "wire up a bridge that authenticates
+	// but forwards no token" impossible rather than merely discouraged.
+	session.Token = cookie.Value
 
 	ctx := WithSession(r.Context(), session)
 	r = r.WithContext(ctx)

@@ -154,6 +154,73 @@ func TestNumericAndDurationValidation(t *testing.T) {
 	}
 }
 
+// TestPasswordPepperDefaultsToUnconfigured is the compatibility case that matters most:
+// a deployment that has never set AFF_PASSWORD_PEPPER must load cleanly with an empty
+// pepper and a zero version, exactly the "no pepper" state PLAN.md §4 requires to be a
+// true no-op.
+func TestPasswordPepperDefaultsToUnconfigured(t *testing.T) {
+	c, err := Load(env(valid()))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.PasswordPepper != "" {
+		t.Errorf("PasswordPepper = %q, want empty by default", c.PasswordPepper.Reveal())
+	}
+	if c.PasswordPepperVersion != 0 {
+		t.Errorf("PasswordPepperVersion = %d, want 0 by default", c.PasswordPepperVersion)
+	}
+}
+
+func TestPasswordPepperRequiresAPositiveVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name, version string
+	}{
+		{"missing", ""},
+		{"zero", "0"},
+		{"negative", "-1"},
+		{"not an integer", "one"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := valid()
+			m["AFF_PASSWORD_PEPPER"] = "a-real-256-bit-secret-from-the-environment"
+			if tc.version != "" {
+				m["AFF_PASSWORD_PEPPER_VERSION"] = tc.version
+			}
+			if _, err := Load(env(m)); err == nil {
+				t.Fatalf("AFF_PASSWORD_PEPPER_VERSION=%q was accepted alongside a configured pepper", tc.version)
+			} else if !strings.Contains(err.Error(), "AFF_PASSWORD_PEPPER_VERSION") {
+				t.Fatalf("error does not name AFF_PASSWORD_PEPPER_VERSION: %v", err)
+			}
+		})
+	}
+}
+
+func TestPasswordPepperVersionWithoutPepperIsRejected(t *testing.T) {
+	m := valid()
+	m["AFF_PASSWORD_PEPPER_VERSION"] = "1"
+	if _, err := Load(env(m)); err == nil {
+		t.Fatal("a version with no AFF_PASSWORD_PEPPER was accepted")
+	} else if !strings.Contains(err.Error(), "AFF_PASSWORD_PEPPER_VERSION") {
+		t.Fatalf("error does not name AFF_PASSWORD_PEPPER_VERSION: %v", err)
+	}
+}
+
+func TestPasswordPepperRoundTrips(t *testing.T) {
+	m := valid()
+	m["AFF_PASSWORD_PEPPER"] = "a-real-256-bit-secret-from-the-environment"
+	m["AFF_PASSWORD_PEPPER_VERSION"] = "1"
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.PasswordPepper.Reveal() != "a-real-256-bit-secret-from-the-environment" {
+		t.Errorf("PasswordPepper = %q, want the configured value", c.PasswordPepper.Reveal())
+	}
+	if c.PasswordPepperVersion != 1 {
+		t.Errorf("PasswordPepperVersion = %d, want 1", c.PasswordPepperVersion)
+	}
+}
+
 func TestOverrides(t *testing.T) {
 	m := valid()
 	m["AFF_MAX_CONCURRENT_RUNS"] = "7"
@@ -218,11 +285,18 @@ func TestSecretNeverPrints(t *testing.T) {
 }
 
 func TestConfigStructDoesNotLeakSecrets(t *testing.T) {
-	c, err := Load(env(valid()))
+	m := valid()
+	m["AFF_PASSWORD_PEPPER"] = "a-real-256-bit-secret-from-the-environment"
+	m["AFF_PASSWORD_PEPPER_VERSION"] = "1"
+	c, err := Load(env(m))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if out := fmt.Sprintf("%+v", *c); strings.Contains(out, "not-a-real-key") {
+	out := fmt.Sprintf("%+v", *c)
+	if strings.Contains(out, "not-a-real-key") {
 		t.Fatalf("printing the whole Config leaked a secret:\n%s", out)
+	}
+	if strings.Contains(out, "a-real-256-bit-secret-from-the-environment") {
+		t.Fatalf("printing the whole Config leaked the password pepper:\n%s", out)
 	}
 }

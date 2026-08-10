@@ -2,9 +2,11 @@ package rpc
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -432,5 +434,454 @@ func TestRecoverWithCodeOpensElevatedSession(t *testing.T) {
 	ctx2, _ := withTransportStream(withPeerIP(t.Context(), "10.5.0.2"), affv1.AuthService_RecoverWithCode_FullMethodName)
 	if _, err := srv.RecoverWithCode(ctx2, &affv1.AuthServiceRecoverWithCodeRequest{RecoveryCode: plain[0]}); err == nil {
 		t.Error("expected the already-used recovery code to fail")
+	}
+}
+
+// --- Pepper (SEC-07/08/10) --------------------------------------------------
+
+// testPepperKey/testPepperVersion/otherPepperKey stand in for AFF_PASSWORD_PEPPER
+// / AFF_PASSWORD_PEPPER_VERSION across the pepper tests below.
+var (
+	testPepperKey     = []byte("unit-test-pepper-not-a-real-secret-key")
+	testPepperVersion = 1
+	otherPepperKey    = []byte("a-totally-different-pepper-key-value")
+)
+
+// newTestServerWithPepper is newTestServer's pepper-configured sibling: same
+// admin (hashed and stored UNPEPPERED, exactly like newTestServer, via
+// InitAdmin — there is no pepper-aware InitAdmin, deliberately: cmd/aff's
+// break-glass path is out of scope for this change), but the returned
+// AuthServer has a pepper configured via WithPasswordPepper. This is what
+// exercises the "existing unpeppered row, pepper newly configured" upgrade
+// path (needsRepepper in Login).
+func newTestServerWithPepper(t *testing.T, key []byte, version int) (srv *AuthServer, st *store.Store, totpSecret string) {
+	t.Helper()
+	st = openTestStore(t)
+
+	hash, err := auth.Hash(testPassword, auth.DefaultParams())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if err := st.InitAdmin(t.Context(), hash, kdfParamsString(auth.DefaultParams())); err != nil {
+		t.Fatalf("init admin: %v", err)
+	}
+
+	secret, _, err := auth.Enroll("admin", "AnimeFeedFlux-test")
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	enc, err := auth.EncryptSecret(secret, testSecretKey)
+	if err != nil {
+		t.Fatalf("encrypt secret: %v", err)
+	}
+	if err := st.SetTOTPSecret(t.Context(), enc); err != nil {
+		t.Fatalf("set totp secret: %v", err)
+	}
+
+	srv, err = NewAuthServer(st, testSecretKey, WithPasswordPepper(key, version))
+	if err != nil {
+		t.Fatalf("new auth server: %v", err)
+	}
+	return srv, st, secret
+}
+
+// TestNoPepperConfiguredVerifiesExactlyAsBefore is the compatibility case
+// PLAN.md §4 calls out as mattering most: a deployment with no pepper
+// configured must behave identically to one that never had this feature —
+// newTestServer already builds exactly that server, so this simply confirms
+// login succeeds and the stored row's pepper_version stays 0.
+func TestNoPepperConfiguredVerifiesExactlyAsBefore(t *testing.T) {
+	srv, st, secret := newTestServer(t)
+	ctx := withPeerIP(t.Context(), "10.6.0.1")
+	if _, err := srv.Login(ctx, &affv1.AuthServiceLoginRequest{
+		Password: testPassword,
+		TotpCode: validCode(t, secret, time.Now()),
+	}); err != nil {
+		t.Fatalf("login with no pepper configured: %v", err)
+	}
+	admin, err := st.GetAdmin(t.Context())
+	if err != nil {
+		t.Fatalf("get admin: %v", err)
+	}
+	if admin.PepperVersion != 0 {
+		t.Errorf("PepperVersion = %d, want 0 (never peppered)", admin.PepperVersion)
+	}
+}
+
+// TestPepperUpgradesUnpepperedRowOnLogin: an admin row created before a
+// pepper existed (pepper_version 0) must still log in once a pepper is
+// configured — the wrong-direction failure PLAN.md §4 explicitly forbids
+// ("silently breaking login... is far worse than the threat being
+// mitigated") — and the successful login should transparently upgrade the
+// row to the now-configured pepper generation (mirroring needsRehash's cost
+// migration), so the next login onward is actually peppered.
+func TestPepperUpgradesUnpepperedRowOnLogin(t *testing.T) {
+	srv, st, secret := newTestServerWithPepper(t, testPepperKey, testPepperVersion)
+
+	admin, err := st.GetAdmin(t.Context())
+	if err != nil {
+		t.Fatalf("get admin: %v", err)
+	}
+	if admin.PepperVersion != 0 {
+		t.Fatalf("test setup: PepperVersion = %d, want 0 before the first login", admin.PepperVersion)
+	}
+
+	ctx := withPeerIP(t.Context(), "10.6.0.2")
+	if _, err := srv.Login(ctx, &affv1.AuthServiceLoginRequest{
+		Password: testPassword,
+		TotpCode: validCode(t, secret, time.Now()),
+	}); err != nil {
+		t.Fatalf("login against an unpeppered row with a pepper configured: %v", err)
+	}
+
+	admin, err = st.GetAdmin(t.Context())
+	if err != nil {
+		t.Fatalf("get admin after login: %v", err)
+	}
+	if admin.PepperVersion != testPepperVersion {
+		t.Errorf("PepperVersion after login = %d, want %d (upgraded)", admin.PepperVersion, testPepperVersion)
+	}
+
+	// And now that the row IS peppered, a second login (fresh TOTP step)
+	// must still succeed against the now-peppered hash.
+	ctx2 := withPeerIP(t.Context(), "10.6.0.3")
+	if _, err := srv.Login(ctx2, &affv1.AuthServiceLoginRequest{
+		Password: testPassword,
+		TotpCode: validCode(t, secret, time.Now().Add(30*time.Second)),
+	}); err != nil {
+		t.Fatalf("second login against the now-peppered row: %v", err)
+	}
+}
+
+// TestChangePasswordAppliesConfiguredPepper: ChangePassword with a pepper
+// configured must persist BOTH the peppered hash and its pepper_version —
+// SEC-07's "wire it into the hash... path" — and the new password must then
+// verify on login.
+func TestChangePasswordAppliesConfiguredPepper(t *testing.T) {
+	srv, st, secret := newTestServerWithPepper(t, testPepperKey, testPepperVersion)
+	now := time.Now()
+	ctx, fts := withTransportStream(withPeerIP(t.Context(), "10.6.0.4"), affv1.AuthService_Login_FullMethodName)
+	if _, err := srv.Login(ctx, &affv1.AuthServiceLoginRequest{Password: testPassword, TotpCode: validCode(t, secret, now)}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	token := fts.header.Get(SessionTokenHeader)[0]
+	authCtx, err := srv.authorize(ContextWithSessionToken(t.Context(), token), affv1.AuthService_ChangePassword_FullMethodName)
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	newPassword := "a brand new, sufficiently long passphrase indeed"
+	changeAt := now.Add(2 * time.Minute)
+	srv.now = func() time.Time { return changeAt }
+	if _, err := srv.ChangePassword(authCtx, &affv1.AuthServiceChangePasswordRequest{
+		CurrentPassword: testPassword,
+		TotpCode:        validCode(t, secret, changeAt),
+		NewPassword:     newPassword,
+	}); err != nil {
+		t.Fatalf("change password: %v", err)
+	}
+
+	admin, err := st.GetAdmin(t.Context())
+	if err != nil {
+		t.Fatalf("get admin: %v", err)
+	}
+	if admin.PepperVersion != testPepperVersion {
+		t.Errorf("PepperVersion after ChangePassword = %d, want %d", admin.PepperVersion, testPepperVersion)
+	}
+	// The stored hash must NOT verify against the plain (unpeppered) new
+	// password directly — proof the pepper was actually mixed in before
+	// hashing, not merely recorded in the version column.
+	if ok, _, _ := auth.Verify(newPassword, admin.PasswordHash); ok {
+		t.Error("new password verifies unpeppered against the stored hash — pepper was not actually applied")
+	}
+	if ok, _, _ := auth.Verify(pepperedPasswordInput(newPassword, testPepperKey), admin.PasswordHash); !ok {
+		t.Error("new password does not verify once peppered the same way ChangePassword should have peppered it")
+	}
+
+	loginCtx := withPeerIP(t.Context(), "10.6.0.5")
+	if _, err := srv.Login(loginCtx, &affv1.AuthServiceLoginRequest{
+		Password: newPassword,
+		TotpCode: validCode(t, secret, changeAt.Add(30*time.Second)),
+	}); err != nil {
+		t.Fatalf("login with the new peppered password: %v", err)
+	}
+}
+
+// TestWrongPepperFailsLogin: a row peppered under one key must NOT verify
+// against a server configured with a different pepper key (same version
+// number, different secret) — SEC-10's "does not permit verification"
+// property, exercised end to end through Login rather than only at the
+// auth.Pepper primitive level.
+func TestWrongPepperFailsLogin(t *testing.T) {
+	srv, st, secret := newTestServerWithPepper(t, testPepperKey, testPepperVersion)
+
+	// Upgrade the row to peppered (see TestPepperUpgradesUnpepperedRowOnLogin).
+	ctx := withPeerIP(t.Context(), "10.6.0.6")
+	if _, err := srv.Login(ctx, &affv1.AuthServiceLoginRequest{Password: testPassword, TotpCode: validCode(t, secret, time.Now())}); err != nil {
+		t.Fatalf("upgrading login: %v", err)
+	}
+	admin, err := st.GetAdmin(t.Context())
+	if err != nil || admin.PepperVersion == 0 {
+		t.Fatalf("test setup: row was not peppered (err=%v, version=%d)", err, admin.PepperVersion)
+	}
+
+	// Swap in a server configured with a different pepper KEY but the SAME
+	// version number — the case a version number alone cannot catch.
+	wrongSrv, err := NewAuthServer(st, testSecretKey, WithPasswordPepper(otherPepperKey, testPepperVersion))
+	if err != nil {
+		t.Fatalf("new auth server: %v", err)
+	}
+	ctx2 := withPeerIP(t.Context(), "10.6.0.7")
+	_, err = wrongSrv.Login(ctx2, &affv1.AuthServiceLoginRequest{
+		Password: testPassword,
+		TotpCode: validCode(t, secret, time.Now().Add(30*time.Second)),
+	})
+	if err == nil {
+		t.Fatal("login succeeded against a row peppered under a different key")
+	}
+	st2 := status.Convert(err)
+	if st2.Message() != "authentication failed" {
+		t.Errorf("wrong-pepper failure message = %q, want the generic login failure", st2.Message())
+	}
+}
+
+// --- Password reset tokens (SEC-31/33/34) -----------------------------------
+
+// TestPasswordResetRoundTrip covers the happy path end to end: a raw token
+// is issued, used once to set a new password, and that new password then
+// verifies on login.
+func TestPasswordResetRoundTrip(t *testing.T) {
+	srv, st, secret := newTestServer(t)
+
+	raw, err := srv.IssuePasswordResetToken(t.Context())
+	if err != nil {
+		t.Fatalf("issue reset token: %v", err)
+	}
+	if raw == "" {
+		t.Fatal("issued an empty raw token")
+	}
+
+	newPassword := "a completely different long passphrase here"
+	if err := srv.CompletePasswordReset(t.Context(), raw, newPassword); err != nil {
+		t.Fatalf("complete password reset: %v", err)
+	}
+
+	admin, err := st.GetAdmin(t.Context())
+	if err != nil {
+		t.Fatalf("get admin: %v", err)
+	}
+	if ok, _, _ := auth.Verify(newPassword, admin.PasswordHash); !ok {
+		t.Error("new password does not verify against the stored hash after reset")
+	}
+
+	ctx := withPeerIP(t.Context(), "10.7.0.1")
+	if _, err := srv.Login(ctx, &affv1.AuthServiceLoginRequest{
+		Password: newPassword,
+		TotpCode: validCode(t, secret, time.Now()),
+	}); err != nil {
+		t.Fatalf("login with the reset password: %v", err)
+	}
+}
+
+// TestPasswordResetIsSingleUse: a used token must be refused on a second
+// attempt, with the SAME generic failure as an invalid token (SEC-34,
+// PLAN.md §12.1's anti-oracle rule).
+func TestPasswordResetIsSingleUse(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+
+	raw, err := srv.IssuePasswordResetToken(t.Context())
+	if err != nil {
+		t.Fatalf("issue reset token: %v", err)
+	}
+	if err := srv.CompletePasswordReset(t.Context(), raw, "first new long enough passphrase"); err != nil {
+		t.Fatalf("first use: %v", err)
+	}
+
+	err = srv.CompletePasswordReset(t.Context(), raw, "second new long enough passphrase")
+	if err == nil {
+		t.Fatal("a used reset token was accepted a second time")
+	}
+	st2 := status.Convert(err)
+	if st2.Code() != codes.Unauthenticated || st2.Message() != "authentication failed" {
+		t.Errorf("used-token failure = %v, want the generic authentication-failed error", err)
+	}
+}
+
+// TestPasswordResetSingleUseUnderConcurrency is the load-bearing test SEC-34
+// demands: two goroutines racing CompletePasswordReset with the identical
+// raw token must have EXACTLY ONE succeed, and the database — not a
+// check-then-act race in this Go code — must be what decided it. Proven by:
+// exactly one of the two errors is nil, and the admin's final password_hash
+// matches exactly one of the two candidate new passwords (never a hash from
+// neither, and never both somehow "winning").
+func TestPasswordResetSingleUseUnderConcurrency(t *testing.T) {
+	srv, st, _ := newTestServer(t)
+
+	raw, err := srv.IssuePasswordResetToken(t.Context())
+	if err != nil {
+		t.Fatalf("issue reset token: %v", err)
+	}
+
+	const n = 8
+	passwords := make([]string, n)
+	for i := range passwords {
+		passwords[i] = fmt.Sprintf("racer number %d long enough passphrase indeed", i)
+	}
+
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = srv.CompletePasswordReset(t.Context(), raw, passwords[i])
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	winner := -1
+	for i, e := range errs {
+		if e == nil {
+			successes++
+			winner = i
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("got %d successful concurrent resets of the same token, want exactly 1 (errs=%v)", successes, errs)
+	}
+
+	admin, err := st.GetAdmin(t.Context())
+	if err != nil {
+		t.Fatalf("get admin: %v", err)
+	}
+	ok, _, verr := auth.Verify(passwords[winner], admin.PasswordHash)
+	if verr != nil || !ok {
+		t.Fatalf("stored password hash does not match the one goroutine that won the race (winner=%d)", winner)
+	}
+	for i, pw := range passwords {
+		if i == winner {
+			continue
+		}
+		if ok, _, _ := auth.Verify(pw, admin.PasswordHash); ok {
+			t.Fatalf("a losing goroutine's password (%d) also verifies against the stored hash", i)
+		}
+	}
+}
+
+// TestPasswordResetExpiredTokenRefused: a token past its TTL must be
+// refused with the same generic message a never-issued token gets — not a
+// distinguishable "expired" error, which would tell an attacker a token
+// existed at all (PLAN.md §4).
+func TestPasswordResetExpiredTokenRefused(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+
+	issueAt := time.Now()
+	srv.now = func() time.Time { return issueAt }
+	raw, err := srv.IssuePasswordResetToken(t.Context())
+	if err != nil {
+		t.Fatalf("issue reset token: %v", err)
+	}
+
+	// Past the 15-minute TTL internal/auth/reset.go's NewResetToken uses.
+	srv.now = func() time.Time { return issueAt.Add(16 * time.Minute) }
+	err = srv.CompletePasswordReset(t.Context(), raw, "a long enough new passphrase here")
+	if err == nil {
+		t.Fatal("an expired reset token was accepted")
+	}
+	st2 := status.Convert(err)
+	if st2.Code() != codes.Unauthenticated || st2.Message() != "authentication failed" {
+		t.Errorf("expired-token failure = %v, want the generic authentication-failed error", err)
+	}
+}
+
+// TestPasswordResetUnknownTokenRefused: a syntactically valid but never-
+// issued token gets the same generic failure as every other cause.
+func TestPasswordResetUnknownTokenRefused(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	err := srv.CompletePasswordReset(t.Context(), "not-a-real-issued-token-at-all", "a long enough new passphrase here")
+	if err == nil {
+		t.Fatal("an unrecognized reset token was accepted")
+	}
+	st2 := status.Convert(err)
+	if st2.Code() != codes.Unauthenticated || st2.Message() != "authentication failed" {
+		t.Errorf("unknown-token failure = %v, want the generic authentication-failed error", err)
+	}
+}
+
+// TestPasswordResetRevokesAllSessionsIncludingPreExisting: SEC-33's hard
+// rule. A session opened BEFORE the reset — under the old, possibly
+// compromised password — must be revoked by the reset, not merely sessions
+// opened after.
+func TestPasswordResetRevokesAllSessionsIncludingPreExisting(t *testing.T) {
+	srv, st, secret := newTestServer(t)
+	now := time.Now()
+	srv.now = func() time.Time { return now }
+
+	// A session opened under the OLD password, before any reset happens —
+	// this is the attacker's seat SEC-33 exists to close.
+	ctx, fts := withTransportStream(withPeerIP(t.Context(), "10.7.0.2"), affv1.AuthService_Login_FullMethodName)
+	if _, err := srv.Login(ctx, &affv1.AuthServiceLoginRequest{Password: testPassword, TotpCode: validCode(t, secret, now)}); err != nil {
+		t.Fatalf("pre-reset login: %v", err)
+	}
+	preResetToken := fts.header.Get(SessionTokenHeader)[0]
+	preResetHash := auth.HashToken(preResetToken)
+
+	sessBefore, err := st.GetSessionByTokenHash(t.Context(), preResetHash)
+	if err != nil {
+		t.Fatalf("looking up pre-reset session: %v", err)
+	}
+	if !sessBefore.RevokedAt.IsZero() {
+		t.Fatal("test setup: pre-reset session is already revoked")
+	}
+
+	raw, err := srv.IssuePasswordResetToken(t.Context())
+	if err != nil {
+		t.Fatalf("issue reset token: %v", err)
+	}
+	if err := srv.CompletePasswordReset(t.Context(), raw, "yet another sufficiently long new passphrase"); err != nil {
+		t.Fatalf("complete password reset: %v", err)
+	}
+
+	sessAfter, err := st.GetSessionByTokenHash(t.Context(), preResetHash)
+	if err != nil {
+		t.Fatalf("looking up pre-reset session after reset: %v", err)
+	}
+	if sessAfter.RevokedAt.IsZero() {
+		t.Fatal("a session opened BEFORE the reset survived it — SEC-33 requires it revoked")
+	}
+}
+
+// TestPasswordResetTokenNeverLogged: the raw token must never appear in any
+// auth_events row this whole flow writes — the same "no secret in any log"
+// property internal/sectest/sec50_no_secret_in_logs_test.go enforces for
+// session tokens.
+func TestPasswordResetTokenNeverLogged(t *testing.T) {
+	srv, st, _ := newTestServer(t)
+
+	raw, err := srv.IssuePasswordResetToken(t.Context())
+	if err != nil {
+		t.Fatalf("issue reset token: %v", err)
+	}
+	if err := srv.CompletePasswordReset(t.Context(), raw, "one more sufficiently long new passphrase"); err != nil {
+		t.Fatalf("complete password reset: %v", err)
+	}
+	// Also exercise the used-token failure path, which logs too.
+	_ = srv.CompletePasswordReset(t.Context(), raw, "reused-attempt long enough passphrase")
+
+	events, err := st.ListAuthEvents(t.Context(), 0)
+	if err != nil {
+		t.Fatalf("list auth events: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected at least one auth event from issuing/completing the reset")
+	}
+	for _, e := range events {
+		if strings.Contains(e.Detail, raw) {
+			t.Fatalf("raw reset token leaked into auth_events.detail: %q", e.Detail)
+		}
+		if strings.Contains(e.Kind, raw) {
+			t.Fatalf("raw reset token leaked into auth_events.kind: %q", e.Kind)
+		}
 	}
 }

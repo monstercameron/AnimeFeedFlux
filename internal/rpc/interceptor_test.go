@@ -7,11 +7,20 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/internal/auth"
 )
+
+// withSessionMetadata attaches token as incoming gRPC metadata under
+// SessionTokenHeader — the shape cmd/aff's plain-gRPC PerRPCCredentials
+// produces on the wire, as opposed to ContextWithSessionToken's explicit
+// override or a bridge.Session riding on the context.
+func withSessionMetadata(ctx context.Context, token string) context.Context {
+	return metadata.NewIncomingContext(ctx, metadata.Pairs(SessionTokenHeader, token))
+}
 
 // loginAndGetToken is the interceptor tests' shared setup: log in for real
 // (so a genuine session row exists) and return the raw token.
@@ -162,6 +171,106 @@ func TestIdleTimeoutRejected(t *testing.T) {
 	_, err := srv.authorize(ContextWithSessionToken(t.Context(), token), affv1.AuthService_Session_FullMethodName)
 	if err == nil {
 		t.Fatal("expected an idle-timed-out session to be rejected")
+	}
+	if status.Code(err) != codes.Unauthenticated {
+		t.Errorf("code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// TestSessionTokenFromMetadataAuthorizes covers the third source
+// sessionTokenFromContext checks: a token that arrives as incoming gRPC
+// metadata rather than an explicit ContextWithSessionToken override or a
+// bridge.Session — the path cmd/aff's plain-gRPC client relies on, since it
+// dials AdminAddr directly and never goes through internal/bridge.
+func TestSessionTokenFromMetadataAuthorizes(t *testing.T) {
+	srv, _, secret := newTestServer(t)
+	token := loginAndGetToken(t, srv, secret, time.Now(), "10.11.0.1")
+
+	ctx := withSessionMetadata(t.Context(), token)
+	if _, err := srv.authorize(ctx, affv1.AuthService_Session_FullMethodName); err != nil {
+		t.Fatalf("authorize with metadata-borne token: %v", err)
+	}
+}
+
+// TestSessionTokenFromMetadataRevokedRejected proves the metadata path gets
+// the exact same re-check-against-the-store treatment as every other source
+// — SEC-41 (revocation refused mid-connection) must hold here too, not just
+// for the explicit-key and bridge paths.
+func TestSessionTokenFromMetadataRevokedRejected(t *testing.T) {
+	srv, st, secret := newTestServer(t)
+	token := loginAndGetToken(t, srv, secret, time.Now(), "10.11.0.2")
+
+	sess, err := st.GetSessionByTokenHash(t.Context(), auth.HashToken(token))
+	if err != nil {
+		t.Fatalf("lookup session: %v", err)
+	}
+	id, err := srv.sessionIDByHash(t.Context(), sess.TokenHash)
+	if err != nil {
+		t.Fatalf("lookup session id: %v", err)
+	}
+	if err := st.RevokeSession(t.Context(), id); err != nil {
+		t.Fatalf("revoke session: %v", err)
+	}
+
+	ctx := withSessionMetadata(t.Context(), token)
+	_, err = srv.authorize(ctx, affv1.AuthService_Session_FullMethodName)
+	if err == nil {
+		t.Fatal("expected a revoked session arriving by metadata to be rejected")
+	}
+	if status.Code(err) != codes.Unauthenticated {
+		t.Errorf("code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// TestSessionTokenFromMetadataExpiredRejected is TestExpiredSessionRejected's
+// counterpart for the metadata path.
+func TestSessionTokenFromMetadataExpiredRejected(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	past := time.Now().Add(-1 * time.Hour)
+	rawToken, _, _, err := srv.mintSession(t.Context(), "10.11.0.3", "test-agent", past.Add(-13*time.Hour), past)
+	if err != nil {
+		t.Fatalf("mint session: %v", err)
+	}
+
+	ctx := withSessionMetadata(t.Context(), rawToken)
+	_, err = srv.authorize(ctx, affv1.AuthService_Session_FullMethodName)
+	if err == nil {
+		t.Fatal("expected an expired session arriving by metadata to be rejected")
+	}
+	if status.Code(err) != codes.Unauthenticated {
+		t.Errorf("code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// TestExplicitSessionTokenWinsOverMetadata pins the priority order
+// sessionTokenFromContext's doc comment commits to: an explicit
+// ContextWithSessionToken override must be used even when metadata carrying
+// a DIFFERENT (here, invalid) token is also present on the same context —
+// tests elsewhere in this package rely on the explicit key always winning.
+func TestExplicitSessionTokenWinsOverMetadata(t *testing.T) {
+	srv, _, secret := newTestServer(t)
+	goodToken := loginAndGetToken(t, srv, secret, time.Now(), "10.11.0.4")
+
+	ctx := withSessionMetadata(t.Context(), "not-a-real-token")
+	ctx = ContextWithSessionToken(ctx, goodToken)
+
+	if _, err := srv.authorize(ctx, affv1.AuthService_Session_FullMethodName); err != nil {
+		t.Fatalf("explicit context token should have won over bogus metadata: %v", err)
+	}
+}
+
+// TestNoSessionTokenAnywhereIsUnauthenticatedNotPanic covers the empty case
+// across all three sources at once: no explicit key, no bridge session, and
+// no incoming metadata at all (not even an empty MD) must return a plain
+// Unauthenticated error, never panic — metadata.FromIncomingContext on a
+// context that never called NewIncomingContext returns ok=false, which
+// sessionTokenFromContext must handle without a nil-map access.
+func TestNoSessionTokenAnywhereIsUnauthenticatedNotPanic(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+
+	_, err := srv.authorize(t.Context(), affv1.AuthService_Session_FullMethodName)
+	if err == nil {
+		t.Fatal("expected no session to be rejected")
 	}
 	if status.Code(err) != codes.Unauthenticated {
 		t.Errorf("code = %v, want Unauthenticated", status.Code(err))

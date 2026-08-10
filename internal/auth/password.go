@@ -156,6 +156,27 @@ func decode(encoded string) (variant string, version int, p Params, salt, key []
 		return "", 0, Params{}, nil, nil, errors.New("auth: hash params out of range")
 	}
 
+	// SEC-49: the range check above still permits m up to ~4 TiB — decode() would happily hand
+	// Verify a hash whose m/t/p forces a multi-gigabyte-or-worse argon2.IDKey allocation before any
+	// password comparison happens. Nothing legitimate ever needs that: every hash this process
+	// verifies was produced by Hash() in this same package, so the ceiling only ever has to cover
+	// DefaultParams() plus headroom for a future tuning bump, not an attacker's choice. Capping here,
+	// inside decode(), guarantees rejection happens before Verify ever calls argon2.IDKey — a
+	// corrupted DB row or tampered hash string can't force the allocation at all.
+	//
+	// The ceiling is computed from DefaultParams() rather than hardcoded, so raising DefaultParams()
+	// later (PLAN.md §4's rehash-on-login cost bump) raises the ceiling with it automatically. If it
+	// were hardcoded instead, a future tuning change could silently put the new default above the old
+	// ceiling and lock the admin out of their own account — the worst failure mode for a single-admin
+	// system with no account recovery path.
+	def := DefaultParams()
+	const paramCeilingMultiple = 4 // generous multiple of DefaultParams(): room to tune, not room to attack
+	if m > int64(def.Memory)*paramCeilingMultiple ||
+		t > int64(def.Time)*paramCeilingMultiple ||
+		threads > int64(def.Threads)*paramCeilingMultiple {
+		return "", 0, Params{}, nil, nil, errors.New("auth: hash params exceed sanity ceiling")
+	}
+
 	salt, err = base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
 		return "", 0, Params{}, nil, nil, fmt.Errorf("auth: malformed hash salt: %w", err)

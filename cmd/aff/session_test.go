@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/monstercameron/AnimeFeedFlux/internal/rpc"
 )
 
 func TestSaveSessionIsMode0600(t *testing.T) {
@@ -74,8 +76,8 @@ func TestSessionCredsAttachesToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRequestMetadata: %v", err)
 	}
-	if md[sessionMetadataKey] != "tok-1" {
-		t.Fatalf("metadata[%s] = %q, want %q", sessionMetadataKey, md[sessionMetadataKey], "tok-1")
+	if md[rpc.SessionTokenHeader] != "tok-1" {
+		t.Fatalf("metadata[%s] = %q, want %q", rpc.SessionTokenHeader, md[rpc.SessionTokenHeader], "tok-1")
 	}
 
 	empty := sessionCreds{}

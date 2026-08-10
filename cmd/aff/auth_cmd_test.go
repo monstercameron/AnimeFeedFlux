@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	"github.com/monstercameron/AnimeFeedFlux/internal/rpc"
 )
 
 func TestLoginSavesSessionFromResponseHeader(t *testing.T) {
@@ -25,7 +26,7 @@ func TestLoginSavesSessionFromResponseHeader(t *testing.T) {
 		if req.GetPassword() == "" || req.GetTotpCode() == "" {
 			t.Fatalf("expected non-empty password and totp code, got %q / %q", req.GetPassword(), req.GetTotpCode())
 		}
-		setHeader(opts, metadata.Pairs(sessionMetadataKey, "raw-session-token"))
+		setHeader(opts, metadata.Pairs(rpc.SessionTokenHeader, "raw-session-token"))
 		return &affv1.AuthServiceLoginResponse{
 			Session: &affv1.Session{
 				Id:        "sess-42",

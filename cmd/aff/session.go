@@ -8,24 +8,24 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/monstercameron/AnimeFeedFlux/internal/rpc"
 )
 
-// sessionMetadataKey is the gRPC metadata key the CLI attaches the opaque
-// session token under, both directions: the server (once B1/internal/rpc
-// exists) must echo the freshly minted token back on this same key in the
-// Login/RecoverWithCode response headers, since AuthServiceLoginResponse's
-// Session message deliberately omits the raw token from the message body
-// (proto/aff/v1/auth.proto: "the raw token only ever exists as the HttpOnly
-// cookie ... never echoed back in a message body"). That comment describes
-// the browser path; a direct gRPC client has no cookie jar at all, so the
-// equivalent for a non-browser caller is response metadata rather than a
-// Set-Cookie header — this constant is the one place that convention is
-// named, so the eventual server interceptor and this client agree on it.
-const sessionMetadataKey = "aff-session-token"
+// The CLI attaches its stored session token under rpc.SessionTokenHeader —
+// the same name internal/rpc.AuthServer.Login/RecoverWithCode set the raw
+// token under in the response header (see that constant's doc comment for
+// why it exists out-of-band from the message body), and the same name
+// internal/rpc's sessionTokenFromContext reads as its metadata fallback for
+// exactly this client. A direct gRPC client has no cookie jar, so metadata is
+// this transport's equivalent of the browser's Set-Cookie/Cookie pair; using
+// the server's own constant instead of a locally-defined one with the same
+// string value means there is one name for this on the wire, not two that
+// merely happen to agree today.
 
 // sessionData is what session.json holds. It is deliberately not the proto
 // Session message: this file additionally carries the raw token (never
-// present on the wire in a message body, see sessionMetadataKey) and the
+// present on the wire in a message body, see rpc.SessionTokenHeader) and the
 // server it was issued by, so a stale session file from a different server
 // is detectable rather than silently sent to the wrong admin listener.
 type sessionData struct {
@@ -113,7 +113,7 @@ func clearSession(path string) error {
 }
 
 // sessionCreds implements grpc/credentials.PerRPCCredentials, attaching the
-// stored session token to every outgoing RPC under sessionMetadataKey. An
+// stored session token to every outgoing RPC under rpc.SessionTokenHeader. An
 // empty token attaches nothing rather than an empty header, so an
 // unauthenticated call (e.g. `aff login` itself, before any session exists)
 // is indistinguishable on the wire from one that simply has no credential to
@@ -126,7 +126,7 @@ func (c sessionCreds) GetRequestMetadata(_ context.Context, _ ...string) (map[st
 	if c.token == "" {
 		return nil, nil
 	}
-	return map[string]string{sessionMetadataKey: c.token}, nil
+	return map[string]string{rpc.SessionTokenHeader: c.token}, nil
 }
 
 // RequireTransportSecurity is false: the admin listener is plaintext gRPC

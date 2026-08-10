@@ -16,32 +16,81 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/internal/auth"
+	"github.com/monstercameron/AnimeFeedFlux/internal/bridge"
 )
 
-// sessionTokenCtxKey is the context key the transport layer (the bridge)
-// writes the raw cookie value under before invoking the gRPC stack. It is
-// unexported so nothing outside this package can collide with it or forge a
-// value into it by accident; ContextWithSessionToken is the only legitimate
-// way to set it.
+// sessionTokenCtxKey is an explicit-override context key: something set it
+// deliberately via ContextWithSessionToken, rather than it having arrived by
+// riding on a bridge connection. It is unexported so nothing outside this
+// package can collide with it or forge a value into it by accident;
+// ContextWithSessionToken is the only legitimate way to set it.
 type sessionTokenCtxKey struct{}
 
 // ContextWithSessionToken attaches the raw session token (the cookie value,
-// not its hash) to ctx. The bridge calls this once per request/stream after
-// reading the __Host-aff_session cookie, and everything downstream —
-// authorize, and therefore every RPC handler — reads it back out through
-// sessionTokenFromContext. The interceptor hashes it before ever touching
-// storage or logs (PLAN.md §4: only the hash is ever persisted or compared).
+// not its hash) to ctx, overriding whatever sessionTokenFromContext would
+// otherwise find. This exists for two callers, both of which bypass the
+// bridge on purpose: this package's own unit tests, which call
+// srv.authorize directly against a hand-built context instead of standing up
+// a real WebSocket connection; and any future transport that isn't
+// internal/bridge (e.g. cmd/aff's plain-gRPC session-metadata path) that
+// needs the same authorize/interceptor logic without a bridge.Session to
+// draw from. Production bridge connections do NOT need this — see
+// sessionTokenFromContext.
 func ContextWithSessionToken(ctx context.Context, rawToken string) context.Context {
 	return context.WithValue(ctx, sessionTokenCtxKey{}, rawToken)
 }
 
+// sessionTokenFromContext resolves the raw session token for this call, in a
+// fixed priority order:
+//
+//  1. An explicit ContextWithSessionToken override. This must stay first:
+//     this package's own unit tests build a context by hand and rely on it
+//     winning over whatever (if anything) else is attached, and a caller that
+//     went out of its way to set this key is asserting a specific token on
+//     purpose — a value arriving incidentally by transport must never
+//     override a value arriving deliberately by API.
+//  2. bridge.SessionFromContext(ctx).Token — the value internal/bridge's
+//     ServeHTTP attaches to every request on a validated WebSocket connection
+//     UNCONDITIONALLY (see bridge.Session.Token's doc comment). That fallback
+//     is what closes the gap this package's history records: until it
+//     existed, nothing in production ever populated the explicit key, so
+//     every RPC over a real bridge connection was Unauthenticated regardless
+//     of how valid the underlying session was. No composition root has to
+//     remember to call ContextWithSessionToken anymore; a bridge-backed
+//     connection supplies the token by construction.
+//  3. Incoming gRPC metadata under SessionTokenHeader — the path
+//     ContextWithSessionToken's own doc comment anticipates for "any future
+//     transport that isn't internal/bridge (e.g. cmd/aff's plain-gRPC
+//     session-metadata path)". cmd/aff dials AdminAddr directly with
+//     grpc.NewClient, bypassing the bridge entirely, so neither of the first
+//     two sources is ever populated for it; this is the only source that
+//     authenticates it. It comes last, after the bridge check, so a
+//     bridge-backed call can never be re-authenticated by attacker-supplied
+//     metadata riding along on the same connection — only a connection with
+//     no bridge session at all falls through this far.
+//
+// Whichever source wins, the token is treated identically from here on:
+// authorize always hashes it and re-checks the session against the store, so
+// arriving by metadata carries no less scrutiny (and no shortcut) than
+// arriving by cookie.
 func sessionTokenFromContext(ctx context.Context) (string, bool) {
-	v, _ := ctx.Value(sessionTokenCtxKey{}).(string)
-	return v, v != ""
+	if v, _ := ctx.Value(sessionTokenCtxKey{}).(string); v != "" {
+		return v, true
+	}
+	if sess, ok := bridge.SessionFromContext(ctx); ok && sess.Token != "" {
+		return sess.Token, true
+	}
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if v := md.Get(SessionTokenHeader); len(v) > 0 && v[0] != "" {
+			return v[0], true
+		}
+	}
+	return "", false
 }
 
 // callerSessionCtxKey carries the already-validated session down to the RPC

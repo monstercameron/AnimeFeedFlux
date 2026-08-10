@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -223,5 +226,151 @@ func TestNormalizeMakesEquivalentFormsVerify(t *testing.T) {
 func TestHashRejectsWeakPassword(t *testing.T) {
 	if _, err := Hash("short", DefaultParams()); err == nil {
 		t.Fatal("Hash: expected error for weak password, got nil")
+	}
+}
+
+// syntheticPHC builds a structurally valid argon2id PHC string with an attacker-chosen m/t/p, so
+// tests can exercise decode()'s sanity ceiling without going through Hash() (which only ever
+// produces params this package chose itself).
+func syntheticPHC(t *testing.T, m, tCost, p int64) string {
+	t.Helper()
+	salt := make([]byte, 16)
+	key := make([]byte, 32)
+	if _, err := rand.Read(salt); err != nil {
+		t.Fatalf("generating salt: %v", err)
+	}
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
+		m, tCost, p,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(key),
+	)
+}
+
+// TestVerifyRejectsAbsurdParamsBeforeComputing is the SEC-49 fix under test: an argon2id hash
+// string carrying an m/t/p far above DefaultParams() must be rejected by decode() before Verify
+// ever calls argon2.IDKey, not merely rejected "eventually" after the allocation and passes have
+// already run. The elapsed-time assertion is a proxy for that ordering — a real argon2.IDKey call
+// at these parameters would take from tens of milliseconds (for the p case, which is otherwise
+// cheap) to hundreds of milliseconds or worse (for the m and t cases), so "well under 50ms"
+// distinguishes "rejected on sight" from "computed, then rejected."
+func TestVerifyRejectsAbsurdParamsBeforeComputing(t *testing.T) {
+	def := DefaultParams()
+	cases := map[string]string{
+		// 32x DefaultParams' 64 MiB: a real argon2.IDKey call at this memory would itself take
+		// long enough to allocate and touch ~2 GiB that a 50ms budget could never pass unless
+		// decode() rejected it first.
+		"absurd memory": syntheticPHC(t, int64(def.Memory)*32, 1, 1),
+		// 32x DefaultParams' 3 passes over a modest 8 MiB region — cheap enough in raw memory
+		// terms that only the pass count, not allocation size, would blow the time budget.
+		"absurd time": syntheticPHC(t, 8*1024, int64(def.Time)*32, 1),
+		// Comfortably under the structural threads<=255 check but far past the ceiling.
+		"absurd threads": syntheticPHC(t, 8*1024, 1, 200),
+	}
+
+	for name, hash := range cases {
+		t.Run(name, func(t *testing.T) {
+			start := time.Now()
+			ok, needsRehash, err := Verify(testPassword, hash)
+			elapsed := time.Since(start)
+
+			if err == nil {
+				t.Fatalf("Verify: expected rejection for %s hash, got ok=%v needsRehash=%v err=nil", name, ok, needsRehash)
+			}
+			if ok {
+				t.Fatalf("Verify: %s hash reported a match", name)
+			}
+			// Generous bound: a genuine "reject before computing" implementation returns in well
+			// under a millisecond (integer comparisons on already-parsed fields). 50ms leaves wide
+			// scheduler-jitter margin while still being far below what any of these params would
+			// cost argon2.IDKey to actually run.
+			if elapsed > 50*time.Millisecond {
+				t.Errorf("Verify: rejecting %s hash took %v, want <50ms — suggests argon2.IDKey ran before rejection", name, elapsed)
+			}
+		})
+	}
+}
+
+// TestVerifyAcceptsParamsAtCeiling checks the ceiling doesn't overshoot and reject legitimate
+// params: each dimension is pushed to exactly paramCeilingMultiple*DefaultParams() (with the other
+// two held cheap, so the test stays fast) and must still verify successfully. This guards against
+// an off-by-one that would silently lock out a real hash sitting right at the boundary.
+func TestVerifyAcceptsParamsAtCeiling(t *testing.T) {
+	const ceilingMultiple = 4 // must match paramCeilingMultiple in decode()
+	def := DefaultParams()
+
+	cases := map[string]Params{
+		"memory at ceiling":  {Time: 1, Memory: def.Memory * ceilingMultiple, Threads: 1, SaltLen: 16, KeyLen: 32},
+		"time at ceiling":    {Time: def.Time * ceilingMultiple, Memory: 8 * 1024, Threads: 1, SaltLen: 16, KeyLen: 32},
+		"threads at ceiling": {Time: 1, Memory: 8 * 1024, Threads: def.Threads * ceilingMultiple, SaltLen: 16, KeyLen: 32},
+	}
+
+	for name, p := range cases {
+		t.Run(name, func(t *testing.T) {
+			encoded, err := Hash(testPassword, p)
+			if err != nil {
+				t.Fatalf("Hash: %v", err)
+			}
+			ok, _, err := Verify(testPassword, encoded)
+			if err != nil {
+				t.Fatalf("Verify: unexpected rejection at exactly the ceiling (%s): %v", name, err)
+			}
+			if !ok {
+				t.Fatalf("Verify: correct password against %s hash should match", name)
+			}
+		})
+	}
+}
+
+// TestVerifyAcceptsDefaultParams is a focused restatement of TestHashVerifyRoundTrip's coverage,
+// named explicitly for SEC-49: the ceiling fix must never reject the one set of params every
+// deployed hash was actually produced with.
+func TestVerifyAcceptsDefaultParams(t *testing.T) {
+	encoded, err := Hash(testPassword, DefaultParams())
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	ok, _, err := Verify(testPassword, encoded)
+	if err != nil {
+		t.Fatalf("Verify: unexpected error for default-params hash: %v", err)
+	}
+	if !ok {
+		t.Fatal("Verify: correct password against default-params hash should match")
+	}
+}
+
+// TestDecodeRejectsTruncatedAndMalformedWithoutPanic extends TestVerifyRejectsMalformedEncoding
+// with the truncation and structural-edge cases SEC-49 called out, confirming the sanity-ceiling
+// change didn't disturb decode()'s existing "never panic on garbage" guarantee.
+func TestDecodeRejectsTruncatedAndMalformedWithoutPanic(t *testing.T) {
+	cases := map[string]string{
+		"empty":                   "",
+		"truncated after variant": "$argon2id",
+		"truncated after version": "$argon2id$v=19",
+		"truncated after params":  "$argon2id$v=19$m=65536,t=3,p=1",
+		"missing leading $":       "argon2id$v=19$m=65536,t=3,p=1$c2FsdA$a2V5",
+		"wrong field count":       "$argon2id$v=19$m=65536,t=3,p=1$salt$key$extra",
+		"missing params field":    "$argon2id$v=19$$c2FsdA$a2V5",
+		"NUL bytes embedded":      "$argon2id$v=19$m=65536,t=3,p=1\x00$c2FsdA$a2V5",
+		"only dollar signs":       "$$$$$",
+	}
+
+	for name, hash := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("Verify panicked on %q: %v", hash, r)
+				}
+			}()
+			ok, needsRehash, err := Verify(testPassword, hash)
+			if err == nil {
+				t.Errorf("Verify(%q): expected error, got ok=%v needsRehash=%v err=nil", hash, ok, needsRehash)
+			}
+			if ok {
+				t.Errorf("Verify(%q): malformed hash reported a match", hash)
+			}
+		})
 	}
 }

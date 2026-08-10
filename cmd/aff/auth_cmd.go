@@ -8,6 +8,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	"github.com/monstercameron/AnimeFeedFlux/internal/rpc"
 )
 
 // cmdLogin implements `aff login`: prompt for password (no echo) then TOTP,
@@ -57,7 +58,7 @@ func (a *app) cmdLogin(args []string) int {
 		return exitFail
 	}
 
-	token := firstMetadataValue(header, sessionMetadataKey)
+	token := firstMetadataValue(header, rpc.SessionTokenHeader)
 	if token == "" {
 		fmt.Fprintln(a.Stderr, "aff login: server accepted the login but returned no session token")
 		return exitFail

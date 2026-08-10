@@ -74,6 +74,18 @@ type Config struct {
 	BackupDir           string
 	SlackWebhookURL     string
 
+	// PasswordPepper is the optional second secret PLAN.md §4 describes
+	// (HMAC-SHA256 mixed into the admin credential before it is hashed).
+	// Empty means "no pepper configured" — the default, and the case that
+	// must keep every deployment working exactly as it does today.
+	// PasswordPepperVersion travels with it so a stolen database's
+	// pepper_version column can be told apart from "hashed under a
+	// different pepper generation" during rotation (SEC-08). It is
+	// meaningless, and validated as unset, whenever PasswordPepper is
+	// empty.
+	PasswordPepper        Secret
+	PasswordPepperVersion int
+
 	// Test-only. Gates paid provider tests (RULE-1).
 	LiveLLM bool
 }
@@ -124,6 +136,9 @@ func Load(env Getenv) (*Config, error) {
 
 	c.PublicBaseURL = v.baseURL("AFF_PUBLIC_BASE_URL")
 	c.AllowedOrigins = v.originList("AFF_ALLOWED_ORIGINS")
+
+	c.PasswordPepper = Secret(strings.TrimSpace(env("AFF_PASSWORD_PEPPER")))
+	c.PasswordPepperVersion = v.pepperVersion("AFF_PASSWORD_PEPPER_VERSION", c.PasswordPepper != "")
 
 	if err := v.err(); err != nil {
 		return nil, err
@@ -252,6 +267,40 @@ func (v *validator) baseURL(name string) *url.URL {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u
+}
+
+// pepperVersion validates AFF_PASSWORD_PEPPER_VERSION against whether a
+// pepper is actually configured. A pepper without a recorded generation
+// makes rotation impossible (PLAN.md §4: "a pepper_version column from day
+// one... without it rotation is impossible, not merely hard"), so a
+// configured pepper REQUIRES a positive version; conversely a version set
+// with no pepper is very likely a leftover from removing
+// AFF_PASSWORD_PEPPER and is flagged rather than silently ignored, since a
+// deployment believing it still peppers new hashes when it does not is
+// exactly the silent-regression PLAN.md §4 warns against.
+func (v *validator) pepperVersion(name string, pepperConfigured bool) int {
+	raw := strings.TrimSpace(v.env(name))
+	if raw == "" {
+		if pepperConfigured {
+			v.bad(name, "must be a positive integer when AFF_PASSWORD_PEPPER is set, so the generation a credential was hashed under can be recorded for rotation")
+			return 0
+		}
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		v.bad(name, fmt.Sprintf("must be an integer (got %q)", raw))
+		return 0
+	}
+	if n <= 0 {
+		v.bad(name, fmt.Sprintf("must be a positive integer (got %d)", n))
+		return 0
+	}
+	if !pepperConfigured {
+		v.bad(name, "is set but AFF_PASSWORD_PEPPER is not; a pepper version with no pepper means nothing and is likely a leftover from removing the pepper")
+		return 0
+	}
+	return n
 }
 
 func (v *validator) originList(name string) []string {

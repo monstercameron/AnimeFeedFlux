@@ -41,6 +41,15 @@ var ErrTOTPReplay = errors.New("store: totp step already used")
 // this is an error rather than a silent no-op success.
 var ErrRecoveryCodeUsed = errors.New("store: recovery code already used")
 
+// ErrResetTokenInvalid is returned by CompletePasswordReset when tokenHash
+// does not identify a row that is simultaneously unused and unexpired as of
+// the given time. PLAN.md §4 requires a used token and an expired token to
+// be refused with the SAME generic message an invalid token gets (SEC-34) —
+// this one sentinel covers "never existed", "already used" and "expired"
+// on purpose, so a caller cannot accidentally build three different
+// user-facing messages out of three different errors.
+var ErrResetTokenInvalid = errors.New("store: password reset token invalid, used, or expired")
+
 // isConstraintErr reports whether err came from a SQLite constraint
 // violation (UNIQUE, PRIMARY KEY, CHECK, ...). modernc.org/sqlite's error
 // text names the failing constraint kind directly (e.g. "UNIQUE constraint
@@ -64,6 +73,14 @@ type Admin struct {
 	TOTPSecretEnc     []byte
 	CreatedAt         time.Time
 	PasswordChangedAt time.Time // zero value means "never changed since creation"
+	// PepperVersion records which pepper generation (if any) PasswordHash was
+	// derived under (migrations/0004_auth_hardening.sql). 0 means "no pepper
+	// applied" — true for every row written before peppering existed, and the
+	// only value that can be correct for those rows. A verifier MUST use this
+	// to decide whether, and under which key, to pepper the login candidate —
+	// never the server's current pepper configuration alone, or a row hashed
+	// under an older (or no) pepper generation would never verify again.
+	PepperVersion int
 }
 
 // InitAdmin creates the one and only admin row. It refuses if a row already
@@ -92,9 +109,9 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 		passwordChangedAt sql.NullString
 	)
 	err := s.writer.QueryRowContext(ctx,
-		`SELECT id, password_hash, kdf_params, totp_secret_enc, created_at, password_changed_at
+		`SELECT id, password_hash, kdf_params, totp_secret_enc, created_at, password_changed_at, pepper_version
 		 FROM admin WHERE id = 1`,
-	).Scan(&a.ID, &a.PasswordHash, &a.KDFParams, &totpSecretEnc, &createdAt, &passwordChangedAt)
+	).Scan(&a.ID, &a.PasswordHash, &a.KDFParams, &totpSecretEnc, &createdAt, &passwordChangedAt, &a.PepperVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Admin{}, fmt.Errorf("store: admin: %w", ErrNotFound)
 	}
@@ -115,10 +132,20 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 // password_changed_at — the readback §12.5's Security pane shows and the
 // signal a "rehash on next login because params got stronger" migration
 // path (§4) depends on to know it actually happened.
+//
+// It also resets pepper_version to 0. That is deliberate, not incidental:
+// every remaining caller of this exact function (cmd/aff's `admin init` /
+// `admin reset` and internal/e2e's InitAdmin, both out of scope for this
+// change) writes a plain, unpeppered hash — internal/rpc/auth.go's
+// pepper-aware call sites use UpdatePasswordAndPepper below instead. Leaving
+// pepper_version untouched here would let a break-glass CLI reset silently
+// desync it from what was actually stored (still claiming "peppered" for a
+// hash that is not), which is worse than resetting it: a verifier trusts
+// this column to decide whether, and how, to pepper the login candidate.
 func (s *Store) UpdatePassword(ctx context.Context, hash, kdfParams string) error {
 	now := formatTime(time.Now())
 	res, err := s.writer.ExecContext(ctx,
-		`UPDATE admin SET password_hash = ?, kdf_params = ?, password_changed_at = ? WHERE id = 1`,
+		`UPDATE admin SET password_hash = ?, kdf_params = ?, password_changed_at = ?, pepper_version = 0 WHERE id = 1`,
 		hash, kdfParams, now)
 	if err != nil {
 		return fmt.Errorf("store: updating password: %w", err)
@@ -129,6 +156,32 @@ func (s *Store) UpdatePassword(ctx context.Context, hash, kdfParams string) erro
 	}
 	if n == 0 {
 		return fmt.Errorf("store: updating password: %w", ErrNotFound)
+	}
+	return nil
+}
+
+// UpdatePasswordAndPepper is UpdatePassword's pepper-aware sibling: it does
+// the same write plus records which pepper generation (if any) hash was
+// derived under, so a later verifier (GetAdmin + Admin.PepperVersion) knows
+// whether — and under which key — to pepper the login candidate before
+// comparing (PLAN.md §4: "a pepper_version column from day one so rotation
+// is possible at all"). pepperVersion 0 means "hashed without a pepper",
+// matching UpdatePassword's own behavior exactly when the caller has no
+// pepper configured.
+func (s *Store) UpdatePasswordAndPepper(ctx context.Context, hash, kdfParams string, pepperVersion int) error {
+	now := formatTime(time.Now())
+	res, err := s.writer.ExecContext(ctx,
+		`UPDATE admin SET password_hash = ?, kdf_params = ?, password_changed_at = ?, pepper_version = ? WHERE id = 1`,
+		hash, kdfParams, now, pepperVersion)
+	if err != nil {
+		return fmt.Errorf("store: updating password and pepper version: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: rows affected updating password and pepper version: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("store: updating password and pepper version: %w", ErrNotFound)
 	}
 	return nil
 }
@@ -439,6 +492,113 @@ func (s *Store) ListSessions(ctx context.Context) ([]auth.Session, error) {
 		return nil, fmt.Errorf("store: iterating sessions: %w", err)
 	}
 	return out, nil
+}
+
+// --- password reset tokens --------------------------------------------------
+
+// CreatePasswordResetToken persists a newly issued reset token by its hash
+// and expiry only — the raw token itself never reaches this package (see
+// internal/auth/reset.go's NewResetToken: raw goes to the caller exactly
+// once, hash is what gets stored), mirroring sessions' "only the hash is a
+// row" construction.
+func (s *Store) CreatePasswordResetToken(ctx context.Context, tokenHash string, expiresAt time.Time) error {
+	if _, err := s.writer.ExecContext(ctx,
+		`INSERT INTO password_reset_tokens (token_hash, expires_at) VALUES (?, ?)`,
+		tokenHash, formatTime(expiresAt),
+	); err != nil {
+		return fmt.Errorf("store: creating password reset token: %w", err)
+	}
+	return nil
+}
+
+// ActiveResetTokenHashes returns the token_hash of every reset token that is
+// still unused and unexpired as of now. There is no exported way to hash a
+// raw token from outside internal/auth (hashResetToken is unexported by
+// design — see reset.go), so a caller holding only an incoming raw token
+// looks it up the same way internal/rpc/auth.go already resolves a recovery
+// code: fetch the small set of live candidates and run
+// auth.VerifyResetToken(raw, candidate) against each, in constant time per
+// candidate, rather than reversing a hash. On a single-admin system this set
+// is realistically zero or one rows.
+func (s *Store) ActiveResetTokenHashes(ctx context.Context, now time.Time) ([]string, error) {
+	rows, err := s.writer.QueryContext(ctx,
+		`SELECT token_hash FROM password_reset_tokens WHERE used_at IS NULL AND expires_at > ? ORDER BY id ASC`,
+		formatTime(now))
+	if err != nil {
+		return nil, fmt.Errorf("store: listing active password reset tokens: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, fmt.Errorf("store: scanning password reset token: %w", err)
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterating password reset tokens: %w", err)
+	}
+	return out, nil
+}
+
+// CompletePasswordReset is the entire "using a reset token" operation
+// (PLAN.md §4, §12.2; internal/auth/reset.go's doc comment on VerifyResetToken,
+// which documents this exact obligation for "the caller completing a
+// reset"), done as ONE transaction: mark tokenHash used, write the new
+// password hash (and its pepper generation), and revoke every existing
+// session. Skipping any one of the three leaves a real gap — see reset.go's
+// comment for which gap each omission opens.
+//
+// Single-use under concurrency is enforced by the UPDATE's
+// `WHERE used_at IS NULL AND expires_at > ?` clause, not by a SELECT this
+// function runs first: SQLite serializes writers, so of two callers racing
+// the same tokenHash, exactly one UPDATE affects a row. The loser's
+// RowsAffected is 0, this function returns ErrResetTokenInvalid, and the
+// whole transaction (including the password write and session revocation
+// that would otherwise have followed) rolls back — a losing racer never
+// partially applies a reset. That is the database deciding the race, not a
+// check-then-act sequence in this Go code.
+func (s *Store) CompletePasswordReset(ctx context.Context, tokenHash string, now time.Time, newHash, kdfParams string, pepperVersion int) error {
+	tx, err := s.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin completing password reset: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	nowStr := formatTime(now)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE password_reset_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`,
+		nowStr, tokenHash, nowStr)
+	if err != nil {
+		return fmt.Errorf("store: consuming password reset token: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: rows affected consuming password reset token: %w", err)
+	}
+	if n == 0 {
+		return ErrResetTokenInvalid
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE admin SET password_hash = ?, kdf_params = ?, password_changed_at = ?, pepper_version = ? WHERE id = 1`,
+		newHash, kdfParams, nowStr, pepperVersion,
+	); err != nil {
+		return fmt.Errorf("store: writing new password during reset: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE revoked_at IS NULL`, nowStr,
+	); err != nil {
+		return fmt.Errorf("store: revoking sessions during reset: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: committing password reset: %w", err)
+	}
+	return nil
 }
 
 // PurgeExpiredSessions deletes sessions whose absolute lifetime has passed
