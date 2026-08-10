@@ -89,7 +89,13 @@ outside this repository. Refactors and internal cleanups do not belong there; a 
 published feed does. Reasoning belongs in the devlog, not here — a changelog carrying rationale
 becomes unreadable.
 
-The two files are **not interchangeable**, and the distinction is `CONTRIBUTING.md`'s
+**Commit messages have a convention**, and `git log` is the primary record of why this project looks
+the way it does. Imperative subject under 72 characters, **no `type:` prefix** (those are for
+dependabot only), a body explaining *why* and what was wrong before, and stable identifiers so the
+log stays greppable. Written down in `CONTRIBUTING.md` → "Commit messages", with `.gitmessage` as an
+opt-in template.
+
+The changelog and devlog are **not interchangeable**, and the distinction is `CONTRIBUTING.md`'s
 no-duplicated-facts rule applied to history: the changelog is *what*, the devlog is *why*. Neither
 is a source of requirements. If either disagrees with `PLAN.md`, the plan is right and the record is
 history.

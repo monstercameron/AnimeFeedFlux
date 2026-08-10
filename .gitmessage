@@ -1,0 +1,26 @@
+# <imperative verb> <what>[: <elaboration>][; <second concern>]
+# Aim for <=72 chars. Sentence case, no trailing period, no type: prefix.
+# ----------------------------------------------------------------------
+#
+# Why this change. Not what the diff already says.
+#
+# If this is a fix or a reversal: what was wrong before, and why the new
+# version is right. The reader six months from now is deciding whether it
+# is safe to change it back.
+#
+# Reference stable identifiers so the history stays greppable:
+#   A4-12  BF-11  J10  RULE-4  §9.6
+#
+# If you seriously considered another approach, say why it lost. A commit
+# that records the rejected alternative prevents someone re-taking it.
+#
+# Wrap at 72-80 columns. Plain ASCII in the body.
+# ----------------------------------------------------------------------
+#
+# Before committing:
+#   [ ] TODOS.md ticked, or task added/split/[-] with a reason
+#   [ ] CHANGELOG.md if observable behaviour, a format, or a default changed
+#   [ ] DEVLOG.md if a decision was reversed or an assumption overturned
+#   [ ] PLAN.md corrected in THIS change if the implementation contradicts it
+#
+# Never amend or reset a pushed commit. Never --no-verify.

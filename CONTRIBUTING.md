@@ -86,12 +86,89 @@ therefore stated plainly:
 - Coverage is a **ratchet, not a target** — it may not go down. Chasing a percentage produces tests
   written to touch lines.
 
-## Commits and pull requests
+## Commit messages
 
-- Explain **why**, not what. The diff already says what.
-- Reference the task ID and the plan section.
-- If the change corrects the plan, say what was wrong with it and why the new version is right.
-- Do not skip hooks or bypass signing.
+The convention here is descriptive of what the history already does, not imported from elsewhere.
+`git log` is the primary record of *why* this project looks the way it does, and it is read far more
+often than it is written.
+
+### Subject
+
+```
+<imperative verb> <what>[: <elaboration>][; <second concern>]
+```
+
+- **Imperative mood, sentence case, no trailing period.** "Add DEVLOG.md", not "Added" or "Adds".
+- **Aim for ≤72 characters.** The existing history runs 29–72.
+- **No `type:` prefixes.** This repository does not use Conventional Commits, and a hand-written
+  `feat:` here is inconsistent with every commit around it. The one exception is **bot commits** —
+  dependabot is configured to prefix `deps`, `deps(ci)`, `deps(docker)`, which is how automated
+  noise stays filterable and distinguishable from decisions a human made.
+- Use `:` to elaborate on one concern, `;` to separate genuinely distinct ones. If you need more than
+  two semicolons, the commit is doing too much.
+- Name the artefact when the change is scoped to one: "Add PLAN.md section 14: multi-feed operation".
+
+### Body
+
+Wrap at 72–80 columns. Blank line after the subject. Then:
+
+- **Explain why, not what.** The diff already says what. A body that restates the diff in prose is
+  worse than no body, because it costs a reader time to discover it taught them nothing.
+- **State what was wrong before**, if this is a fix or a reversal. "X contradicted Y" beats "improve
+  X". The reader six months from now is trying to work out whether it is safe to change it back.
+- **Reference stable identifiers** — `A4-12`, `§9.6`, `J10`, `BF-11`, `RULE-4`. They are greppable.
+- **Record rejected alternatives** when you considered one seriously. A commit that says why the
+  obvious approach was not taken prevents someone re-taking it.
+- Prose paragraphs for reasoning; bullets for enumerating changes. Do not use bullets for everything —
+  a wall of bullets loses the argument that connects them.
+- Plain ASCII in the body. Some tooling on this box mangles anything else.
+
+### Trailers
+
+- `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>` on commits Claude authored.
+
+### Worked example
+
+The commit that introduced this guide:
+
+```
+Document the commit message convention in CONTRIBUTING.md
+
+The convention was consistent across twelve commits but written down
+nowhere, so it survived only as long as someone kept reading the log
+before writing. This makes it explicit and derives it from the existing
+history rather than importing one: imperative subjects under 72 chars,
+no type: prefixes for humans, why-not-what bodies, stable identifiers.
+
+Prefixes are kept for dependabot only. Mixing "deps(ci): bump x" with
+bare human subjects is not inconsistency, it is the thing that makes
+bot noise filterable.
+
+Adds .gitmessage as a template. It is not wired up automatically -
+git config is per-clone and not tracked - so CONTRIBUTING names the
+one command.
+```
+
+### Template
+
+[`.gitmessage`](.gitmessage) carries the above as commented prompts. It is **not** wired up
+automatically — `git config` is per-clone and not tracked — so opt in once per clone:
+
+```bash
+git config commit.template .gitmessage
+```
+
+### Discipline
+
+- **Never amend or reset a pushed commit.** Add a new one.
+- Commit or push only when asked. If you are on the default branch, branch first.
+- Do not skip hooks (`--no-verify`) or bypass signing.
+- Stage deliberately — `git commit -- <paths>` beats `git add -A` when the tree has unrelated work.
+
+## Pull requests
+
+The template asks for the same things: why, the task ID, the plan section, what you actually ran,
+and which records you updated. See [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md).
 
 ## Keeping the devlog
 
