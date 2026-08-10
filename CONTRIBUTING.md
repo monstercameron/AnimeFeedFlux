@@ -134,14 +134,31 @@ That sets `core.hooksPath` to [`.githooks/`](.githooks) and the commit template,
 now active. **Verify it took** (`git config core.hooksPath`) — a hook everyone believes is running
 and isn't is worse than no hook at all.
 
-`pre-commit` refuses staged secrets and databases, then — only when Go files are staged — runs
-`go build`, `go vet`, and `go test -short ./...`. It deliberately does **not** run the race detector,
-the feed validator, or the soak; those are CI's job (§17.2), and putting them here would make the
-hook slow enough that people bypass it. While the repository has no `go.mod`, the Go checks skip
-themselves.
+`pre-commit` refuses staged secrets and databases, then — only when Go files are staged — runs, in
+order: `gofmt -l` on the staged files, `go build`, `go vet`, `staticcheck` if installed, and
+`go test -short ./...`. Format first, because it is the cheapest and the most likely to fail.
+
+Two deliberate choices:
+
+- **Formatting is checked, never auto-applied.** A hook that rewrites files after they were staged
+  commits something you did not read, and the diff you reviewed is not the diff that lands. It tells
+  you the `gofmt -w` command to run.
+- **`staticcheck` warns and continues if it is not installed**, because a hook that hard-fails on a
+  tool someone has not got is a hook they turn off. CI is the authoritative lint gate (§17.2). If it
+  *is* installed, it must pass.
+
+It deliberately does **not** run the race detector, the feed validator, or the soak; those are CI's
+job, and putting them here would make the hook slow enough that people bypass it. While the
+repository has no `go.mod`, the Go checks skip themselves.
 
 `AFF_SKIP_HOOKS=1` exists for genuine emergencies. **A failing test is not an emergency** — it is the
 hook working.
+
+The hooks are themselves tested. `sh scripts/test-hooks.sh` builds a throwaway repository and
+exercises 16 cases across both hooks — secrets blocked, documentation mentioning a key variable
+allowed, broken Go blocked, docs-only commits skipping the Go checks, and every branch of the
+promotion guard. **Run it after touching `.githooks/`.** Hooks are code, and the failure mode of an
+untested one is a guard everybody believes is running that has quietly stopped catching anything.
 
 ## Commit messages
 

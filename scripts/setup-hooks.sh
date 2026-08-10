@@ -26,6 +26,6 @@ chmod +x .githooks/* 2>/dev/null || true
 echo "hooks:    $(git config core.hooksPath)"
 echo "template: $(git config commit.template)"
 echo
-echo "pre-commit runs build, vet and short unit tests when Go files are staged."
+echo "pre-commit runs gofmt, build, vet, staticcheck and short unit tests on staged Go."
 echo "pre-push refuses accidental pushes to main; promotion needs AFF_PROMOTE=1."
 echo "Emergency bypass is AFF_SKIP_HOOKS=1, and a red test is not an emergency."

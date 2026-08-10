@@ -1,7 +1,7 @@
 # AGENTS.md — orientation for agents working on AnimeFeedFlux
 
-This file is a **router, not a specification.** `CONTRIBUTING.md` says two documents form one spec
-and each owns something the other must not duplicate, "because duplicated facts drift and drifted
+This file is a **router, not a specification.** `CONTRIBUTING.md` says four documents form one spec
+and each owns something the others must not duplicate, "because duplicated facts drift and drifted
 facts get implemented." That applies to this file too, so nothing here is restated from elsewhere —
 it tells you which document answers which question, and stops.
 
@@ -25,9 +25,10 @@ They are greppable, which is the point.
 
 ## Before anything else: check what actually exists
 
-**As of this writing there is no code in this repository** — only `PLAN.md` and `TODOS.md`. Do not
-assume a package, table, RPC, or binary named in the plan has been built. Inspect the tree first.
-The plan describes the destination; `TODOS.md` describes how far along the road anyone has got.
+**As of this writing there is no application code in this repository** — documentation, git hooks,
+and scripts only. Do not assume a package, table, RPC, or binary named in the plan has been built.
+Inspect the tree first. The plan describes the destination; `TODOS.md` describes how far along the
+road anyone has got.
 
 ## The things agents get wrong here
 
@@ -35,9 +36,11 @@ The plan describes the destination; `TODOS.md` describes how far along the road 
   `dev` → `main` is a release that **deploys**, and it is Cam's call — never promote on your own
   initiative. Mechanics and the reasoning: `CONTRIBUTING.md` → "Branches".
 - **Run `sh scripts/setup-hooks.sh` once per clone.** Hook config is per-clone and untracked, so the
-  hooks are *not* live until you opt in. `pre-commit` runs build, vet and short unit tests when Go is
-  staged; `pre-push` refuses accidental pushes to `main`. Never `--no-verify`, and
-  `AFF_SKIP_HOOKS=1` is for emergencies — a red test is not one.
+  hooks are *not* live until you opt in. `pre-commit` runs gofmt, build, vet, staticcheck and short
+  unit tests on staged Go; `pre-push` refuses accidental pushes to `main`. Never `--no-verify`, and
+  `AFF_SKIP_HOOKS=1` is for emergencies — a red test is not one. After touching `.githooks/`, run
+  `sh scripts/test-hooks.sh` (18 cases); an untested hook is a guard that has quietly stopped
+  catching anything.
 - **Phase order is a dependency order, not a preference.** Core engine first, UI last (§18). Do not
   start Phase D because it is more fun; every RPC the UI calls is meant to be exercised by the CLI
   first, so the UI is built once against settled semantics rather than twice.

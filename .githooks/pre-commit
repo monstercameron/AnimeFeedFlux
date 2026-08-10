@@ -46,9 +46,15 @@ done
 # doc that names the variable. A guard that fires on documentation gets disabled
 # within a day, which costs more than the guard was ever worth.
 #
-# .githooks/ is excluded because this file necessarily contains the patterns it
-# looks for.
-secret_diff=$(git diff --cached -U0 -- . ':(exclude).githooks/*' || true)
+# Hook tooling is excluded, because it necessarily contains the patterns it looks
+# for: this file defines them, and scripts/test-hooks.sh must stage a fake key to
+# prove the guard fires. Both have now tripped it in practice, which is the point
+# of keeping the exclusion narrow and named rather than loosening the pattern —
+# a weaker regex would let a real key through everywhere, a broad exclusion would
+# blind whole directories.
+secret_diff=$(git diff --cached -U0 -- . \
+    ':(exclude).githooks/*' \
+    ':(exclude)scripts/test-hooks.sh' || true)
 
 if printf '%s' "$secret_diff" | grep -qE '^\+.*(SCHEMAFLUX_API_KEY|AFF_SECRET_KEY|OPENAI_API_KEY)[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9_/+-]{16,}'; then
     fail "a staged line assigns a real-looking value to a key variable (RULE-2)"
@@ -80,11 +86,51 @@ if ! echo "$staged" | grep -qE '\.(go|mod|sum)$'; then
     exit 0
 fi
 
+# --- Format ----------------------------------------------------------------
+#
+# Checked, never auto-applied. A hook that rewrites files after they were staged
+# commits something the author did not read, and the diff they reviewed is not
+# the diff that lands.
+#
+# Only staged .go files are checked, so an unrelated unformatted file elsewhere
+# in the tree does not block a commit that did not touch it. Note the working
+# copy is what gofmt sees: a partially staged file is judged as it is on disk.
+#
+# gofmt reports every file as unformatted on a CRLF checkout, which reads as
+# "the whole repo is broken" and sends people looking for the wrong problem.
+# .gitattributes pins *.go to eol=lf precisely so that cannot happen here.
+staged_go=$(echo "$staged" | grep -E '\.go$' || true)
+
+if [ -n "$staged_go" ]; then
+    unformatted=$(gofmt -l $staged_go 2>/dev/null || true)
+    if [ -n "$unformatted" ]; then
+        echo "pre-commit: not gofmt'd:" >&2
+        echo "$unformatted" | sed 's/^/  /' >&2
+        fail "run: gofmt -w $(echo "$unformatted" | tr '\n' ' ')"
+    fi
+    echo "pre-commit: gofmt ok"
+fi
+
 echo "pre-commit: go build ./..."
 go build ./... || fail "build failed"
 
+# --- Lint ------------------------------------------------------------------
+#
+# vet ships with the toolchain, so it is always a hard gate.
 echo "pre-commit: go vet ./..."
 go vet ./... || fail "vet failed"
+
+# staticcheck does not. If it is missing this warns and continues rather than
+# failing: CI is the authoritative lint gate (§17.2), and a hook that hard-fails
+# on a tool someone has not installed is a hook they turn off. If it IS present,
+# it must pass.
+if command -v staticcheck >/dev/null 2>&1; then
+    echo "pre-commit: staticcheck ./..."
+    staticcheck ./... || fail "staticcheck failed"
+else
+    echo "pre-commit: staticcheck not installed — skipping (CI still enforces it)"
+    echo "            go install honnef.co/go/tools/cmd/staticcheck@latest"
+fi
 
 # -short lets slow suites opt out via testing.Short(). The soak (§17.4) and any
 # live-provider test (RULE-1, AFF_LIVE_LLM) must respect it.
