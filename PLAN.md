@@ -39,11 +39,18 @@ in a reader interface with no write methods. Everything mutable — recipes, pro
 item edits, the kill switch — is an RPC. A bug in the publish plane cannot corrupt the database
 because that code path has no writer, not because we were careful.
 
+One SQLite footgun this creates: a read-only connection to a **WAL** database still needs write
+access to the `-shm` wal-index file unless opened `immutable=1`, which is not an option here because
+the reader must see new writes. So **boot order is load-bearing** — the writer connection is opened
+first and held for process lifetime, which creates `-wal`/`-shm` before the reader attaches.
+Otherwise the first cold boot after a fresh deploy (or a crash that removed `-shm`) fails with
+"unable to open database file", intermittently and confusingly. Startup asserts this ordering.
+
 ### 2.1 End-to-end flow
 
 The whole system in one pass: admin logs in, authors and samples a recipe, the scheduler generates,
-and the feed is delivered to Slack. Note where the two planes meet — they never talk to each other
-directly, only through SQLite and a cache invalidation.
+and the feed is delivered to Slack. The two planes share nothing but SQLite and one narrow
+invalidation call — the publish plane never queries the control plane, and never writes.
 
 ```mermaid
 sequenceDiagram
@@ -134,7 +141,7 @@ sequenceDiagram
 ```
 
 Two things the diagram is meant to make obvious. First, the publish plane never calls the control
-plane and never writes — it reads SQLite and a cache, which is why an internet-facing bug cannot
+plane and never writes — it reads SQLite and a cache it does not own, which is why an internet-facing bug cannot
 corrupt data. Second, the Slack lane at the bottom is the reason for the `pubDate` discipline in
 §5.5: its bookmark advances past anything it has seen, so a backdated item is delivered to nobody.
 
@@ -186,8 +193,9 @@ That makes authentication the entire defense, so it gets built properly rather t
   later and rehashed on next successful login. Verification is constant-time. No default password;
   the account is created by `aff admin init`, reading from stdin, refusing weak passphrases.
 - **Second factor: TOTP (RFC 6238), required, not optional.** With a single admin and a public
-  droplet, a leaked password otherwise loses everything. ±1 step drift window; **used (code, step)
-  pairs are recorded and rejected on replay**. Recovery codes generated once at enrollment, shown
+  droplet, a leaked password otherwise loses everything. ±1 step drift window; **used steps are
+  recorded and rejected on replay**, enforced by a primary key so two concurrent attempts with the
+  same code lose the race in the database rather than in a check-then-insert. Recovery codes generated once at enrollment, shown
   once, stored hashed. TOTP secret encrypted at rest with a key derived from an env-supplied secret,
   so a stolen DB file alone is not a second factor.
 - **Sessions:** 256-bit random token, hashed at rest, delivered as `HttpOnly; Secure;
@@ -196,9 +204,10 @@ That makes authentication the entire defense, so it gets built properly rather t
 - **Bridge auth:** the WebSocket upgrade validates the session cookie *and* checks `Origin` against
   an allowlist. Every RPC additionally passes the session through a server interceptor — no
   "authenticated at upgrade, trusted forever". Session revocation kills in-flight streams.
-- **CSRF:** `SameSite=Strict` plus `Origin` checking on the upgrade. gRPC-over-WS is not
-  form-submittable, which removes the classic vector, but the `Origin` check is what actually closes
-  it and is non-optional.
+- **CSRF:** `SameSite=Strict` does the primary work — current browsers will not attach the cookie to
+  a cross-site WebSocket handshake at all — and gRPC-over-WS is not form-submittable. The `Origin`
+  check is defense in depth for older browsers, non-browser clients, and a future misconfiguration
+  of the cookie flags. Both are non-optional; neither is presented as the whole answer.
 - **Network:** the admin listener binds its own port behind Caddy with an IP allowlist (home IP,
   same pattern as the droplet SSH rule). The publish listener is the only thing open to the world,
   and it is read-only and unauthenticated by design.
@@ -231,9 +240,16 @@ JSON Feed 1.1. These are implementation requirements, not aspirations, and each 
   `description` must be present**. We always emit both, plus `guid`, `pubDate`, `link`.
 - **`guid`**: `isPermaLink` **defaults to `true`** — a silent default that bites people. We emit an
   explicit `isPermaLink="false"` and use a **Tag URI**
-  (`tag:anime.earlcameron.com,2026:<slug>/<hash>`), which the Best Practices Profile endorses. A
+  (`tag:anime.earlcameron.com,2026:<slug>/<item_key>`), which the Best Practices Profile endorses. A
   guid must be stable forever, and neither our permalink scheme nor an upstream article URL is
   guaranteed stable. The human-facing permalink lives in `link`, where it belongs.
+- **`item_key` is opaque and random** (a ULID assigned once at insert), **not derived from the
+  title or content**. This matters: a content-derived guid is only stable-under-edit by convention,
+  and any later code path that re-derives it — a renderer refactor, a repair script — would silently
+  mint a new guid after a title edit and resurface the item as a duplicate in every subscriber's
+  inbox. An opaque key makes "the guid never changes" true by construction rather than by
+  discipline. Idempotency (a double run not producing two copies of the same trivia question) is a
+  *separate* concern, handled by `UNIQUE(feed_id, content_hash)` plus the run lock — see §10.
 - **Dates**: RFC 822 with **four-digit years**, UTC only — `Thu, 04 Oct 2007 23:59:45 +0000`. No
   military timezone abbreviations, no double spaces, no comments. One formatter, used everywhere,
   unit-tested against the profile's examples.
@@ -276,7 +292,12 @@ JSON Feed 1.1. These are implementation requirements, not aspirations, and each 
 ### 5.4 Transport
 
 - `Content-Type: application/rss+xml; charset=utf-8`, `application/atom+xml; charset=utf-8`,
-  `application/feed+json` — never `text/xml`.
+  `application/feed+json` — never `text/xml`. Note `application/atom+xml` is IANA-registered while
+  `application/rss+xml` is only a de facto convention with no registration; it is still the right
+  thing to emit, but the two are not on equal spec footing.
+- **`Vary: Accept-Encoding` on every feed response.** Encoding is negotiated per request from a
+  cache holding both bodies, so without `Vary` any intermediary — Caddy, a corporate proxy in front
+  of a reader, a CDN later — can cache one encoding and serve it to a client that cannot read it.
 - XML declaration with explicit `encoding="utf-8"`; UTF-8 output; **no BOM**.
 - **Conditional GET is mandatory.** Strong `ETag` (hash of the exact rendered body) plus
   `Last-Modified`; honor `If-None-Match` and `If-Modified-Since` with `304`. Readers poll
@@ -391,8 +412,18 @@ live path.
 
 A recipe carries: slug, title, description, language, kind (`generative` | `grounded` |
 `aggregate`, the last having members instead of a generator — §14.2), schedule,
-items per run, retention window, model params, system and user prompt templates, novelty settings,
+items per run, **feed window**, model params, system and user prompt templates, novelty settings,
 per-day token and run budgets, and — for grounded feeds — one or more source URLs.
+
+Three nearby concepts are deliberately *not* the same thing, and the plan uses one name for each:
+
+- **Feed window** — how many items appear in the rendered XML (§5.4, default 50). A per-feed recipe
+  field.
+- **Novelty window** — how far back the dedup check compares (§8, last 500 embeddings).
+- **Archive retention** — how long items live in the database. **Indefinite** (§15). There is no
+  per-feed item-deletion policy, because permalinks must keep resolving forever: Slack messages and
+  old guids point at them, and a 404 where a reader expects an article is a self-inflicted wound.
+  Only `runs` rows and stale embeddings are ever pruned.
 
 **Scheduling and time zones.** Cron alone is a trap here: "daily trivia at 7am" means 7am *local*,
 and a UTC cron silently shifts by an hour twice a year. Each recipe stores a cron expression **plus
@@ -413,8 +444,11 @@ double-fire. The UI shows the next three runs in local time as a readback.
 {{.Candidates}}     fetched source articles: title, url, published, excerpt (grounded)
 ```
 
-Templates are `text/template` with a **strict missing-key policy** — an unknown variable is a
-validation error at save time, not an empty string at 4am. Rendered prompts are hashed and stored on
+Templates are `text/template`, and validation is stricter than "it parses". `Parse` does **not**
+check that `{{.Foo}}` names a real field — that surfaces only at `Execute`, and `missingkey=error`
+covers maps rather than structs. So `ValidateSpec` **executes** each template against a fully
+populated dummy context and treats any execution error as a validation failure. An unknown variable
+is caught at save time, not as a broken prompt at 4am. Rendered prompts are hashed and stored on
 each item (`prompt_hash`) so a quality change can be traced to the prompt that caused it.
 
 Validation runs server-side in the RPC (the UI's copy is a convenience, never the gate): slug
@@ -443,8 +477,15 @@ type Provider interface {
 one of: `Transient` (429, 5xx, timeout, connection reset) → retry with exponential backoff and
 jitter, honoring `Retry-After`, capped at 3 attempts; `Invalid` (schema violation, refusal, truncated
 output) → one repair attempt with the validation error fed back, then fail the run; `Fatal` (auth,
-quota exhausted, model not found) → fail immediately, disable generation, and surface it on
-`/healthz` and the dashboard rather than retrying into a wall. Context-length overflow is its own
+quota exhausted, model not found) → fail immediately and surface on `/healthz` and the dashboard
+rather than retrying into a wall.
+
+**Which "disable" fires matters, and the two must not be confused.** A `Fatal` error whose cause is
+**account-wide** (bad API key, quota exhausted) trips the **global** kill switch — every feed shares
+that credential, so continuing is pointless. A `Fatal` error whose cause is **recipe-scoped** (model
+not found, context window smaller than the prompt) disables **only that feed**, because a single
+mistyped model id must never take the other feeds offline. Per-feed auto-disable after N consecutive
+failures (§14.3) is the same mechanism. Every disable records which scope fired and why. Context-length overflow is its own
 case: shrink `{{.Candidates}}` / `{{.RecentTitles}}` and retry once.
 
 Every call is wrapped in a context timeout and its outcome recorded on the run.
@@ -488,9 +529,10 @@ Per run:
 6. **Link integrity** (grounded): the item's `link` MUST be byte-equal (after normalization) to a URL
    in the fetched candidate set. Not "similar to" — present. Failures are dropped and counted.
    Optional second check: `GET` returns 200 with a non-empty title.
-7. **Persist** with the Tag URI guid from `sha256(slug | normalized_title | date)`, assigning each
-   item a **distinct, strictly increasing `published_at`** never earlier than the feed's current
-   newest (§5.5).
+7. **Persist** with an opaque ULID `item_key` (§5.1) forming the Tag URI guid, a
+   `content_hash = sha256(slug | normalized_title | date)` carried in a separate column purely for
+   idempotency, and a **distinct, strictly increasing `published_at`** never earlier than the feed's
+   current newest (§5.5).
 8. **Invalidate** the render cache for that slug; bump `lastBuildDate`.
 
 Steps 3–8 run in a single transaction from the store's perspective: a run either adds its items or
@@ -504,7 +546,8 @@ schema_migrations(version, applied_at)
 
 admin(id, password_hash, kdf_params, totp_secret_enc, created_at, password_changed_at)
 recovery_codes(id, code_hash, used_at)
-totp_used(step, code_hash, at)              -- replay prevention
+totp_used(step PRIMARY KEY, code_hash, at)  -- replay prevention; the DB rejects the race,
+                                            -- not a check-then-insert in application code
 sessions(id, token_hash, created_at, last_seen_at, expires_at, ip, user_agent, revoked_at)
 auth_events(id, at, kind, ip, ok, detail)
 
@@ -516,9 +559,11 @@ feeds(id, slug UNIQUE, title, description, language, kind, spec_json, enabled,
       -- kind: generative | grounded | aggregate   (aggregate never generates, §14.2)
       -- jitter_offset is derived from hash(slug), stored so the UI readback matches reality
 feed_members(aggregate_feed_id, member_feed_id, position)
-items(id, feed_id, guid UNIQUE, title, summary_text, body_html, answer_html, link,
-      source_name, published_at, model, prompt_hash, tokens_in, tokens_out, run_id,
+items(id, feed_id, item_key UNIQUE, content_hash, title, summary_text, body_html, answer_html,
+      link, source_name, published_at, model, prompt_hash, tokens_in, tokens_out, run_id,
       origin, created_at, updated_at, edited_at, deleted_at)
+      -- item_key: opaque ULID assigned once; the guid/Atom id is derived from it and NEVER changes
+      -- UNIQUE(feed_id, content_hash) — idempotency, kept separate from identity (§5.1)
       -- origin: generated | sampled | manual | correction
       -- deleted_at is a SOFT delete: the guid is never freed, the permalink 410s
       -- UNIQUE(feed_id, published_at) — Slack drops items sharing a timestamp (§5.5)
@@ -757,9 +802,18 @@ newest first, into one URL. Cheap, because every item already lives in one table
 - Items keep their original guid, so a subscriber to both the aggregate and a member sees the item
   deduplicated by guid in any competent reader.
 - The `UNIQUE(feed_id, published_at)` rule does not span feeds, so an aggregate *can* surface two
-  items sharing a timestamp — which Slack drops. Aggregates therefore re-stamp on render with a
-  deterministic tie-break (member order, then guid) so the emitted sequence is strictly decreasing.
-  This is the one place the render layer adjusts a date, and it is tested explicitly.
+  items sharing a timestamp — which Slack drops. **Only on an actual collision**, the aggregate
+  renderer shifts the later-ordered item back by whole seconds (tie-break: member order, then
+  `item_key`) until the emitted sequence is strictly decreasing. This is the one place the render
+  layer adjusts a date, and it is tested explicitly.
+
+  Be honest about what that costs: it means one guid can carry a `pubDate` differing by a few
+  seconds between the aggregate and its member feed, which contradicts the otherwise absolute
+  "`pubDate` never changes" framing in §5.5 and §12.4. The bounded version is the right trade —
+  the shift is seconds, deterministic, and only on collision; guid-based dedup is unaffected; and
+  the alternative (leaving duplicate timestamps) means Slack silently drops items, which is the
+  failure this whole design exists to avoid. Where the two rules conflict, **delivery wins over
+  cosmetic date fidelity**, and the exception is written down rather than discovered later.
 - Aggregates never generate, never spend, and cannot nest.
 
 ### 14.3 What breaks as feeds multiply
@@ -907,13 +961,15 @@ as absolute with a scheme, since it is baked into every guid.
   repeated hour, asserting exactly one fire each.
 - Migration tests: apply from empty, apply twice (idempotent), apply onto the previous release's
   schema with seeded data.
-- Store tests: the `UNIQUE(feed_id, published_at)` constraint, soft-delete/restore/purge, FTS5
-  trigger sync, optimistic-concurrency conflict.
+- Store tests: the `UNIQUE(feed_id, published_at)` constraint, `UNIQUE(feed_id, content_hash)`
+  idempotency (a repeated run adds nothing), **guid stability across a title edit**, soft-delete /
+  restore / purge, FTS5 trigger sync, optimistic-concurrency conflict, and a cold-boot test that
+  opens the writer before the `mode=ro` reader against a fresh WAL database.
 - Auth tests: TOTP replay rejection, drift window edges, session expiry/rotation/revocation, backoff,
   timing uniformity, cookie flags, `Origin` rejection on the upgrade, recovery-code single use.
 - Publish-plane tests: 304 on both validators, `HEAD` parity with `GET`, 405 on `POST`, 410 on
-  deleted items, gzip correctness, rate-limit behavior, and a test asserting the read-only handle
-  **rejects writes** — the §2 claim verified, not assumed.
+  deleted items, gzip correctness, `Vary: Accept-Encoding` present, rate-limit behavior, and a test
+  asserting the read-only handle **rejects writes** — the §2 claim verified, not assumed.
 - Adversarial generator tests, each of which must reject rather than publish: malformed JSON; a URL
   absent from the source set; a near-duplicate of yesterday; `<script>` in `body_html`; a relative
   URL in an anchor; a title containing `]]>`; a summary over the cap; an answer leaked into
@@ -939,20 +995,29 @@ as absolute with a scheme, since it is baked into every guid.
 | M5 | Auth | argon2id + TOTP + recovery + sessions + backoff; `aff admin init`; tests green |
 | M6 | Bridge + RPC | GoGRPCBridge wired, interceptor auth, Feed/System services, CLI client |
 | M7 | Generative feed | Trivia + fact end-to-end on `FakeProvider`, then one real OpenAI run |
-| M8 | Novelty | Embeddings, dedup, retry; 30-day simulated backfill yields no near-duplicates |
+| M8 | Novelty | Embeddings, dedup, retry; harness proven against a *seeded* near-duplicate corpus |
 | M9 | Scheduler | Cron + timezone + DST, jitter, worker pool, budgets, accounting, kill switch |
 | M10 | Grounded news | Source fetch, candidate set, link-integrity enforcement, ranking prompt |
 | M11 | Sampling | `Sample`/`SampleStream`, sample persistence, promote, cost reporting |
 | M12 | Admin UI | Five GWC pages against real RPCs, responsive, empty/error states |
 | M13 | Slack proof | Private workspace subscribes to staging; items post, no dupes, no spoilers |
-| M13a | Multi-feed | Aggregate feeds, feed index page, shared source cache, bounded cache, per-feed identity |
 | M14 | Ops | Backups + tested restore, staleness watchdog, graceful shutdown, crash recovery |
 | M15 | Deploy | Caddy, systemd hardening, IP allowlist, `.wasm.gz`, feeds live |
 | M16 | Integration | ArticleFlux subscribes; verify rendering, dedup, refresh behavior |
+| M17 | Multi-feed | **Deferred.** Aggregates, feed index, shared source cache, LRU eviction |
 
 M1–M4 are plumbing and should land fast. M8 and M10 are the actual engineering. M5/M6 come before
 anything is exposed, because that is where mistakes are expensive. M13 is deliberately before
 deploy: discovering Slack drops your items after go-live is the expensive ordering.
+
+**M17 is deferred on purpose, and that is a correction to an earlier draft.** §14.4 says the v1
+target of 1–10 feeds needs none of that machinery, so scheduling it ahead of backups and deploy
+would have blocked real launch readiness on speculative scale. Build it when a fourth or fifth feed
+actually creates the problem. Two pieces stay in the earlier milestones because they are nearly free
+and the schema should not churn later: `feeds.jitter_offset` with cron jitter (M9 — three feeds all
+firing at noon already bunches provider calls, and retrofitting it changes scheduler semantics), and
+the `item_key`/`content_hash` split (M1 — a schema decision, not a scaling feature). Everything
+else in §14 waits.
 
 ## 19. Definition of done (v1)
 
@@ -960,9 +1025,14 @@ deploy: discovering Slack drops your items after go-live is the expensive orderi
 2. All three validate clean, in all three formats, with zero validator warnings.
 3. Slack subscribes to all three; over a 7-day window every generated item posts exactly once, no
    duplicates, no missed items, no trivia answers visible in the channel.
-4. Thirty consecutive days of trivia contain no near-duplicate pairs above the novelty threshold.
-5. Every news item links to an article that resolves 200 — zero invented URLs, verified by an audit
-   over the full item table.
+4. Thirty consecutive days of *production* trivia contain no near-duplicate pairs above the novelty
+   threshold. This is the real test of the novelty gate; M8 can only prove the harness works,
+   because a canned corpus proves nothing about a live model's tendency to repeat itself.
+5. Zero invented URLs: an audit over the full item table shows every grounded item's link matched
+   the fetched candidate set **at generation time**. Deliberately not "every link still resolves
+   200 today" — sources age out, paywall, and 301, and link rot is not a defect in this system.
+   A separate advisory link-health sweep may report rot, but it does not gate the definition of
+   done.
 6. Admin reachable only from the allowlisted IP, only with password + TOTP; a recovery-code drill
    has been performed successfully at least once.
 7. Total monthly spend under the configured ceiling, with per-feed attribution in `runs`.
@@ -975,7 +1045,7 @@ deploy: discovering Slack drops your items after go-live is the expensive orderi
 - **Wrong facts.** Trivia will sometimes be wrong and there is no cheap oracle. Mitigation: narrow
   claims, cite a source when the model can name one, a report link in the feed footer, and the
   correction mechanism (§12.4). A nonzero error rate is the honest expectation, not a bug to close.
-- **Hallucinated links** — structurally prevented (§9.6), not prompted away.
+- **Hallucinated links** — structurally prevented (§9, step 6), not prompted away.
 - **Slack's silent failure mode.** It does not error; it simply stops posting. Hence the dedicated
   test suite, the Slack preview in the sampler, and M13 before deploy.
 - **Bridge fragility.** gRPC-over-WS through Caddy is the least standard piece, and the
