@@ -1,0 +1,35 @@
+# Keep the build context small and keep local state out of image layers.
+#
+# An image layer is readable by anyone who can pull it, so a stray .env or a
+# local database baked into a layer is a leak that survives deleting the file
+# in a later commit (RULE-2).
+
+.git
+.github
+.githooks
+
+# Local working state — never source, and never in an image.
+.env
+.env.*
+*.key
+recovery-codes*
+*.db
+*.db-shm
+*.db-wal
+backups/
+
+# Build output; the image builds its own.
+bin/
+dist/
+*.exe
+
+# Docs do not affect the binary, and excluding them means a typo fix does not
+# invalidate the build cache.
+*.md
+docs/
+design/
+
+# Test artefacts
+coverage/
+cover.out
+*.out

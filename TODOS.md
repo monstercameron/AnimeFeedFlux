@@ -96,12 +96,12 @@ an incident — which is exactly when it is switched on.
 
 ### A0-T — Test infrastructure (build it before the suites that need it)
 
-- [ ] `A0-T01` Golden-file helper with an `-update` flag; a format change is one flag + a diff. §17.1
-- [ ] `A0-T02` Seeded store builder producing a deterministic feed with known items. §17.1
-- [ ] `A0-T03` Injected `http.Client` serving `testdata/` for every upstream fetch. §17.1
+- [x] `A0-T01` Golden-file helper with an `-update` flag; a format change is one flag + a diff. §17.1
+- [x] `A0-T02` Seeded store builder producing a deterministic feed with known items. §17.1
+- [x] `A0-T03` Injected `http.Client` serving `testdata/` for every upstream fetch. §17.1
 - [ ] `A0-T04` Injected clock; no test ever sleeps. §17.1
 - [x] `A0-T05` Deterministic ULID source so goldens containing guids are stable. §17.1
-- [ ] `A0-T06` `testdata/` layout convention documented in-repo. §17.1
+- [x] `A0-T06` `testdata/` layout convention documented in-repo. §17.1
 - [ ] `A0-T07` Assert the default `go test ./...` needs no network and no API key. RULE-1
 - [x] `A0-T08` CI runs `go test -race` on ubuntu — the only place `-race` can run. §17.2
 - [x] `A0-T09` `-shuffle=on` for local runs, knowing it is weaker than `-race`. §17.2
@@ -129,8 +129,8 @@ an incident — which is exactly when it is switched on.
 - [x] `A1-16` Migration `0007`: `samples`, `sources`, `feed_members`. §10
 - [x] `A1-17` Migration `0008`: `items_fts` external-content FTS5 table plus sync triggers. §10
 - [x] `A1-18` ULID generation for `item_key`; assert it is never derived from content. §5.1
-- [ ] `A1-19` Soft-delete helpers: `Delete` sets `deleted_at`, `Restore` clears it. No hard delete. §12.4
-- [ ] `A1-20` Optimistic concurrency: every mutable row carries a version, bumped on write. §11
+- [x] `A1-19` Soft-delete helpers: `Delete` sets `deleted_at`, `Restore` clears it. No hard delete. §12.4
+- [x] `A1-20` Optimistic concurrency: every mutable row carries a version, bumped on write. §11
 - [x] `A1-21` Test: migrate from empty; migrate twice is idempotent; migrate onto seeded prior schema.
 - [x] `A1-22` Test: cold boot opens writer before reader on a fresh WAL database. §2
 - [x] `A1-23` Test: `UNIQUE(feed_id, content_hash)` makes a repeated run add nothing. §5.1
@@ -147,16 +147,16 @@ an incident — which is exactly when it is switched on.
 - [x] `A2-05` Hex character-reference escaper for plain-text elements (`&#x26;`). §5.1
 - [x] `A2-06` CDATA writer that splits `]]>` across sections. §5.1
 - [x] `A2-07` URL absolutizer; reject or rewrite every relative href before storage. §5.1
-- [ ] `A2-08` RSS 2.0 renderer: required channel elements plus language, ttl, generator, docs. §5.1
-- [ ] `A2-09` Emit `atom:link rel="self"` with `type="application/rss+xml"`. §5.1
-- [ ] `A2-10` Emit `guid isPermaLink="false"` — never rely on the `true` default. §5.1
-- [ ] `A2-11` Emit `description` as **plain text**, `content:encoded` after it as HTML. §5.5
-- [ ] `A2-12` Atom renderer: one `id`/`title`/`updated` per feed and entry, `author` present. §5.2
-- [ ] `A2-13` Atom entries carry both `content` and `link rel="alternate"`. §5.2
-- [ ] `A2-14` JSON Feed 1.1: exact version URL, string `id`, `content_html`, `authors` not `author`. §5.3
-- [ ] `A2-15` Permalink HTML page with OpenGraph and `twitter:card` tags. §5.5
-- [ ] `A2-16` Trivia permalink renders the answer behind a spoiler break. §5.5
-- [ ] `A2-17` **`og:description` is the question, never the answer** — enforced at the renderer. §5.5
+- [x] `A2-08` RSS 2.0 renderer: required channel elements plus language, ttl, generator, docs. §5.1
+- [x] `A2-09` Emit `atom:link rel="self"` with `type="application/rss+xml"`. §5.1
+- [x] `A2-10` Emit `guid isPermaLink="false"` — never rely on the `true` default. §5.1
+- [x] `A2-11` Emit `description` as **plain text**, `content:encoded` after it as HTML. §5.5
+- [x] `A2-12` Atom renderer: one `id`/`title`/`updated` per feed and entry, `author` present. §5.2
+- [x] `A2-13` Atom entries carry both `content` and `link rel="alternate"`. §5.2
+- [x] `A2-14` JSON Feed 1.1: exact version URL, string `id`, `content_html`, `authors` not `author`. §5.3
+- [x] `A2-15` Permalink HTML page with OpenGraph and `twitter:card` tags. §5.5
+- [x] `A2-16` Trivia permalink renders the answer behind a spoiler break. §5.5
+- [x] `A2-17` **`og:description` is the question, never the answer** — enforced at the renderer. §5.5
 - [ ] `A2-18` Feed index page at `/` with `<link rel="alternate">` autodiscovery. §6
 - [ ] `A2-19` Golden files for all three formats plus the permalink page.
 - [ ] `A2-20` Goldens include: ampersands, `<` in a title, CJK, emoji, `]]>` in body, 500-char summary.
@@ -470,24 +470,24 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 
 ## C0 — Container
 
-- [ ] `C0-01` Multi-stage `Dockerfile`; builder compiles server and WASM, runtime carries no toolchain. §15.1
-- [ ] `C0-02` `CGO_ENABLED=0` static build consistent with the A0-16 driver decision. §15.1
-- [ ] `C0-03` Stamp version, commit, and build date via `-ldflags -X`. §15.1
-- [ ] `C0-04` Runtime stage `gcr.io/distroless/static:nonroot`. §15.1
-- [ ] `C0-05` **Pre-create the data directory owned by the non-root user** — named-volume ownership. §15.1
-- [ ] `C0-06` `.dockerignore` excluding `.git`, local databases, and backups. §15.1
-- [ ] `C0-07` Build cache mounts so rebuilds are cheap. §15.1
+- [x] `C0-01` Multi-stage `Dockerfile`; builder compiles server and WASM, runtime carries no toolchain. §15.1
+- [x] `C0-02` `CGO_ENABLED=0` static build consistent with the A0-16 driver decision. §15.1
+- [x] `C0-03` Stamp version, commit, and build date via `-ldflags -X`. §15.1
+- [x] `C0-04` Runtime stage `gcr.io/distroless/static:nonroot`. §15.1
+- [x] `C0-05` **Pre-create the data directory owned by the non-root user** — named-volume ownership. §15.1
+- [x] `C0-06` `.dockerignore` excluding `.git`, local databases, and backups. §15.1
+- [x] `C0-07` Build cache mounts so rebuilds are cheap. §15.1
 - [ ] `C0-08` **Build locally with `--platform linux/amd64`** and confirm it runs. §15.2
 - [ ] `C0-09` Confirm a native arm64 build fails on an amd64 host — know the error signature. §15.2
-- [ ] `C0-10` `compose.yaml`: publish to `127.0.0.1` only. §15.4, §19
-- [ ] `C0-11` Named volume for the database on local disk. §15.4
-- [ ] `C0-12` `env_file` at 0600 on the host; no secrets in compose or the image. §15.4
-- [ ] `C0-13` Healthcheck against `/healthz`. §15.4
-- [ ] `C0-14` `restart: unless-stopped`. §15.4
-- [ ] `C0-15` json-file log driver with size and file caps. §15.4
-- [ ] `C0-16` Memory limit. §15.4
-- [ ] `C0-17` `read_only: true` plus a tmpfs for `/tmp`. §15.4
-- [ ] `C0-18` `cap_drop: ALL` and `security_opt: no-new-privileges`. §15.4
+- [x] `C0-10` `compose.yaml`: publish to `127.0.0.1` only. §15.4, §19
+- [x] `C0-11` Named volume for the database on local disk. §15.4
+- [x] `C0-12` `env_file` at 0600 on the host; no secrets in compose or the image. §15.4
+- [x] `C0-13` Healthcheck against `/healthz`. §15.4
+- [x] `C0-14` `restart: unless-stopped`. §15.4
+- [x] `C0-15` json-file log driver with size and file caps. §15.4
+- [x] `C0-16` Memory limit. §15.4
+- [x] `C0-17` `read_only: true` plus a tmpfs for `/tmp`. §15.4
+- [x] `C0-18` `cap_drop: ALL` and `security_opt: no-new-privileges`. §15.4
 - [ ] `C0-19` Verify the container survives a restart with the volume intact and the DB readable.
 
 ## C1 — Pipeline

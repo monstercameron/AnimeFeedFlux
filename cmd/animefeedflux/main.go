@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -42,7 +43,45 @@ const (
 )
 
 func main() {
+	// `animefeedflux healthcheck` is how the container checks itself. The
+	// runtime image is distroless: no shell, no curl, nothing to exec. The
+	// binary is the only executable in it, so it has to be able to probe its
+	// own endpoint (§15.4).
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(healthcheckCmd())
+	}
 	os.Exit(run())
+}
+
+// healthcheckCmd probes the local publish listener and reports via exit code.
+//
+// It reads AFF_PUBLISH_ADDR rather than taking a flag so the compose
+// healthcheck cannot drift from the address the server actually binds.
+func healthcheckCmd() int {
+	addr := os.Getenv("AFF_PUBLISH_ADDR")
+	if addr == "" {
+		fmt.Fprintln(os.Stderr, "healthcheck: AFF_PUBLISH_ADDR is not set")
+		return exitBadConfig
+	}
+	// Inside the container the server binds 0.0.0.0; dialling that literally
+	// does not work as a destination, so probe loopback on the same port.
+	if host, port, err := net.SplitHostPort(addr); err == nil && (host == "" || host == "0.0.0.0" || host == "::") {
+		addr = net.JoinHostPort("127.0.0.1", port)
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + addr + "/healthz")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return exitRuntimeFail
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "healthcheck: status %d\n", resp.StatusCode)
+		return exitRuntimeFail
+	}
+	return exitOK
 }
 
 func run() int {

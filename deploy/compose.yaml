@@ -1,0 +1,83 @@
+# Production compose for AnimeFeedFlux (PLAN.md §15.4).
+#
+# Deployed to /opt/animefeedflux on the droplet. The release workflow rewrites
+# the image tag in place and runs `docker compose pull && up -d`.
+
+name: animefeedflux
+
+services:
+  app:
+    container_name: animefeedflux
+
+    # Pinned to an immutable sha- tag, NEVER `latest`. `latest` makes "what is
+    # actually running?" unanswerable at the exact moment you need to know, and
+    # it is what makes a rollback possible: put the previous tag back and pull
+    # (§15.2). The release workflow rewrites this line.
+    image: ghcr.io/monstercameron/animefeedflux:sha-PLACEHOLDER
+
+    restart: unless-stopped
+
+    # 127.0.0.1 ONLY. Docker writes its own DNAT rules ahead of the host
+    # firewall chain, so "9310:9310" would publish this past ufw and put the
+    # admin plane on the internet (§19). The host-side bind address is the
+    # control; nginx is the only thing listening publicly.
+    ports:
+      - "127.0.0.1:9310:9310"   # publish plane, fronted by nginx
+      - "127.0.0.1:9311:9311"   # control plane, fronted by nginx + IP allowlist
+
+    # Secrets come from a host file at 0600, never from an ENV line in the
+    # Dockerfile and never a literal here. An image layer is readable by anyone
+    # who can pull it, and this file is in git (RULE-2).
+    env_file:
+      - /etc/animefeedflux/animefeedflux.env
+
+    environment:
+      AFF_DB_PATH: /var/lib/animefeedflux/animefeedflux.db
+      AFF_PUBLISH_ADDR: 0.0.0.0:9310   # inside the container only; see ports above
+      AFF_ADMIN_ADDR: 0.0.0.0:9311
+      AFF_BACKUP_DIR: /var/lib/animefeedflux/backups
+
+    volumes:
+      # A NAMED volume on local disk. WAL breaks on network filesystems, and
+      # this volume is the only copy of every item ever generated (§15.4).
+      - data:/var/lib/animefeedflux
+
+    # The deploy job waits on this and fails the release if it never goes
+    # healthy. Without that gate the pipeline reports green while the service
+    # crash-loops (§15.3).
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/animefeedflux", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+    # Container-side equivalent of the systemd hardening the neighbouring
+    # services use. Mandatory, not optional: this process fetches arbitrary URLs
+    # off the internet and parses what comes back.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # A runaway process must not take the whole 2 GB box down with its
+    # neighbours.
+    mem_limit: 512m
+    pids_limit: 256
+
+    # Unbounded container logs are a classic way to fill a small disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+
+volumes:
+  data:
+    name: animefeedflux-data
