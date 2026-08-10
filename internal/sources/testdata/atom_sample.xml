@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Anime Atom Wire</title>
+  <id>tag:example.com,2026:anime-atom-wire</id>
+  <updated>2007-10-06T09:00:00Z</updated>
+  <entry>
+    <title>Voice Cast Revealed</title>
+    <id>tag:example.com,2026:voice-cast-revealed</id>
+    <link rel="alternate" href="https://example.com/articles/voice-cast?utm_campaign=fall" />
+    <summary>The full cast list is out.</summary>
+    <published>Fri, 05 Oct 2007 12:00:00 +0000</published>
+    <updated>2007-10-05T12:00:00Z</updated>
+  </entry>
+  <entry>
+    <title>Trailer Breakdown</title>
+    <id>tag:example.com,2026:trailer-breakdown</id>
+    <link rel="alternate" href="https://example.com/articles/trailer-breakdown" />
+    <content>A shot-by-shot look at the new trailer.</content>
+    <updated>2007-10-06T09:00:00Z</updated>
+  </entry>
+</feed>

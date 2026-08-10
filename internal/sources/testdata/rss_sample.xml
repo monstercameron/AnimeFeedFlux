@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Anime News Wire</title>
+    <link>https://example.com/</link>
+    <description>Anime news, fast.</description>
+    <item>
+      <title>Studio Announces New Season</title>
+      <link>https://example.com/articles/new-season?utm_source=newsletter&amp;utm_medium=email</link>
+      <description>The studio confirmed a second season is in production.</description>
+      <pubDate>Thu, 04 Oct 2007 23:59:45 +0000</pubDate>
+    </item>
+    <item>
+      <title>Con Panel Recap</title>
+      <link>https://example.com/articles/con-panel</link>
+      <description>Highlights from the industry panel.</description>
+      <pubDate>2007-10-05T08:30:00Z</pubDate>
+    </item>
+  </channel>
+</rss>

@@ -499,6 +499,42 @@ answer-leakage into `summary_text`, HTML allowlist sanitizing, URL absolutizatio
 **grounded link byte-equality**. A typed struct with a hallucinated URL in it is perfectly typed and
 completely wrong. The Go-side validation pass stays exactly as specified.
 
+**SchemaFlux owns timeouts, budgets and retries. We do not reimplement any of
+them** (decided 2026-08-10). The adapter adds no retry loop and no
+`context.WithTimeout` of its own: two timeout budgets on one call means the
+shorter silently wins, and which one that is depends on configuration nobody is
+looking at. The error taxonomy below survives only because *scope* — account-wide
+versus recipe-scoped — is our business rule about the kill switch, not the
+library's concern.
+
+### 8.1 What the API actually turned out to be (verified 2026-08-10)
+
+Reading the v1.1.0 surface rather than trusting §8's original assumptions found
+three gaps. Two of them break things this plan asserted, so they are recorded
+here rather than discovered during A5.
+
+- **A per-call `Client` is NOT sufficient isolation.** Every `Client.With*`
+  method calls `ops.SetDefaultProvider` and mutates process-wide state anyway.
+  Real isolation requires `client.Context(ctx)`, which snapshots the provider
+  under a lock into a context value that must then be passed to `Run(ctx)`.
+  Without it, one feed's model settings leak into another feed's concurrent run
+  — exactly the failure §8 set out to prevent, reached by a different route.
+- **`Generating[T]` reports no token usage or cost.** `RunResult()` exists but
+  its own doc admits `Usage`, `Cost`, `Attempts` and `Model` stay zero; only
+  `Extract` carries a result envelope. So **§13's cost model cannot be fed from
+  SchemaFlux today.** Until that changes, per-run cost is estimated from token
+  counts we compute ourselves at the prompt/response boundary, and the estimate
+  is labelled as an estimate everywhere it is shown. An unlabelled wrong number
+  is worse than an honest approximate one.
+- **There is no public embedding API.** `EmbeddingProvider` and friends live in
+  SchemaFlux's `internal` package. **§9.5's novelty gate therefore cannot be
+  built on SchemaFlux.** It calls the OpenAI embeddings endpoint directly
+  through `sashabaranov/go-openai`, which SchemaFlux already pulls in
+  transitively. This is a deliberate, documented exception to "SchemaFlux is the
+  LLM layer", confined to one operation.
+- Minor: there is no per-call temperature knob, only Mode and Speed tiers. The
+  recipe's temperature field is accepted and documented as a no-op until it is.
+
 Three dependency facts, taken from SchemaFlux's own README rather than assumed:
 
 - **Only OpenAI is live-verified** among its seven registered providers; the rest are implemented

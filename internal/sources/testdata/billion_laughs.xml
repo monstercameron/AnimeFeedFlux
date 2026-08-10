@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<!DOCTYPE rss [
+  <!ENTITY lol "lol">
+  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+  <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
+]>
+<rss version="2.0">
+  <channel>
+    <title>Hostile Feed</title>
+    <link>https://example.com/</link>
+    <description>Hostile</description>
+    <item>
+      <title>&lol4;</title>
+      <link>https://example.com/articles/hostile</link>
+      <description>Hostile body</description>
+      <pubDate>Thu, 04 Oct 2007 23:59:45 +0000</pubDate>
+    </item>
+  </channel>
+</rss>

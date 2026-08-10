@@ -164,37 +164,41 @@ an incident — which is exactly when it is switched on.
 
 ## A3 — Compliance
 
-- [ ] `A3-01` `make validate` renders goldens and runs the W3C / RSS Advisory Board validator. §5.6
-- [ ] `A3-02` CI fails on validator **warnings**, not only errors. §5.6
+- [x] `A3-01` `make validate` renders goldens and runs the W3C / RSS Advisory Board validator. §5.6
+- [x] `A3-02` CI fails on validator **warnings**, not only errors. §5.6
 - [x] `A3-03` Slack test: `pubDate`s strictly descending and unique across the feed. §5.5
 - [x] `A3-04` Slack test: every item has a present, parseable date. §5.5
 - [x] `A3-05` Slack test: `description` is plain text and under the hard cap. §5.5
 - [x] `A3-06` Slack test: no answer text appears in `description` or `og:description`. §5.5
 - [x] `A3-07` Slack test: OG tags present and populated on the permalink page. §5.5
-- [ ] `A3-08` Document in-repo which validator version CI pins, so a green run is reproducible.
+- [x] `A3-08` Document in-repo which validator version CI pins, so a green run is reproducible.
 
 ## A4 — Generation with SchemaFlux
 
-- [ ] `A4-01` Define the `GeneratedItem` Go type matching the §9 contract exactly.
-- [ ] `A4-02` `internal/llm` adapter: build the typed SchemaFlux call, return our own result type. §8
-- [ ] `A4-03` Construct an explicit SchemaFlux `Client` per call — never package defaults. §8
+- [x] `A4-01` Define the `GeneratedItem` Go type matching the §9 contract exactly.
+- [x] `A4-02` `internal/llm` adapter: build the typed SchemaFlux call, return our own result type. §8
+- [x] `A4-03` Construct an explicit SchemaFlux `Client` per call — never package defaults. §8
 - [ ] `A4-04` Capture tokens in/out, model id, and cost from SchemaFlux onto the run. §8
-- [ ] `A4-05` Map SchemaFlux errors to `Transient` / `Invalid` / `Fatal`. §8
+- [x] `A4-05` Map SchemaFlux errors to `Transient` / `Invalid` / `Fatal`. §8
 - [ ] `A4-06` `Transient`: exponential backoff with jitter, honor `Retry-After`, cap 3 attempts. §8
 - [ ] `A4-07` `Invalid`: one repair attempt with the validation error fed back, then fail. §8
-- [ ] `A4-08` `Fatal` **account-wide** (bad key, quota) trips the global kill switch. §8
-- [ ] `A4-09` `Fatal` **recipe-scoped** (bad model id) disables only that feed. §8
+- [x] `A4-08` `Fatal` **account-wide** (bad key, quota) trips the global kill switch. §8
+- [x] `A4-09` `Fatal` **recipe-scoped** (bad model id) disables only that feed. §8
 - [ ] `A4-10` Context-length overflow: shrink candidates/recent titles, retry once. §8
-- [ ] `A4-11` Wrap every provider call in a context timeout. §8
+- [x] `A4-11` Wrap every provider call in a context timeout. §8
 - [ ] `A4-12` **Decide cassettes vs a hand-built `FakeProvider`; record the choice.** §8, RULE-1
-- [ ] `A4-13` Go-side revalidation of every field: lengths, required-ness, tag count. RULE-4
+- [ ] `A4-12a` Use `client.Context(ctx)` on every call — a per-call Client alone does NOT isolate; `With*` mutates process-wide state (§8.1)
+- [ ] `A4-12b` **Do not add retry, backoff or a call timeout.** SchemaFlux owns them; two budgets on one call means the shorter silently wins (§8)
+- [ ] `A4-12c` Cost is ESTIMATED, not reported: `Generating[T]` returns zero usage. Label it an estimate everywhere it is shown (§8.1, §13)
+- [ ] `A4-12d` Embeddings call `sashabaranov/go-openai` DIRECTLY — SchemaFlux keeps its embedding API internal (§8.1, §9.5)
+- [x] `A4-13` Go-side revalidation of every field: lengths, required-ness, tag count. RULE-4
 - [ ] `A4-14` HTML allowlist sanitizer (`p, em, strong, a, ul, li, blockquote, code`). §9.4
 - [ ] `A4-15` Reject `<script>` and any attribute outside the allowlist. §17
 - [ ] `A4-16` Reject a relative URL in any anchor. §17
-- [ ] `A4-17` Reject an answer leaked into `summary_text`. §17
-- [ ] `A4-18` Prompt template engine with the §7 variable set.
-- [ ] `A4-19` `ValidateSpec` **executes** templates against a populated dummy context. §7
-- [ ] `A4-20` Store `prompt_hash` per item so quality changes trace to a prompt. §7
+- [x] `A4-17` Reject an answer leaked into `summary_text`. §17
+- [x] `A4-18` Prompt template engine with the §7 variable set.
+- [x] `A4-19` `ValidateSpec` **executes** templates against a populated dummy context. §7
+- [x] `A4-20` Store `prompt_hash` per item so quality changes trace to a prompt. §7
 - [ ] `A4-21` Trivia generator producing question, answer, and a spoiler-safe summary. §1
 - [ ] `A4-22` Fact-of-the-day generator. §1
 - [ ] `A4-23` Assign distinct, strictly increasing `published_at` per item in a run. §5.5
@@ -227,18 +231,18 @@ an incident — which is exactly when it is switched on.
 
 ## A6 — Grounded news
 
-- [ ] `A6-01` Upstream fetcher with conditional GET; store their ETag and Last-Modified. §9.1
-- [ ] `A6-02` Cap upstream body size and **disable XML entity expansion** (billion laughs). §4
-- [ ] `A6-03` Parse RSS and Atom sources into a common candidate shape.
-- [ ] `A6-04` **Normalize candidate URLs once at fetch** — absolutize, strip `utm_*`/`fbclid`. §9.1
-- [ ] `A6-05` Use that same normalizer on model output. One function, both sides. §9.6
-- [ ] `A6-06` Keep only entries newer than the last run; cap at ~40 candidates. §9.1
+- [x] `A6-01` Upstream fetcher with conditional GET; store their ETag and Last-Modified. §9.1
+- [x] `A6-02` Cap upstream body size and **disable XML entity expansion** (billion laughs). §4
+- [x] `A6-03` Parse RSS and Atom sources into a common candidate shape.
+- [x] `A6-04` **Normalize candidate URLs once at fetch** — absolutize, strip `utm_*`/`fbclid`. §9.1
+- [x] `A6-05` Use that same normalizer on model output. One function, both sides. §9.6
+- [x] `A6-06` Keep only entries newer than the last run; cap at ~40 candidates. §9.1
 - [ ] `A6-07` Render candidates into `{{.Candidates}}` with title, url, published, excerpt. §7
-- [ ] `A6-08` Enforce link byte-equality against the candidate set; drop and count failures. §9.6
-- [ ] `A6-09` Optional second check: link resolves 200 with a non-empty title. §9.6
-- [ ] `A6-10` Record reject reasons on the run so the sampler can show them. §10
-- [ ] `A6-11` **Test: candidate carries tracking params, model echoes it verbatim → accepted.** §9.6
-- [ ] `A6-12` Test: a URL absent from the candidate set is rejected.
+- [x] `A6-08` Enforce link byte-equality against the candidate set; drop and count failures. §9.6
+- [x] `A6-09` Optional second check: link resolves 200 with a non-empty title. §9.6
+- [x] `A6-10` Record reject reasons on the run so the sampler can show them. §10
+- [x] `A6-11` **Test: candidate carries tracking params, model echoes it verbatim → accepted.** §9.6
+- [x] `A6-12` Test: a URL absent from the candidate set is rejected.
 - [ ] `A6-13` Ranking prompt that orders candidates by newsworthiness. §1
 - [ ] `A6-14` A dead or reformatted source degrades the feed, never breaks the run. §19
 - [ ] `A6-15` Evaluate SchemaFlux `Deduplicate` on the ~40-candidate set; record the decision. §8
@@ -295,11 +299,11 @@ an incident — which is exactly when it is switched on.
 - [x] `A9-08` Correct content types; never `text/xml`. §5.4
 - [x] `A9-09` **`Vary: Accept-Encoding` on every feed response.** §5.4
 - [x] `A9-10` `Cache-Control: max-age=900` consistent with `<ttl>15</ttl>`. §5.4
-- [ ] `A9-11` Feed window cap: 50 items / 512 KB ceiling. §5.4
+- [x] `A9-11` Feed window cap: 50 items / 512 KB ceiling. §5.4
 - [x] `A9-12` Per-IP token-bucket rate limit; `429` with `Retry-After`. §6
 - [x] `A9-13` `405` with `Allow` for any method beyond GET/HEAD. §6
 - [x] `A9-14` `404` unknown slug; **`410 Gone`** for a soft-deleted item. §6
-- [ ] `A9-15` A disabled feed still serves its last built content; a deleted feed `410`s. §6
+- [x] `A9-15` A disabled feed still serves its last built content; a deleted feed `410`s. §6
 - [x] `A9-16` No stack traces, no version banner, no directory listing. §6
 - [x] `A9-17` `robots.txt`. §6
 - [x] `A9-18` Test: 304 on both validators; 405; 410; gzip correctness; `Vary` present. §17
@@ -336,17 +340,17 @@ an incident — which is exactly when it is switched on.
 
 ## B0 — Auth
 
-- [ ] `B0-01` argon2id hashing; store parameters beside the hash for later raising. §4
-- [ ] `B0-02` Rehash on next successful login when parameters change. §4
-- [ ] `B0-03` Constant-time verification; always run the KDF even for unknown users. §4
-- [ ] `B0-04` `aff admin init`: reads stdin, refuses weak passphrases, no default password. §4
-- [ ] `B0-05` TOTP (RFC 6238) enrollment with a ±1 step drift window. §4
-- [ ] `B0-06` Replay prevention via the `totp_used` primary key. §4
-- [ ] `B0-07` Encrypt the TOTP secret at rest with a key derived from `AFF_SECRET_KEY`. §4
-- [ ] `B0-08` Recovery codes: generated once, shown once, stored hashed, single use. §12.2
-- [ ] `B0-09` Sessions: 256-bit token, hashed at rest, 12h absolute / 60m idle, rotation on login. §4
-- [ ] `B0-10` `__Host-` prefixed cookie, `HttpOnly; Secure; SameSite=Strict`. §4
-- [ ] `B0-11` Per-IP and per-account exponential backoff with one generic failure message. §4
+- [x] `B0-01` argon2id hashing; store parameters beside the hash for later raising. §4
+- [x] `B0-02` Rehash on next successful login when parameters change. §4
+- [x] `B0-03` Constant-time verification; always run the KDF even for unknown users. §4
+- [x] `B0-04` `aff admin init`: reads stdin, refuses weak passphrases, no default password. §4
+- [x] `B0-05` TOTP (RFC 6238) enrollment with a ±1 step drift window. §4
+- [x] `B0-06` Replay prevention via the `totp_used` primary key. §4
+- [x] `B0-07` Encrypt the TOTP secret at rest with a key derived from `AFF_SECRET_KEY`. §4
+- [x] `B0-08` Recovery codes: generated once, shown once, stored hashed, single use. §12.2
+- [x] `B0-09` Sessions: 256-bit token, hashed at rest, 12h absolute / 60m idle, rotation on login. §4
+- [x] `B0-10` `__Host-` prefixed cookie, `HttpOnly; Secure; SameSite=Strict`. §4
+- [x] `B0-11` Per-IP and per-account exponential backoff with one generic failure message. §4
 - [ ] `B0-12` Log every attempt to `auth_events`. §4
 - [ ] `B0-13` `aff admin reset` break-glass, requiring local DB access. §12.2
 - [ ] `B0-14` Recovery flow: consume a code → 10-minute elevated session → force re-login. §12.2
