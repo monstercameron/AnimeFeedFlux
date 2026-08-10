@@ -1,0 +1,53 @@
+name: Feature request
+description: Something the system should do that PLAN.md does not cover.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is deliberately narrow. `README.md` → "What this will not do" lists the things
+        that are out of scope on purpose rather than by omission — please check it first.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and what makes it hard today. Not the solution yet.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+    validations:
+      required: true
+
+  - type: input
+    id: journey
+    attributes:
+      label: Which user flow this serves
+      description: One of `J1`–`J10` in `PLAN.md` §22. If it serves none of them, say so — that is not a rejection, but it means §22 needs amending first.
+      placeholder: "J3"
+
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Which phase this belongs to
+      description: Core engine first, UI last (§18).
+      options:
+        - A — core engine
+        - B — control surface
+        - C — ship it
+        - D — UI
+        - E — after / deferred
+        - Not sure
+
+  - type: textarea
+    id: cost
+    attributes:
+      label: What it costs
+      description: |
+        Every feature here has a price beyond the code — provider spend, another thing that can go
+        stale, another state the UI must render, another promise to subscribers that cannot be
+        retracted. Name the one you think applies.

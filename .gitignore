@@ -25,3 +25,12 @@ coverage/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Local working state — never source
+.env
+*.key
+recovery-codes*
+
+# Scratch
+scratch/
+*.tmp

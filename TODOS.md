@@ -50,6 +50,21 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 - [ ] `A0-16` Decide and record the SQLite driver (cgo vs pure-Go vs wasm). Blocks A1-01. §15.1
 - [ ] `A0-17` Record the `MemoryDenyWriteExecute` / `CGO_ENABLED=0` consequence of A0-16. §15.1
 
+### A0-T — Test infrastructure (build it before the suites that need it)
+
+- [ ] `A0-T01` Golden-file helper with an `-update` flag; a format change is one flag + a diff. §17.1
+- [ ] `A0-T02` Seeded store builder producing a deterministic feed with known items. §17.1
+- [ ] `A0-T03` Injected `http.Client` serving `testdata/` for every upstream fetch. §17.1
+- [ ] `A0-T04` Injected clock; no test ever sleeps. §17.1
+- [ ] `A0-T05` Deterministic ULID source so goldens containing guids are stable. §17.1
+- [ ] `A0-T06` `testdata/` layout convention documented in-repo. §17.1
+- [ ] `A0-T07` Assert the default `go test ./...` needs no network and no API key. RULE-1
+- [ ] `A0-T08` CI runs `go test -race` on ubuntu — the only place `-race` can run. §17.2
+- [ ] `A0-T09` `-shuffle=on` for local runs, knowing it is weaker than `-race`. §17.2
+- [ ] `A0-T10` Per-package coverage measured and reported. §17.2
+- [ ] `A0-T11` Coverage **ratchet** — the number may not go down. Not a target. §17.2
+- [ ] `A0-T12` `go vet` + linter + `govulncheck` gate the build. §17.2
+
 ## A1 — Store
 
 - [ ] `A1-01` Open SQLite with WAL, `busy_timeout=5000`, `foreign_keys=ON`, `synchronous=NORMAL`. §3
@@ -234,6 +249,26 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 - [ ] `A9-18` Test: 304 on both validators; 405; 410; gzip correctness; `Vary` present. §17
 - [ ] `A9-19` End-to-end: generate → fetch → validator passes → item appears once over two polls. §17
 
+## AF — Fuzz, soak, and load (cross-cutting; land as the pieces they target land)
+
+- [ ] `AF-01` Fuzz the HTML sanitizer, seeded with an XSS corpus. §17.3
+- [ ] `AF-02` Any sanitizer output containing a tag or attribute outside the allowlist fails. §17.3
+- [ ] `AF-03` Fuzz the URL normalizer for **idempotence**: `norm(norm(u)) == norm(u)`. §17.3
+- [ ] `AF-04` State why AF-03 matters: §9.6 byte-equality is only sound if normalization is stable.
+- [ ] `AF-05` Fuzz the RSS renderer: output must always parse as well-formed XML. §17.3
+- [ ] `AF-06` Fuzz the Atom renderer likewise. §17.3
+- [ ] `AF-07` Fuzz the JSON Feed renderer: output must always be valid JSON. §17.3
+- [ ] `AF-08` Renderer fuzz asserts text content round-trips — the cheapest escaping-bug guard. §17.3
+- [ ] `AF-09` **90-day simulated soak** on the fake provider with the clock advanced. §17.4
+- [ ] `AF-10` Soak asserts: no duplicate guids across the whole run. §17.4
+- [ ] `AF-11` Soak asserts: `pubDate`s strictly decreasing and unique throughout. §17.4
+- [ ] `AF-12` Soak asserts: novelty rejections occur and do not runaway-retry. §17.4
+- [ ] `AF-13` Soak asserts: budgets enforced every day, never exceeded. §17.4
+- [ ] `AF-14` Soak asserts: run history internally consistent end to end. §17.4
+- [ ] `AF-15` Poll-load check: many concurrent conditional GETs, 304s dominate. §17.4
+- [ ] `AF-16` Poll-load asserts **no SQLite query on a cache hit**. §17.4
+- [ ] `AF-17` Poll-load asserts memory stays flat across sustained polling. §17.4
+
 ---
 
 # Phase B — Control surface (headless)
@@ -306,6 +341,67 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 - [ ] `B3-09` `aff item list|get|create|update|delete|restore|correct`. §12.4
 - [ ] `B3-10` `aff system stats|kill-switch|backup|version`. §11
 - [ ] `B3-11` **Drive the full lifecycle of one feed end to end with only the CLI.** §18 B3
+
+## BF — Flow sanity tests, headless (§22, §17.5)
+
+These drive each flow end to end through the RPC layer, then assert the flow's invariants against
+**resulting system state** — not against a mock's call log. This is the regression suite; it runs on
+every commit. The UI walkthroughs in `DF` come later and do not replace these.
+
+- [ ] `BF-00` Harness: run a flow against a real store and RPC server, then assert on final state.
+- [ ] `BF-01` **J1** login: exactly one unexpired session row exists. §22
+- [ ] `BF-02` J1: cookie has `HttpOnly`, `Secure`, `SameSite=Strict`, `__Host-` prefix. §22
+- [ ] `BF-03` J1: every attempt, success or failure, lands in `auth_events`. §22
+- [ ] `BF-04` J1: wrong password and unknown user match in **message and timing**. §22
+- [ ] `BF-05` J1: the TOTP step just used cannot be replayed. §22
+- [ ] `BF-06` **J2** create: feed exists, disabled by default, zero items. §22
+- [ ] `BF-07` J2: `jitter_offset` populated and deterministic from the slug. §22
+- [ ] `BF-08` J2: next three runs are in the future and in the feed's timezone. §22
+- [ ] `BF-09` J2: each of duplicate/reserved slug, bad cron, unknown tz, unknown template var,
+      grounded-without-source, and zero budget is refused **server-side**. §22
+- [ ] `BF-10` J2: no provider call was made and nothing was published. §22
+- [ ] `BF-11` **J3** sample: **`items` row count is unchanged.** The single most important one. §22
+- [ ] `BF-12` J3: a `samples` row exists with `expires_at` set. §22
+- [ ] `BF-13` J3: cost is non-zero and debited from the same budget scheduled runs use. §22
+- [ ] `BF-14` J3: returned XML fragment is byte-identical to what publishing emits. §22
+- [ ] `BF-15` J3: with the kill switch on, **no provider call is made at all**. §22
+- [ ] `BF-16` **J4** promote: exactly one new item, `origin = sampled`. §22
+- [ ] `BF-17` J4: `published_at` strictly greater than the previously newest item. §22
+- [ ] `BF-18` J4: fresh ULID, and the guid contains it. §22
+- [ ] `BF-19` J4: render cache invalidated and `lastBuildDate` bumped. §22
+- [ ] `BF-20` J4: item appears exactly once in all three formats. §22
+- [ ] `BF-21` J4: a timestamp collision retries at +1s, no constraint error escapes. §22
+- [ ] `BF-22` **J5** diagnose: every run reaches a terminal status; none left `running`. §22
+- [ ] `BF-23` J5: `items_added + items_rejected` reconciles with recorded reasons. §22
+- [ ] `BF-24` J5: a failed run has **zero** items attributable to it. §22
+- [ ] `BF-25` J5: tokens and cost recorded even for failed runs — a failure that spent money shows it. §22
+- [ ] `BF-26` **J6** correct: the original's guid and `published_at` are unchanged. §22
+- [ ] `BF-27` J6: correction is a new item, new ULID, strictly later `published_at`. §22
+- [ ] `BF-28` J6: the `corrections` row links the two. §22
+- [ ] `BF-29` J6: the original is still resolvable at its permalink. §22
+- [ ] `BF-30` J6: a plain edit produces no new guid and therefore no redelivery. §22
+- [ ] `BF-31` **J7** recover: the consumed code is marked used and refused on reuse. §22
+- [ ] `BF-32` J7: the elevated session reaches **only** password change and TOTP re-enrollment. §22
+- [ ] `BF-33` J7: all other sessions were revoked. §22
+- [ ] `BF-34` J7: remaining-code count decremented by exactly one. §22
+- [ ] `BF-35` J7: the recovery attempt appears in `auth_events`. §22
+- [ ] `BF-36` **J8** spend: sum of per-run `est_cost_usd` equals the reported total. §22
+- [ ] `BF-37` J8: editing the price table does **not** rewrite historical run costs. §22
+- [ ] `BF-38` J8: a feed at its cap logs a skipped run with a distinct status. §22
+- [ ] `BF-39` J8: sampling spend appears in the same totals as scheduled spend. §22
+- [ ] `BF-40` **J9** watch: the stream terminates when the run does, in every branch. §22
+- [ ] `BF-41` J9: a dropped socket does **not** abort the run. §22
+- [ ] `BF-42` J9: reconnecting shows true current state, not a stale snapshot. §22
+- [ ] `BF-43` J9: progress events never claim items that were not committed. §22
+- [ ] `BF-44` **J10** subscriber: feed validates with zero warnings in all three formats. §22
+- [ ] `BF-45` J10: every item has a unique, strictly decreasing `pubDate`. §22
+- [ ] `BF-46` J10: **each item delivered exactly once across many polls** — real HTTP, ≥2 cycles. §17.5
+- [ ] `BF-47` J10: an unchanged feed answers `304`, touching neither SQLite nor the LLM. §22
+- [ ] `BF-48` J10: a deleted item's permalink returns `410`, never `404`. §22
+- [ ] `BF-49` J10: no trivia answer in `description` or `og:description`. §22
+- [ ] `BF-50` J10: an edited item is not redelivered; a correction **is**. §22
+- [ ] `BF-51` J10: a backdated item is delivered to nobody. RULE-7
+- [ ] `BF-52` Wire the whole `BF` suite into CI as a required gate. §17.2
 
 ---
 
@@ -413,8 +509,10 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 
 ## D-FLOW — The internal UX flow these tasks derive from
 
-Every task below comes from this flow. Do not add a screen or a control that does not appear here;
-if one is needed, amend this section first so the flow stays the source of truth.
+The ten journeys `J1`–`J10` are defined canonically in **§22**, with their sanity assertions. This
+section adds only what the *interface* needs on top of them: application states, the per-screen
+state matrix, and navigation. Do not add a screen or control that serves no journey in §22; if one
+is needed, amend §22 first so the flow stays the source of truth.
 
 **Application states.** The UI is always in exactly one:
 
@@ -430,18 +528,24 @@ if one is needed, amend this section first so the flow stays the source of truth
 sleep, nginx timeout, and deploys all produce it. Designing it last produces an app that lies about
 being connected.
 
-**Journeys.** Each is a complete path with a start, an end, and a failure branch:
+**Journeys.** Summarized here; defined with preconditions, failure branches, and sanity assertions
+in §22. `J10` is the subscriber's flow, not the admin's, and is the one that matters most.
 
-- `J1` First login → land on `/generate`.
-- `J2` Create a feed from nothing → recipe saved and validated.
-- `J3` Iterate a prompt → sample → read verdicts → adjust → sample again.
-- `J4` Promote a good sample → item live in the feed.
-- `J5` A feed looks wrong → open history → find the run → read the reject reasons.
-- `J6` A published item is wrong → publish a correction (**not** an edit). §12.4
-- `J7` Locked out → recovery code → reset → re-login.
-- `J8` Review spend → settings and run history → adjust budgets.
-- `J9` Scheduled run happening now → watch it stream live.
-- `J10` Lost access to the admin host → break-glass over SSH. §12.2
+| | Journey | Surface |
+|---|---|---|
+| `J1` | First login → land on `/generate` | `/login` |
+| `J2` | Create a feed from nothing → validated recipe | `/generate` |
+| `J3` | Iterate a prompt → sample → read verdicts → adjust | `/generate` |
+| `J4` | Promote a good sample → item live in the feed | `/generate` |
+| `J5` | Diagnose a bad run → read reject reasons | `/history` |
+| `J6` | Correct a wrong item → publish a correction, not an edit | `/history` |
+| `J7` | Locked out → recovery code → reset → re-login | `/recover` |
+| `J8` | Review spend → adjust budgets → confirm enforcement | `/settings` |
+| `J9` | Watch a run stream live | `/generate`, `/history` |
+| `J10` | Subscriber: discover → subscribe → receive → unfurl | *no UI — the feed itself* |
+
+Break-glass over SSH (§12.2) is deliberately **not** a journey: it exists precisely for when no
+interface is reachable, and `/recover` documents it rather than implementing it.
 
 **Per-screen state matrix.** Every list and panel implements all six, or it is not done:
 `loading` · `empty` · `populated` · `error` · `disabled-with-reason` · `disconnected`.
@@ -566,6 +670,25 @@ breadcrumb — three pages do not need wayfinding.
 - [ ] `D5-05` Walk `J1`–`J9` end to end in a browser and fix what is awkward.
 - [ ] `D5-06` Confirm nothing in the UI can reach a state the flow table does not name. D-FLOW
 
+## DF — Flow sanity walkthroughs, through the UI (§22, §17.5)
+
+The `BF` suite already proves the system stays coherent. `DF` proves the **interface can actually
+complete each flow a human is meant to complete, including its failure branches** — a different
+question, and not answerable by the headless suite.
+
+- [ ] `DF-01` `J1` login through the UI, including every failure branch. §22
+- [ ] `DF-02` `J2` create a feed from nothing; every validation error renders on its field. §22
+- [ ] `DF-03` `J3` iterate a prompt: sample, read all verdicts, adjust, sample again. §22
+- [ ] `DF-04` `J3` failure branch: kill switch on shows a **reason**, not a dead control. §12.3
+- [ ] `DF-05` `J4` promote a sample and see it appear in the feed. §22
+- [ ] `DF-06` `J5` diagnose a deliberately broken run; reject reasons are readable. §22
+- [ ] `DF-07` `J6` publish a correction **without** first being tempted to edit. §22
+- [ ] `DF-08` `J7` full recovery drill through the UI. §22
+- [ ] `DF-09` `J8` review spend and adjust a budget; enforcement is visible. §22
+- [ ] `DF-10` `J9` watch a live run, **drop the WebSocket mid-run**, reconnect, see true state. §22
+- [ ] `DF-11` `J10` subscribe a real reader to the real URL and observe two poll cycles. §17.5
+- [ ] `DF-12` Every `DF` flow re-walked at the narrowest supported breakpoint. §12.6
+
 ---
 
 # Phase E — After
@@ -620,6 +743,19 @@ breadcrumb — three pages do not need wayfinding.
 - [ ] `U2-07` Re-run each drill after any change to auth, deploy, or backup.
 
 ---
+
+# OQ — Open questions that gate work (§21)
+
+These are decisions, not tasks, and each one blocks something concrete. Left undecided they will be
+resolved by accident, which is the worst way. Each names what it blocks.
+
+- [ ] `OQ-01` Confirm the three launch feeds. Blocks `U0-05`…`U0-07`. §21.1
+- [ ] `OQ-02` **Public or private feeds?** Private needs per-subscriber URL tokens and changes the
+      §5.4 caching design and the §2 unauthenticated plane. Blocks `A9-01`. Decide before A9. §21.2
+- [ ] `OQ-03` Confirm the grounded source list beyond ANN and Crunchyroll. Blocks `U0-07`. §21.3
+- [ ] `OQ-04` News cadence: one digest item per day, or N separate items? Currently assumed 3
+      separate, which reads better in Slack. Blocks `A6-13`. §21.4
+- [ ] `OQ-05` Record each answer in `PLAN.md` §21 as decided, with the date and the reason.
 
 # Definition of done — v1 (§19)
 

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/monstercameron/AnimeFeedFlux/security/advisories/new
+    about: Do not open a public issue. Report privately — see SECURITY.md.
+  - name: How this repository works
+    url: https://github.com/monstercameron/AnimeFeedFlux/blob/main/CONTRIBUTING.md
+    about: The document set, which one wins, and what to do when the spec is silent.

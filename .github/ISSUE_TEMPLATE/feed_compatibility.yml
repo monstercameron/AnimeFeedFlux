@@ -1,0 +1,64 @@
+name: Feed compatibility
+description: A reader, aggregator, or validator does not handle a published feed correctly.
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feed consumers disagree with each other and several are stricter than the specifications.
+        Slack in particular **fails silently** — it does not error, it stops posting — so
+        "nothing appeared" is a real and useful report.
+
+  - type: input
+    id: consumer
+    attributes:
+      label: Consumer and version
+      placeholder: "Slack RSS app / NetNewsWire 6.1 / W3C Feed Validator"
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: Feed URL and format
+      placeholder: "https://anime.earlcameron.com/feeds/anime-trivia-daily.xml"
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened, and what did
+    validations:
+      required: true
+
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: Symptom
+      options:
+        - Nothing was delivered at all
+        - Some items delivered, others silently dropped
+        - An item was delivered more than once
+        - Wrong or missing date
+        - Escaping or encoding wrong in the rendered text
+        - Link or permalink wrong
+        - Unfurl or preview wrong
+        - Hidden content (e.g. a trivia answer) was exposed
+        - Validator error or warning
+    validations:
+      required: true
+
+  - type: textarea
+    id: raw
+    attributes:
+      label: The raw feed bytes involved
+      description: The `<item>` or entry, unedited. A paraphrase loses the detail that identifies the bug.
+      render: xml
+    validations:
+      required: true
+
+  - type: textarea
+    id: headers
+    attributes:
+      label: Response headers, if the problem might be caching or content type
+      description: Conditional GET, `ETag`, `Last-Modified`, `Content-Type`, and `Vary` are all load-bearing here.
+      render: http

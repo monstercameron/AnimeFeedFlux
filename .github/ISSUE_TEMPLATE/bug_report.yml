@@ -1,0 +1,71 @@
+name: Bug report
+description: Something behaves differently from what PLAN.md specifies.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this affects a running instance's security, **stop** and report it privately instead —
+        see `SECURITY.md`.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead.
+    validations:
+      required: true
+
+  - type: input
+    id: spec
+    attributes:
+      label: Which part of the spec this contradicts
+      description: A section from `PLAN.md`, e.g. §5.5 or §9.6. If the spec is silent, say so — that is a different kind of bug.
+      placeholder: "§5.5"
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where
+      options:
+        - Published feed output (RSS / Atom / JSON)
+        - Permalink page
+        - Generation or novelty
+        - Grounded sources or link integrity
+        - Scheduler or budgets
+        - Auth
+        - RPC or CLI
+        - Admin UI
+        - Deployment or ops
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: feed
+    attributes:
+      label: Feed output, if relevant
+      description: |
+        The actual bytes matter more than a description of them. Paste the `<item>` or entry
+        involved. Escaping, dates, and guids are where this project's bugs live, and a paraphrase
+        loses exactly the detail that identifies them.
+      render: xml
+
+  - type: dropdown
+    id: consumer
+    attributes:
+      label: Which consumer showed the problem
+      description: Slack is stricter than the RSS spec and fails silently, so it matters which one.
+      options:
+        - Slack
+        - ArticleFlux
+        - Another feed reader
+        - Direct HTTP request
+        - Not consumer-specific
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: Redact anything secret. The run id is the useful part.
+      render: shell

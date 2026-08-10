@@ -546,7 +546,9 @@ Item {
 }
 ```
 
-Per run:
+Per run. **The eight steps below are cited elsewhere as §9.1 … §9.8** — they are referenced often
+enough (by `TODOS.md` and by other sections here) that they need stable numbers, so treat these as
+named anchors rather than incidental list markers:
 
 1. **Acquire context.** Generative: the last N item titles as an exclusion list. Grounded: fetch all
    sources (conditional GET against *them* too, storing their ETag/Last-Modified), parse, keep
@@ -1083,7 +1085,17 @@ constraint as §14.5, now with a sharper edge.
 
 ### 15.4 Runtime configuration on the droplet
 
-- Publishes to `127.0.0.1:<port>` only; nginx proxies with the §20 streaming settings intact.
+- Publishes to `127.0.0.1:<port>` only; nginx proxies to it.
+- **Three nginx directives on the admin vhost are load-bearing**, and belong here rather than buried
+  in a risk note, because they are deployment configuration and are the first thing to check when
+  the admin app misbehaves:
+  - `proxy_http_version 1.1` with the `Upgrade` and `Connection` headers — without them the
+    WebSocket upgrade never happens and the bridge appears broken.
+  - `proxy_read_timeout` long enough to outlive an idle admin session, or nginx drops the socket
+    mid-session and it looks like a bridge bug.
+  - **`proxy_buffering off`** — with buffering on, nginx holds server-streamed frames until its
+    buffer fills, so `SampleStream` and `RunService.Watch` arrive in one lump at the end and the
+    streaming UI silently degrades to a spinner.
 - **Named volume** for `/var/lib/animefeedflux`, holding the DB and its `-wal`/`-shm`. Must be local
   disk — WAL breaks on network filesystems, and the volume is the only copy of every item ever
   generated.
@@ -1193,6 +1205,74 @@ as absolute with a scheme, since it is baked into every guid.
   rejected after first publish; render-cache eviction under the byte ceiling.
 - End-to-end: generate → publish → fetch the feed → assert the validator passes and the item appears
   exactly once across two consecutive polls.
+
+### 17.1 Test infrastructure
+
+Written once, early, because every later suite depends on it and retrofitting fixtures is how test
+coverage stalls:
+
+- A golden-file helper with `-update` to regenerate, so a deliberate format change is one flag and a
+  reviewed diff rather than hand-editing XML.
+- A seeded store builder producing a deterministic feed with known items, used by every renderer,
+  publish-plane, and RPC test.
+- An injected `http.Client` serving `testdata/` for all upstream fetches, and an injected clock.
+- A deterministic ULID source, so goldens containing guids are stable.
+- One decision recorded at A4: SchemaFlux cassettes or a hand-built fake (§8). Whichever wins, the
+  default `go test ./...` must not need a network or a key.
+
+### 17.2 Coverage and gates
+
+- CI runs `go test -race ./...` on ubuntu. `-race` **cannot** run on windows/arm64, so CI is the only
+  place it happens — this is a gate, not a nice-to-have.
+- `-shuffle=on` locally, since it is what is available there, while knowing it is genuinely weaker:
+  it reorders tests without instrumenting memory access.
+- Coverage is measured and reported per package. A **ratchet, not a target**: the number may not go
+  down. Chasing a percentage produces tests written to touch lines; a ratchet just stops erosion.
+- `go vet`, a linter, and `govulncheck` all gate the build.
+- The external feed validator gates on warnings as well as errors (§5.6).
+
+### 17.3 Fuzzing
+
+Three inputs here are adversarial by nature and all three are cheap to fuzz:
+
+- The **HTML sanitizer**, seeded with the XSS corpus. Any output containing a tag or attribute
+  outside the allowlist is a failure.
+- The **URL normalizer**, asserting idempotence — `normalize(normalize(u)) == normalize(u)` — because
+  §9.6's byte-equality check is only sound if normalization is stable.
+- The **renderers**, asserting that whatever goes in, the output parses as well-formed XML (or valid
+  JSON) and round-trips its text content. This is the cheapest possible guard against an escaping
+  bug reaching a subscriber.
+
+### 17.4 Soak and load
+
+Neither is about scale; both are about correctness over time:
+
+- A **simulated 90-day soak** against the fake provider with the clock advanced, asserting: no
+  duplicate guids, strictly decreasing unique `pubDate`s throughout, novelty rejections behaving,
+  budgets enforced, and the run history internally consistent. This is where slow-accumulating bugs
+  surface, and it costs nothing to run.
+- A **poll-load check** on the publish plane: many concurrent conditional GETs, asserting 304s
+  dominate, no SQLite query is issued on a cache hit, and memory is flat. Readers polling is the
+  only real traffic this service will ever see.
+
+### 17.5 Flow sanity tests
+
+The ten flows in §22 each carry sanity assertions, and each becomes an automated test that drives
+the flow end to end and then asserts those invariants against the **resulting system state** — not
+against a mock's call log. Unit tests prove a function behaves; these prove the system is still
+coherent after a real sequence of actions, which is where this design's genuine failures live
+(a sample that writes, a promote that skips cache invalidation, a correction that reuses a guid).
+
+Two runs of each, deliberately:
+
+- **Headless, at Phase B**, against the RPC layer via the CLI. These are the regression suite: fast,
+  deterministic, and runnable on every commit.
+- **As a walkthrough, at Phase D**, once the UI exists — confirming the interface can actually
+  complete the flow a human is meant to complete, including its failure branches.
+
+`J10` is the exception and the most important: it is asserted against a **real fetch over HTTP**
+across at least two polling cycles, because the whole product is a URL that other software consumes,
+and "delivered exactly once" cannot be proven by a single request.
 
 ## 18. Milestones
 
@@ -1307,18 +1387,13 @@ else in §14 waits.
 - **Wrong facts.** Trivia will sometimes be wrong and there is no cheap oracle. Mitigation: narrow
   claims, cite a source when the model can name one, a report link in the feed footer, and the
   correction mechanism (§12.4). A nonzero error rate is the honest expectation, not a bug to close.
-- **Hallucinated links** — structurally prevented (§9, step 6), not prompted away.
+- **Hallucinated links** — structurally prevented (§9.6), not prompted away.
 - **Slack's silent failure mode.** It does not error; it simply stops posting. Hence the dedicated
   test suite, the Slack preview in the sampler, and C3 before deploy.
 - **Bridge fragility.** gRPC-over-WS through nginx is the least standard piece, and the
   keepalive/GOAWAY flap is a known failure. Budget real time for B2 and keep the CLI working as an
-  independent check when the browser path misbehaves. Three nginx settings are load-bearing for the
-  admin vhost and are the first thing to check when it misbehaves: `proxy_http_version 1.1` with the
-  `Upgrade`/`Connection` headers (without them the WebSocket upgrade never happens), a
-  `proxy_read_timeout` long enough to outlive an idle session (the default will drop the socket
-  mid-session and look like a bridge bug), and **`proxy_buffering off`** — with buffering on, nginx
-  holds server-streamed frames until its buffer fills, so `SampleStream` and `RunService.Watch`
-  arrive in one lump at the end and the streaming UI silently degrades to a spinner.
+  independent check when the browser path misbehaves. The three nginx directives that most often
+  cause this to look broken are specified in §15.4.
 - **Model or pricing drift.** A model deprecation or price change silently degrades output quality
   or cost accuracy. Model id is pinned per recipe and recorded per item; the price table is editable.
 - **Upstream ToS and fragility.** Summarize-and-link only, never republish full text; a source that
@@ -1345,6 +1420,136 @@ else in §14 waits.
 3. **Grounded sources** — starting set is ANN + Crunchyroll News RSS. Others in or out?
 4. **Posting cadence for the news feed** — one digest item per day, or N separate items? Separate
    items read better in Slack; a digest is cheaper and quieter. Assumption: 3 separate items.
+
+## 22. User flows and their sanity assertions
+
+Ten flows define what this system is *for*. They are canonical: `TODOS.md`'s `D-FLOW` derives from
+this section, and no screen or RPC should exist that does not serve one of them.
+
+Each flow carries **sanity assertions** — invariants that must hold after the flow completes. These
+are deliberately not unit assertions about a function; they are statements about the state of the
+whole system, which is the only level at which most of this design's real failures show up. Each is
+automated twice: **headless at Phase B** against the RPC/CLI, and **as a walkthrough at Phase D**
+once the UI exists. Headless first is the point — a flow that only passes through a browser is a
+flow you cannot regression-test cheaply.
+
+Nine flows are the admin's. `J10` is the subscriber's, and it is the one that actually matters.
+
+### J1 — First login
+
+Actor: admin, `ANON`. Precondition: `aff admin init` has run and TOTP is enrolled.
+Steps: submit password → submit TOTP → land on the default surface.
+Failure branches: wrong password; wrong code; replayed code; backoff active; expired session.
+
+*Sanity:* exactly one session row exists and is unexpired · the cookie carries `HttpOnly`, `Secure`,
+`SameSite=Strict` and the `__Host-` prefix · every attempt, success or failure, appears in
+`auth_events` · a wrong password and an unknown user are indistinguishable in both message and
+timing · the TOTP step just used cannot be replayed.
+
+### J2 — Create a feed
+
+Actor: admin, `AUTH`. Precondition: none.
+Steps: create → set slug, kind, schedule, timezone, prompts, budgets, sources → validate → save.
+Failure branches: duplicate slug; reserved slug; bad cron; unknown timezone; unknown template
+variable; grounded with no source; zero budget.
+
+*Sanity:* the feed exists, is disabled by default, and has zero items · `jitter_offset` is populated
+and deterministic from the slug · the next three computed runs are in the future and in the feed's
+timezone · every rejection above is refused **server-side**, not merely in the UI · nothing was
+published and no provider call was made.
+
+### J3 — Iterate a prompt by sampling
+
+Actor: admin, `AUTH`. Precondition: a saved recipe.
+Steps: sample → read the item, novelty verdict, link verdicts, and cost → edit the prompt → sample
+again.
+Failure branches: kill switch on; daily budget exhausted; provider transient error; malformed
+output; every candidate rejected as a near-duplicate.
+
+*Sanity:* **`items` row count is unchanged** — this is the assertion that matters most, because
+sampling that writes is the worst possible bug here · a `samples` row exists with `expires_at` set ·
+the reported cost is non-zero and was debited from the same budget scheduled runs use · the returned
+XML fragment is byte-identical to what publishing would emit · with the kill switch on, no provider
+call is made at all.
+
+### J4 — Promote a sample
+
+Actor: admin, `AUTH`. Precondition: a sample from J3.
+Steps: choose a candidate → promote → confirm it appears in the feed.
+Failure branches: sample expired; timestamp collision with a concurrent scheduled run.
+
+*Sanity:* exactly one new item, `origin = sampled` · its `published_at` is **strictly greater** than
+the previously newest item · its `item_key` is a fresh ULID and its guid contains it · the feed's
+render cache was invalidated and `lastBuildDate` bumped · the item appears exactly once in all three
+formats · a collision retried at +1s rather than surfacing a constraint error.
+
+### J5 — Diagnose a bad run
+
+Actor: admin, `AUTH`. Precondition: a run that failed, was skipped, or added fewer items than asked.
+Steps: open history → find the run → read status, error kind, and reject reasons.
+Failure branches: run still in flight; run interrupted by a crash.
+
+*Sanity:* every run reaches a terminal status and none is left `running` after the process exits ·
+`items_added + items_rejected` reconciles with the reasons recorded · a run marked failed has **zero**
+items attributable to it · tokens and cost are recorded even for failed runs, because a failure that
+spent money must still show the money.
+
+### J6 — Correct a wrong item
+
+Actor: admin, `AUTH`. Precondition: a published item that is factually wrong.
+Steps: find it → publish a correction → verify the correction reaches subscribers.
+Failure branches: admin edits the item instead and expects redelivery.
+
+*Sanity:* the original item's **guid and `published_at` are unchanged** · the correction is a new
+item with a new ULID and a strictly later `published_at` · the `corrections` row links the two · the
+original is still resolvable at its permalink · editing alone produces no new guid and therefore no
+redelivery, and the UI said so before the edit.
+
+### J7 — Recover from lockout
+
+Actor: admin, `ANON`, password lost. Precondition: recovery codes exist.
+Steps: `/recover` → enter a code → elevated session → set new password → re-enroll TOTP → re-login.
+Failure branches: code already used; code invalid; elevated window expired; no codes left.
+
+*Sanity:* the consumed code is marked used and is refused on a second attempt · the elevated session
+can reach **only** password change and TOTP re-enrollment · all other sessions were revoked · the
+remaining-code count decremented by exactly one · the recovery attempt is in `auth_events`.
+
+### J8 — Review and control spend
+
+Actor: admin, `AUTH`. Precondition: several runs have executed.
+Steps: read per-feed and total spend → adjust budgets or the price table → confirm enforcement.
+Failure branches: price table stale; a feed silently at its cap.
+
+*Sanity:* the sum of per-run `est_cost_usd` equals the reported total · each run's cost was computed
+at the price in force **at that time**, so editing the price table does not rewrite history · a feed
+at its cap logs a skipped run with a distinct status rather than failing silently · sampling spend
+appears in the same totals as scheduled spend.
+
+### J9 — Watch a run live
+
+Actor: admin, `AUTH`. Precondition: a run triggered manually or by cron.
+Steps: observe progress streaming until the run reaches a terminal state.
+Failure branches: WebSocket drops mid-run; run outlives the session; two viewers.
+
+*Sanity:* the stream terminates when the run does, in every branch including failure · a dropped
+socket does **not** abort the run · reconnecting shows the run's true current state rather than a
+stale snapshot · progress events never claim items that were not committed.
+
+### J10 — Subscriber lifecycle (the one that matters)
+
+Actor: Slack, or any reader. Precondition: a live feed with items.
+Steps: discover via the index → subscribe → receive new items → unfurl a permalink → poll
+repeatedly over days.
+Failure branches: feed unreachable; malformed XML; duplicate timestamps; backdated item; deleted
+item; edited item.
+
+*Sanity:* the feed validates with zero warnings in all three formats · every item has a unique,
+strictly decreasing `pubDate` · **each item is delivered exactly once across many polls** · an
+unchanged feed answers `304` and touches neither SQLite nor the LLM · a deleted item's permalink
+returns `410`, never `404` · a trivia answer appears nowhere in `description` or `og:description` ·
+an edited item is not redelivered · a correction *is* delivered · a backdated item is delivered to
+nobody, which is why creating one is blocked.
 
 ## References
 
