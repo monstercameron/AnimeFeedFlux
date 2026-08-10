@@ -75,24 +75,24 @@ Instrumentation is written unconditionally; only the **exporter** is conditional
 creates spans when a flag is set has never run, and breaks the first time it is switched on during
 an incident — which is exactly when it is switched on.
 
-- [ ] `A0-O01` `internal/obs`: build a `TracerProvider` with resource attributes (service, version, commit). §15.0a
-- [ ] `A0-O02` Exporter selection: `otlp` \| `stdout` \| none, from config. §16
-- [ ] `A0-O03` **Default off** (`AFF_OTEL_ENABLED=0`) with a genuine no-op provider, not a nil check at each call site. §15.0a
-- [ ] `A0-O04` Honour the standard `OTEL_EXPORTER_OTLP_*` variables rather than inventing new ones. §16
-- [ ] `A0-O05` Treat `OTEL_EXPORTER_OTLP_HEADERS` as a **secret** — it carries the backend token. RULE-2
-- [ ] `A0-O06` Sampler: always-sample generation runs, ratio-sample publish requests. §15.0a
-- [ ] `A0-O07` Always sample a trace that contains an error, whatever the ratio says. §15.0a
-- [ ] `A0-O08` **Put `trace_id` and `span_id` on every log record** from the active span. §15.0a
-- [ ] `A0-O09` `MeterProvider` alongside, same exporter lifecycle.
-- [ ] `A0-O10` Register the metric set from §15.0a and no more.
-- [ ] `A0-O11` **Cardinality guard**: a helper that panics in tests if a label value is unbounded. §15.0a
-- [ ] `A0-O12` Never label a metric with `item_key`, a URL, a title, or model output. §15.0a
-- [ ] `A0-O13` Flush and shut the providers down cleanly on SIGTERM, before the process exits. §15
-- [ ] `A0-O14` A failing exporter must **never** block or crash the app — telemetry is not the product.
-- [ ] `A0-O15` Test: with OTel disabled, no exporter is constructed and no goroutine leaks.
-- [ ] `A0-O16` Test: with the stdout exporter, a run produces the §15.0a span tree, parented correctly.
-- [ ] `A0-O17` Test: `trace_id` in a log record matches the span that produced it.
-- [ ] `A0-O18` Test: an unbounded label is rejected by the cardinality guard.
+- [x] `A0-O01` `internal/obs`: build a `TracerProvider` with resource attributes (service, version, commit). §15.0a
+- [x] `A0-O02` Exporter selection: `otlp` \| `stdout` \| none, from config. §16
+- [x] `A0-O03` **Default off** (`AFF_OTEL_ENABLED=0`) with a genuine no-op provider, not a nil check at each call site. §15.0a
+- [x] `A0-O04` Honour the standard `OTEL_EXPORTER_OTLP_*` variables rather than inventing new ones. §16
+- [x] `A0-O05` Treat `OTEL_EXPORTER_OTLP_HEADERS` as a **secret** — it carries the backend token. RULE-2
+- [x] `A0-O06` Sampler: always-sample generation runs, ratio-sample publish requests. §15.0a
+- [x] `A0-O07` Always sample a trace that contains an error, whatever the ratio says. §15.0a
+- [x] `A0-O08` **Put `trace_id` and `span_id` on every log record** from the active span. §15.0a
+- [x] `A0-O09` `MeterProvider` alongside, same exporter lifecycle.
+- [x] `A0-O10` Register the metric set from §15.0a and no more.
+- [x] `A0-O11` **Cardinality guard**: a helper that panics in tests if a label value is unbounded. §15.0a
+- [x] `A0-O12` Never label a metric with `item_key`, a URL, a title, or model output. §15.0a
+- [x] `A0-O13` Flush and shut the providers down cleanly on SIGTERM, before the process exits. §15
+- [x] `A0-O14` A failing exporter must **never** block or crash the app — telemetry is not the product.
+- [x] `A0-O15` Test: with OTel disabled, no exporter is constructed and no goroutine leaks.
+- [x] `A0-O16` Test: with the stdout exporter, a run produces the §15.0a span tree, parented correctly.
+- [x] `A0-O17` Test: `trace_id` in a log record matches the span that produced it.
+- [x] `A0-O18` Test: an unbounded label is rejected by the cardinality guard.
 
 ### A0-T — Test infrastructure (build it before the suites that need it)
 
@@ -178,36 +178,36 @@ an incident — which is exactly when it is switched on.
 - [x] `A4-01` Define the `GeneratedItem` Go type matching the §9 contract exactly.
 - [x] `A4-02` `internal/llm` adapter: build the typed SchemaFlux call, return our own result type. §8
 - [x] `A4-03` Construct an explicit SchemaFlux `Client` per call — never package defaults. §8
-- [ ] `A4-04` Capture tokens in/out, model id, and cost from SchemaFlux onto the run. §8
+- [x] `A4-04` Capture tokens in/out, model id, and cost from SchemaFlux onto the run. §8
 - [x] `A4-05` Map SchemaFlux errors to `Transient` / `Invalid` / `Fatal`. §8
-- [ ] `A4-06` `Transient`: exponential backoff with jitter, honor `Retry-After`, cap 3 attempts. §8
-- [ ] `A4-07` `Invalid`: one repair attempt with the validation error fed back, then fail. §8
+- [x] `A4-06` `Transient`: exponential backoff with jitter, honor `Retry-After`, cap 3 attempts. §8
+- [x] `A4-07` `Invalid`: one repair attempt with the validation error fed back, then fail. §8
 - [x] `A4-08` `Fatal` **account-wide** (bad key, quota) trips the global kill switch. §8
 - [x] `A4-09` `Fatal` **recipe-scoped** (bad model id) disables only that feed. §8
-- [ ] `A4-10` Context-length overflow: shrink candidates/recent titles, retry once. §8
+- [x] `A4-10` Context-length overflow: shrink candidates/recent titles, retry once. §8
 - [x] `A4-11` Wrap every provider call in a context timeout. §8
 - [ ] `A4-12` **Decide cassettes vs a hand-built `FakeProvider`; record the choice.** §8, RULE-1
-- [ ] `A4-12a` Use `client.Context(ctx)` on every call — a per-call Client alone does NOT isolate; `With*` mutates process-wide state (§8.1)
-- [ ] `A4-12b` **Do not add retry, backoff or a call timeout.** SchemaFlux owns them; two budgets on one call means the shorter silently wins (§8)
-- [ ] `A4-12c` Cost is ESTIMATED, not reported: `Generating[T]` returns zero usage. Label it an estimate everywhere it is shown (§8.1, §13)
-- [ ] `A4-12d` Embeddings call `sashabaranov/go-openai` DIRECTLY — SchemaFlux keeps its embedding API internal (§8.1, §9.5)
+- [x] `A4-12a` Use `client.Context(ctx)` on every call — a per-call Client alone does NOT isolate; `With*` mutates process-wide state (§8.1)
+- [x] `A4-12b` **Do not add retry, backoff or a call timeout.** SchemaFlux owns them; two budgets on one call means the shorter silently wins (§8)
+- [x] `A4-12c` Cost is ESTIMATED, not reported: `Generating[T]` returns zero usage. Label it an estimate everywhere it is shown (§8.1, §13)
+- [x] `A4-12d` Embeddings call `sashabaranov/go-openai` DIRECTLY — SchemaFlux keeps its embedding API internal (§8.1, §9.5)
 - [x] `A4-13` Go-side revalidation of every field: lengths, required-ness, tag count. RULE-4
-- [ ] `A4-14` HTML allowlist sanitizer (`p, em, strong, a, ul, li, blockquote, code`). §9.4
-- [ ] `A4-15` Reject `<script>` and any attribute outside the allowlist. §17
-- [ ] `A4-16` Reject a relative URL in any anchor. §17
+- [x] `A4-14` HTML allowlist sanitizer (`p, em, strong, a, ul, li, blockquote, code`). §9.4
+- [x] `A4-15` Reject `<script>` and any attribute outside the allowlist. §17
+- [x] `A4-16` Reject a relative URL in any anchor. §17
 - [x] `A4-17` Reject an answer leaked into `summary_text`. §17
 - [x] `A4-18` Prompt template engine with the §7 variable set.
 - [x] `A4-19` `ValidateSpec` **executes** templates against a populated dummy context. §7
 - [x] `A4-20` Store `prompt_hash` per item so quality changes trace to a prompt. §7
-- [ ] `A4-21` Trivia generator producing question, answer, and a spoiler-safe summary. §1
-- [ ] `A4-22` Fact-of-the-day generator. §1
-- [ ] `A4-23` Assign distinct, strictly increasing `published_at` per item in a run. §5.5
-- [ ] `A4-24` Never stamp earlier than the feed's current newest item. RULE-7
-- [ ] `A4-25` **Insert items and close the run in one transaction.** §9
-- [ ] `A4-26` Invalidate the render cache *outside* that transaction — it is idempotent. §9
-- [ ] `A4-27` Test: malformed model output rejects the run rather than publishing.
-- [ ] `A4-28` Test: two items in one run cannot share a timestamp.
-- [ ] `A4-29` Test: a backdated `published_at` is rejected.
+- [x] `A4-21` Trivia generator producing question, answer, and a spoiler-safe summary. §1
+- [x] `A4-22` Fact-of-the-day generator. §1
+- [x] `A4-23` Assign distinct, strictly increasing `published_at` per item in a run. §5.5
+- [x] `A4-24` Never stamp earlier than the feed's current newest item. RULE-7
+- [x] `A4-25` **Insert items and close the run in one transaction.** §9
+- [x] `A4-26` Invalidate the render cache *outside* that transaction — it is idempotent. §9
+- [x] `A4-27` Test: malformed model output rejects the run rather than publishing.
+- [x] `A4-28` Test: two items in one run cannot share a timestamp.
+- [x] `A4-29` Test: a backdated `published_at` is rejected.
 - [ ] `A4-30` One real generation run against OpenAI, manually reviewed for quality. `AFF_LIVE_LLM=1`
 - [ ] `A4-31` Span `llm.generate` comes from SchemaFlux — wire the provider, do not re-instrument. §15.0a
 - [ ] `A4-32` Span `validate` records rejected count and reasons as attributes. §15.0a
@@ -216,16 +216,16 @@ an incident — which is exactly when it is switched on.
 
 ## A5 — Novelty
 
-- [ ] `A5-01` Embedding call through SchemaFlux; record model and dimension per row. §8
-- [ ] `A5-02` Store vectors **L2-normalized** so similarity is a dot product. §8
-- [ ] `A5-03` Brute-force compare against the last 500 — **no vector index**, it would be premature. §8
-- [ ] `A5-04` Reject and retry on cosine above the per-recipe threshold, up to N times. §9.5
-- [ ] `A5-05` After N retries, skip the run and log it as skipped-for-novelty rather than failing.
-- [ ] `A5-06` Detect an embedding-model change and trigger a background re-embed. §8
-- [ ] `A5-07` Build the exclusion list (`{{.RecentTitles}}`) from the last N titles. §7
-- [ ] `A5-08` Seed a corpus of known near-duplicates and assert every one is caught. §18 A5
-- [ ] `A5-09` Assert genuinely distinct items are **not** rejected (false-positive guard).
-- [ ] `A5-10` Record the chosen threshold and the evidence for it, in-repo.
+- [x] `A5-01` Embedding call through SchemaFlux; record model and dimension per row. §8
+- [x] `A5-02` Store vectors **L2-normalized** so similarity is a dot product. §8
+- [x] `A5-03` Brute-force compare against the last 500 — **no vector index**, it would be premature. §8
+- [x] `A5-04` Reject and retry on cosine above the per-recipe threshold, up to N times. §9.5
+- [x] `A5-05` After N retries, skip the run and log it as skipped-for-novelty rather than failing.
+- [x] `A5-06` Detect an embedding-model change and trigger a background re-embed. §8
+- [x] `A5-07` Build the exclusion list (`{{.RecentTitles}}`) from the last N titles. §7
+- [x] `A5-08` Seed a corpus of known near-duplicates and assert every one is caught. §18 A5
+- [x] `A5-09` Assert genuinely distinct items are **not** rejected (false-positive guard).
+- [x] `A5-10` Record the chosen threshold and the evidence for it, in-repo.
 - [ ] `A5-11` Span `novelty.check` with `max_cosine` and the verdict as attributes. §15.0a
 - [ ] `A5-12` `aff_items_rejected_total{reason="novelty"}` incremented on a rejection. §15.0a
 
@@ -237,7 +237,7 @@ an incident — which is exactly when it is switched on.
 - [x] `A6-04` **Normalize candidate URLs once at fetch** — absolutize, strip `utm_*`/`fbclid`. §9.1
 - [x] `A6-05` Use that same normalizer on model output. One function, both sides. §9.6
 - [x] `A6-06` Keep only entries newer than the last run; cap at ~40 candidates. §9.1
-- [ ] `A6-07` Render candidates into `{{.Candidates}}` with title, url, published, excerpt. §7
+- [x] `A6-07` Render candidates into `{{.Candidates}}` with title, url, published, excerpt. §7
 - [x] `A6-08` Enforce link byte-equality against the candidate set; drop and count failures. §9.6
 - [x] `A6-09` Optional second check: link resolves 200 with a non-empty title. §9.6
 - [x] `A6-10` Record reject reasons on the run so the sampler can show them. §10
@@ -253,39 +253,39 @@ an incident — which is exactly when it is switched on.
 
 ## A7 — Scheduler
 
-- [ ] `A7-01` Cron parser evaluating in the recipe's **IANA timezone**, not UTC. §7
-- [ ] `A7-02` DST: a run in the skipped hour fires at the next valid instant. §7
-- [ ] `A7-03` DST: a run in the repeated hour fires **once**, tracked by `last_fired_slot`. §7
-- [ ] `A7-04` Deterministic jitter from `hash(slug)` across the configured window. §14.3
+- [x] `A7-01` Cron parser evaluating in the recipe's **IANA timezone**, not UTC. §7
+- [x] `A7-02` DST: a run in the skipped hour fires at the next valid instant. §7
+- [x] `A7-03` DST: a run in the repeated hour fires **once**, tracked by `last_fired_slot`. §7
+- [x] `A7-04` Deterministic jitter from `hash(slug)` across the configured window. §14.3
 - [ ] `A7-05` Persist `jitter_offset` so the UI readback matches reality. §14.3
-- [ ] `A7-06` Worker pool capped by `AFF_MAX_CONCURRENT_RUNS`. §14.3
-- [ ] `A7-07` Global provider semaphore **shared with sampling**. §13
-- [ ] `A7-08` Per-feed single-flight via a DB run lock with heartbeat. §13
-- [ ] `A7-09` Hard wall-clock timeout per run. §14.3
-- [ ] `A7-10` Auto-disable a feed after N consecutive failures, with a loud reason. §14.3
-- [ ] `A7-11` Recover panics at the worker boundary; record a failed run. §14.3
-- [ ] `A7-12` Enforce per-feed daily token and run caps **before** the call. §13
-- [ ] `A7-13` Enforce a global daily spend ceiling on top of per-feed caps. §13
-- [ ] `A7-14` Kill switch honored by both scheduled runs and sampling. §13
-- [ ] `A7-15` Editable price table; store `est_cost_usd` at the price in force. §13
-- [ ] `A7-16` Injectable clock; no sleeping in tests. §17
-- [ ] `A7-17` Test: both DST cases fire exactly once.
-- [ ] `A7-18` Test: 20 feeds on an identical cron spread across the jitter window. §17
+- [x] `A7-06` Worker pool capped by `AFF_MAX_CONCURRENT_RUNS`. §14.3
+- [x] `A7-07` Global provider semaphore **shared with sampling**. §13
+- [x] `A7-08` Per-feed single-flight via a DB run lock with heartbeat. §13
+- [x] `A7-09` Hard wall-clock timeout per run. §14.3
+- [x] `A7-10` Auto-disable a feed after N consecutive failures, with a loud reason. §14.3
+- [x] `A7-11` Recover panics at the worker boundary; record a failed run. §14.3
+- [x] `A7-12` Enforce per-feed daily token and run caps **before** the call. §13
+- [x] `A7-13` Enforce a global daily spend ceiling on top of per-feed caps. §13
+- [x] `A7-14` Kill switch honored by both scheduled runs and sampling. §13
+- [x] `A7-15` Editable price table; store `est_cost_usd` at the price in force. §13
+- [x] `A7-16` Injectable clock; no sleeping in tests. §17
+- [x] `A7-17` Test: both DST cases fire exactly once.
+- [x] `A7-18` Test: 20 feeds on an identical cron spread across the jitter window. §17
 - [ ] `A7-19` Root span `generation.run` with `feed_slug`, `trigger`, `outcome`. §15.0a
 - [ ] `A7-20` `aff_runs_total` and `aff_run_duration_seconds` on every terminal state. §15.0a
 - [ ] `A7-21` Budget refusals increment `aff_runs_total{outcome="skipped"}`, not an error. §13
 
 ## A8 — Sampling
 
-- [ ] `A8-01` Dry-run path reusing the **entire** generation pipeline, writing no items. §11
-- [ ] `A8-02` Return candidate items, rendered `<item>` XML, novelty verdict, and cost. §11
-- [ ] `A8-03` Return grounded link verdicts including the failing URL. §12.3
+- [x] `A8-01` Dry-run path reusing the **entire** generation pipeline, writing no items. §11
+- [x] `A8-02` Return candidate items, rendered `<item>` XML, novelty verdict, and cost. §11
+- [x] `A8-03` Return grounded link verdicts including the failing URL. §12.3
 - [ ] `A8-04` Persist samples for 24h with `expires_at`. §12.3
 - [ ] `A8-05` Streaming variant emitting deltas as they arrive. §11
 - [ ] `A8-06` Sample size 1–5 and an optional temperature override. §12.3
 - [ ] `A8-07` `PromoteSample` writes the item stamped **now**, retrying on timestamp collision. §11
 - [ ] `A8-08` Sampling draws from the same budget as scheduled generation. §13
-- [ ] `A8-09` Test: sampling writes nothing but a `samples` row.
+- [x] `A8-09` Test: sampling writes nothing but a `samples` row.
 
 ## A9 — Publish plane
 
@@ -316,10 +316,10 @@ an incident — which is exactly when it is switched on.
 
 ## AF — Fuzz, soak, and load (cross-cutting; land as the pieces they target land)
 
-- [ ] `AF-01` Fuzz the HTML sanitizer, seeded with an XSS corpus. §17.3
-- [ ] `AF-02` Any sanitizer output containing a tag or attribute outside the allowlist fails. §17.3
-- [ ] `AF-03` Fuzz the URL normalizer for **idempotence**: `norm(norm(u)) == norm(u)`. §17.3
-- [ ] `AF-04` State why AF-03 matters: §9.6 byte-equality is only sound if normalization is stable.
+- [x] `AF-01` Fuzz the HTML sanitizer, seeded with an XSS corpus. §17.3
+- [x] `AF-02` Any sanitizer output containing a tag or attribute outside the allowlist fails. §17.3
+- [x] `AF-03` Fuzz the URL normalizer for **idempotence**: `norm(norm(u)) == norm(u)`. §17.3
+- [x] `AF-04` State why AF-03 matters: §9.6 byte-equality is only sound if normalization is stable.
 - [ ] `AF-05` Fuzz the RSS renderer: output must always parse as well-formed XML. §17.3
 - [ ] `AF-06` Fuzz the Atom renderer likewise. §17.3
 - [ ] `AF-07` Fuzz the JSON Feed renderer: output must always be valid JSON. §17.3
@@ -517,9 +517,9 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [ ] `C2-01` DNS for `staging.anime.earlcameron.com`. §18 C2
 - [ ] `C2-02` nginx vhost proxying to the container's loopback port. §15
 - [ ] `C2-03` TLS certificate issued and renewing.
-- [ ] `C2-04` `proxy_http_version 1.1` with `Upgrade`/`Connection` headers. §20
-- [ ] `C2-05` `proxy_read_timeout` long enough to outlive an idle admin session. §20
-- [ ] `C2-06` **`proxy_buffering off`** or streaming RPCs arrive in one lump. §20
+- [x] `C2-04` `proxy_http_version 1.1` with `Upgrade`/`Connection` headers. §20
+- [x] `C2-05` `proxy_read_timeout` long enough to outlive an idle admin session. §20
+- [x] `C2-06` **`proxy_buffering off`** or streaming RPCs arrive in one lump. §20
 - [ ] `C2-07` Deploy the current image to staging and confirm feeds are publicly fetchable.
 - [ ] `C2-08` Run the external feed validator against the **live** staging URL. §5.6
 

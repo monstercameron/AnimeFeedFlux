@@ -25,10 +25,14 @@ They are greppable, which is the point.
 
 ## Before anything else: check what actually exists
 
-**As of this writing there is no application code in this repository** — documentation, git hooks,
-and scripts only. Do not assume a package, table, RPC, or binary named in the plan has been built.
-Inspect the tree first. The plan describes the destination; `TODOS.md` describes how far along the
-road anyone has got.
+The repository now has real code, and it is **partial**. Phase A is largely built (store, renderers,
+publish plane, sanitizer, sources, scheduler primitives, generation contract) and Phase B has begun
+(auth). Phases C, D and E are mostly not built.
+
+Do not assume a package, table, RPC, or binary named in the plan exists. Inspect the tree first —
+`go list ./...` and `git ls-files '*.go'` take a second and are authoritative. The plan describes the
+destination; `TODOS.md` describes how far along the road anyone has got, and its per-phase checkbox
+counts are the fastest honest answer.
 
 ## The things agents get wrong here
 
@@ -125,3 +129,17 @@ history.
   the regression suite (§17.5).
 
 "CI will tell me" is not verification.
+
+## Marking tasks done
+
+`TODOS.md` is only useful if it is accurate, and the failure mode is silent
+under-marking rather than over-marking.
+
+- Tick a task the moment its stated check passes, in the same change.
+- **Never chain a tick behind `&&` after a verification command.** A batch of
+  ticks was once lost exactly that way: `staticcheck ... && python tick.py`
+  short-circuited on an unused constant, the script never ran, and thirty-seven
+  completed tasks silently stayed open. Run the verification, read it, then tick.
+- Audit periodically rather than trusting the running count. Group the checkbox
+  lines by prefix and compare against what is actually on disk; a phase showing
+  zero done while its package exists and passes is the tell.
