@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
+	"github.com/monstercameron/AnimeFeedFlux/internal/novelty"
 )
 
 // ErrRunInProgress is returned by StartRun when a run for the same feed is
@@ -231,10 +232,26 @@ const insertRunItemSQL = `
 // lie about what happened. If any item fails to insert (e.g. a
 // UNIQUE(feed_id, published_at) collision, §5.5), the whole transaction rolls
 // back — the run stays 'running' and no items land, never a partial commit.
-func (s *Store) CommitRun(ctx context.Context, runID int64, items []model.Item, summary RunSummary) error {
+//
+// embeddings is optional and variadic ONLY so every existing 4-argument call
+// site (the composition root, hooks.go's wrapper, and every test outside
+// this package) keeps compiling unchanged; logically it is a single
+// []ItemEmbedding. Any entry whose ItemKey does not match one of items is a
+// caller bug and fails the whole commit — silently dropping it would look
+// exactly like the bug this exists to close: an embedding nobody notices is
+// missing. §9 requires items, their embeddings, and the closed run row to
+// commit atomically together, so each embedding is inserted in THIS
+// transaction, keyed off the item id CommitRun itself just minted — not
+// looked up afterward, and never on a separate connection.
+func (s *Store) CommitRun(ctx context.Context, runID int64, items []model.Item, summary RunSummary, embeddings ...ItemEmbedding) error {
 	reasonsJSON, err := summary.reasonsJSON()
 	if err != nil {
 		return err
+	}
+
+	byKey := make(map[string]novelty.Vector, len(embeddings))
+	for _, e := range embeddings {
+		byKey[e.ItemKey] = e.Vector
 	}
 
 	tx, err := s.writer.BeginTx(ctx, nil)
@@ -245,14 +262,32 @@ func (s *Store) CommitRun(ctx context.Context, runID int64, items []model.Item, 
 
 	now := formatTime(time.Now())
 	for _, it := range items {
-		if _, err := tx.ExecContext(ctx, insertRunItemSQL,
+		res, err := tx.ExecContext(ctx, insertRunItemSQL,
 			it.FeedID, it.ItemKey, it.ContentHash, it.Title, it.SummaryText, it.BodyHTML,
 			nullString(it.AnswerHTML), nullString(it.Link), nullString(it.SourceName),
 			formatTime(it.PublishedAt), string(it.Origin), runID,
 			now, now,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("store: inserting item %q for run %d: %w", it.ItemKey, runID, err)
 		}
+		if v, ok := byKey[it.ItemKey]; ok {
+			itemID, err := res.LastInsertId()
+			if err != nil {
+				return fmt.Errorf("store: new item id for %q in run %d: %w", it.ItemKey, runID, err)
+			}
+			if err := insertItemEmbedding(ctx, tx, itemID, v); err != nil {
+				return fmt.Errorf("store: run %d: %w", runID, err)
+			}
+			delete(byKey, it.ItemKey)
+		}
+	}
+	if len(byKey) > 0 {
+		leftover := make([]string, 0, len(byKey))
+		for k := range byKey {
+			leftover = append(leftover, k)
+		}
+		return fmt.Errorf("store: commit run %d: embeddings given for item key(s) %v not present in items", runID, leftover)
 	}
 
 	res, err := tx.ExecContext(ctx, `
@@ -317,12 +352,45 @@ func (s *Store) FailRun(ctx context.Context, runID int64, errorKind, message str
 // (§10/§13): budget exhaustion or novelty exhaustion (§9 step 5) is an
 // intentional no-op, not an error, and the dashboard should be able to tell
 // the two apart at a glance.
-func (s *Store) SkipRun(ctx context.Context, runID int64, reason string) error {
+//
+// summary is optional and variadic ONLY so every existing 3-argument call
+// site keeps compiling unchanged; logically it is a single RunSummary,
+// exactly like FailRun's parameter, and passing more than one is a caller
+// bug. The caller contract: a run skipped BEFORE any spend — a per-feed
+// budget or run cap enforced ahead of the call (§13) — should omit summary
+// or pass a zero RunSummary, and this records tokens_in/tokens_out/
+// est_cost_usd as zero, honestly. A run skipped AFTER spend — the novelty
+// gate exhausting its retries once every candidate came back a duplicate
+// (§9 step 5), where the model has already been called one or more times —
+// MUST pass the RunSummary recording that spend, or the run's cost silently
+// disappears from SpendSince and the cost history (§13: "every run ...
+// stores its own est_cost_usd at the price in force, so history stays
+// meaningful after a price change" — a skipped run is no exception).
+func (s *Store) SkipRun(ctx context.Context, runID int64, reason string, summary ...RunSummary) error {
+	var rs RunSummary
+	switch len(summary) {
+	case 0:
+	case 1:
+		rs = summary[0]
+	default:
+		return fmt.Errorf("store: SkipRun: at most one RunSummary may be passed, got %d", len(summary))
+	}
+	reasonsJSON, err := rs.reasonsJSON()
+	if err != nil {
+		return err
+	}
+
 	now := formatTime(time.Now())
 	res, err := s.writer.ExecContext(ctx, `
-		UPDATE runs SET status = 'skipped', finished_at = ?, error = ?, heartbeat_at = ?
+		UPDATE runs
+		SET status = 'skipped', finished_at = ?, error = ?, heartbeat_at = ?,
+		    tokens_in = ?, tokens_out = ?, est_cost_usd = ?,
+		    items_rejected = ?, reject_reasons_json = ?
 		WHERE id = ? AND status = 'running'`,
-		now, nullString(reason), now, runID)
+		now, nullString(reason), now,
+		rs.TokensIn, rs.TokensOut, rs.CostUSD,
+		rs.ItemsRejected, reasonsJSON,
+		runID)
 	if err != nil {
 		return fmt.Errorf("store: skipping run %d: %w", runID, err)
 	}

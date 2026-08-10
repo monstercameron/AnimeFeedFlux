@@ -278,6 +278,105 @@ func TestFailRunStillRecordsTokensAndCost(t *testing.T) {
 	}
 }
 
+func TestSkipRunWithNoSummaryRecordsZeroSpend(t *testing.T) {
+	// The pre-call budget-gate case (§13): SkipRun called with no RunSummary
+	// must record honest zeros, not leave the previous run's stale tokens/
+	// cost columns in place.
+	s := newTestStore(t)
+	ctx := t.Context()
+	feedID, err := s.CreateFeed(ctx, makeFeed("trivia"))
+	if err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+	runID, err := s.StartRun(ctx, feedID, "cron", "worker-1")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+
+	if err := s.SkipRun(ctx, runID, "budget exhausted"); err != nil {
+		t.Fatalf("skip run: %v", err)
+	}
+
+	runs, err := s.ListRuns(ctx, feedID, 10)
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	r := runs[0]
+	if r.Status != "skipped" {
+		t.Errorf("status = %q, want skipped", r.Status)
+	}
+	if r.TokensIn != 0 || r.TokensOut != 0 || r.EstCostUSD != 0 {
+		t.Errorf("spend = %d/%d/%v, want 0/0/0", r.TokensIn, r.TokensOut, r.EstCostUSD)
+	}
+}
+
+// TestSkipRunAfterSpendRecordsTokensAndCost is Gap 1: a run can be skipped
+// AFTER money has been spent — the novelty gate rejecting every candidate on
+// the third retry, for instance (§9 step 5) — and that spend must still show
+// up on the run and in SpendSince, exactly like a failed run (§13, §22 J5).
+func TestSkipRunAfterSpendRecordsTokensAndCost(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	feedID, err := s.CreateFeed(ctx, makeFeed("trivia"))
+	if err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+	runID, err := s.StartRun(ctx, feedID, "cron", "worker-1")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+
+	summary := RunSummary{
+		TokensIn: 300, TokensOut: 150, CostUSD: 0.09,
+		ItemsRejected: 3,
+		RejectReasons: map[string]int{"novelty_duplicate": 3},
+	}
+	if err := s.SkipRun(ctx, runID, "novelty_exhausted", summary); err != nil {
+		t.Fatalf("skip run: %v", err)
+	}
+
+	runs, err := s.ListRuns(ctx, feedID, 10)
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	r := runs[0]
+	if r.Status != "skipped" {
+		t.Errorf("status = %q, want skipped", r.Status)
+	}
+	if r.TokensIn != 300 || r.TokensOut != 150 || r.EstCostUSD != 0.09 {
+		t.Errorf("spend = %d/%d/%v, want 300/150/0.09", r.TokensIn, r.TokensOut, r.EstCostUSD)
+	}
+	if r.ItemsRejected != 3 || r.RejectReasons["novelty_duplicate"] != 3 {
+		t.Errorf("reject accounting = %d/%v", r.ItemsRejected, r.RejectReasons)
+	}
+
+	// And it must not vanish from spend accounting either — the whole point
+	// of the fix.
+	_, _, cost, err := s.SpendSince(ctx, feedID, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("spend since: %v", err)
+	}
+	if cost != 0.09 {
+		t.Errorf("SpendSince cost = %v, want 0.09 — a skipped run's spend must still count", cost)
+	}
+}
+
+func TestSkipRunRejectsMoreThanOneSummary(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	feedID, err := s.CreateFeed(ctx, makeFeed("trivia"))
+	if err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+	runID, err := s.StartRun(ctx, feedID, "cron", "worker-1")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if err := s.SkipRun(ctx, runID, "reason", RunSummary{}, RunSummary{}); err == nil {
+		t.Fatal("expected an error passing two RunSummary values")
+	}
+}
+
 func TestSpendSinceSumsAndRespectsWindow(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()

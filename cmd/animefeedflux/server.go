@@ -9,13 +9,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/http"
 	"sort"
 	"time"
 
 	"github.com/monstercameron/AnimeFeedFlux/internal/config"
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
-	"github.com/monstercameron/AnimeFeedFlux/internal/publish"
 	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 )
 
@@ -57,55 +55,20 @@ func openStore(ctx context.Context, cfg *config.Config) (*store.Store, error) {
 	return st, nil
 }
 
-// buildPublishHandler constructs publish.Deps and returns the publish
-// plane's http.Handler.
+// The publish handler is built by buildPublishHandlerWithInvalidator in
+// wire.go, which is this function's former body plus the one thing it
+// could not return: the publish.Invalidator bound to the very cache the
+// handler serves from. Two builders existed briefly because wire.go was
+// written while this file was off-limits, and a near-duplicate of a
+// wiring function is exactly the kind of thing that drifts silently —
+// the copy gets a fix the original does not, and which one production
+// uses is decided by an import nobody re-reads. There is one now.
 //
-// Every Deps func below is a closure over st.Reader(), never st.Writer().
-// That is not a style choice: PLAN.md §2's whole claim is that the publish
-// plane holds a handle with no write methods, so that a bug in this code
-// path cannot corrupt the database because it structurally has no writer to
-// reach — not because anyone was careful. Wiring these closures to the
-// writer "for convenience" (store.Store's own CRUD helpers in items.go all
-// go through the writer, even for reads) would quietly delete that
-// property, so this file talks to store.Reader's three-method interface
-// directly with its own SQL instead of reusing those helpers.
-func buildPublishHandler(st *store.Store, cfg *config.Config, version string) (http.Handler, error) {
-	reader := st.Reader()
-
-	// TagYear (PLAN.md §5.1, §9): the Tag URI epoch must be FIXED, never
-	// re-derived from time.Now(), or every guid in every feed changes on New
-	// Year's Day. publish.Deps.TagYear is documented (internal/publish/
-	// server.go) as a single deployment-wide value, not a per-feed one —
-	// model.Feed carries no creation-year field, and adding one is out of
-	// this change's scope (model.go and publish/server.go are not touched
-	// here). So the fixed value used for the whole deployment is computed
-	// ONCE at boot, from the earliest feed's creation year already on file,
-	// rather than from the clock — satisfying "never time.Now().Year()"
-	// within the shape Deps already has.
-	tagYear, err := bootTagYear(context.Background(), reader)
-	if err != nil {
-		return nil, fmt.Errorf("resolving tag year: %w", err)
-	}
-
-	base := cfg.PublicBaseURL.String()
-
-	deps := publish.Deps{
-		GetFeed: func(ctx context.Context, slug string) (model.Feed, bool, error) {
-			return getFeedBySlug(ctx, reader, slug)
-		},
-		ListItems: func(ctx context.Context, feedID int64) ([]model.Item, error) { return listItems(ctx, reader, feedID) },
-		ListFeeds: func(ctx context.Context) ([]model.Feed, error) { return listFeeds(ctx, reader) },
-		GetItem: func(ctx context.Context, itemKey string) (model.Feed, model.Item, bool, error) {
-			return getItem(ctx, reader, itemKey)
-		},
-		BaseURL:   base,
-		Generator: "AnimeFeedFlux " + version,
-		DocsURL:   docsURL,
-		TagYear:   tagYear,
-	}
-
-	return publish.NewServer(deps), nil
-}
+// The §2 property it exists to hold is unchanged and is the reason the
+// function is worth reading: every publish.Deps closure is built over
+// st.Reader(), never st.Writer(), so a bug in the public read path
+// cannot corrupt the database because it structurally has no writer to
+// reach — not because anyone was careful.
 
 // bootTagYear resolves the fixed Tag URI epoch from the earliest feed
 // creation timestamp on file. An empty store (first boot, before any feed

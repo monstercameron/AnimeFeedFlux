@@ -25,6 +25,7 @@ import (
 	"github.com/monstercameron/AnimeFeedFlux/internal/ids"
 	"github.com/monstercameron/AnimeFeedFlux/internal/llm"
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
+	"github.com/monstercameron/AnimeFeedFlux/internal/novelty"
 	"github.com/monstercameron/AnimeFeedFlux/internal/sources"
 )
 
@@ -59,6 +60,36 @@ type Store interface {
 // last 500 embeddings (§8.1); this package only needs the verdict.
 type Novelty interface {
 	Check(ctx context.Context, feedID int64, text string) (dup bool, nearest string, score float64, err error)
+}
+
+// VectorNovelty is an OPTIONAL extension of Novelty: a Check implementation
+// that already embeds the candidate internally (the production adapter does,
+// via novelty.Gate) can also hand that vector back, so Run can persist it
+// through CommitRun instead of embedding the same text a second time just to
+// get something to write. This is a separate interface, not a change to
+// Novelty's own signature, because generate.Novelty is implemented outside
+// this package too (internal/rpc's Sample path, and every test double in
+// internal/flowtest/internal/e2e) and none of those need or want to carry a
+// vector — Sample never persists one, and widening the required signature
+// would force every one of those unrelated implementers to grow a field they
+// have no use for. Run type-asserts deps.Novelty against this interface
+// (filterNovel) and falls back to plain Check when it is absent.
+type VectorNovelty interface {
+	Novelty
+	CheckVector(ctx context.Context, feedID int64, text string) (dup bool, nearest string, score float64, vec novelty.Vector, err error)
+}
+
+// ItemEmbedding pairs a stamped item's key with the novelty vector computed
+// for it during THIS run, so RunRecord can carry it to Store.CommitRun
+// without Store (an interface declared in this file, not internal/store)
+// needing to know anything about how embeddings are persisted. Mirrors
+// internal/store's own ItemEmbedding (embeddings.go) field-for-field —
+// deliberately a separate type rather than an import of internal/store's,
+// because this package must not depend on internal/store (this file's own
+// header).
+type ItemEmbedding struct {
+	ItemKey string
+	Vector  novelty.Vector
 }
 
 // Fetcher supplies the normalized candidate set for a grounded feed (PLAN.md
@@ -171,6 +202,15 @@ type RunRecord struct {
 	ItemsRejected int
 	RejectReasons map[string]int // reason token -> count (§10 reject_reasons_json)
 
+	// Embeddings is the novelty vector computed for each item this run
+	// published, keyed by the item's own ItemKey (stampItems assigns that
+	// key; the vector is captured earlier, during filterNovel's novelty
+	// check, on the SAME embed call — never a second one). Empty whenever
+	// there is nothing to publish (skipped/failed runs) or the configured
+	// Novelty does not implement VectorNovelty (grounded feeds have no
+	// novelty gate at all).
+	Embeddings []ItemEmbedding
+
 	TokensIn  int // estimated, see EstCostUSD
 	TokensOut int // estimated, see EstCostUSD
 
@@ -220,7 +260,7 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 	// here so Store.CommitRun is called exactly once regardless of which
 	// step failed, satisfying §9's "items and the closed run row commit in
 	// one call" for every outcome, not only success.
-	commit := func(status, errorKind string, runErr error, items []model.Item) (RunResult, error) {
+	commit := func(status, errorKind string, runErr error, items []model.Item, embeddings []ItemEmbedding) (RunResult, error) {
 		run := RunRecord{
 			FeedID:        feed.ID,
 			StartedAt:     started,
@@ -230,6 +270,7 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 			ItemsAdded:    len(items),
 			ItemsRejected: sumReasons(rejectTotals),
 			RejectReasons: rejectTotals,
+			Embeddings:    embeddings,
 			TokensIn:      tokensIn,
 			TokensOut:     tokensOut,
 			EstCostUSD:    estimateCostUSD(tokensIn, tokensOut, spec),
@@ -249,12 +290,12 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 
 	data, opts, err := acquireContext(ctx, deps, feed, spec, started)
 	if err != nil {
-		return commit(StatusFailed, "context_acquire_failed", err, nil)
+		return commit(StatusFailed, "context_acquire_failed", err, nil, nil)
 	}
 
 	promptText, err := Render(spec.UserPromptTemplate, data)
 	if err != nil {
-		return commit(StatusFailed, "prompt_render_failed", err, nil)
+		return commit(StatusFailed, "prompt_render_failed", err, nil, nil)
 	}
 
 	requestID := fmt.Sprintf("%s-run-%d", feed.Slug, started.UnixNano())
@@ -269,6 +310,7 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 	}
 
 	var novelItems []model.Item
+	var novelVecs []novelty.Vector
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		ar, aerr := runAttempt(ctx, deps, spec, opts, spec.SystemPrompt, promptText, requestID)
 		tokensIn += ar.tokensIn
@@ -278,16 +320,18 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 		}
 		if aerr != nil {
 			if errors.Is(aerr, ErrMalformedOutput) {
-				return commit(StatusFailed, "malformed_output", aerr, nil)
+				return commit(StatusFailed, "malformed_output", aerr, nil, nil)
 			}
-			return commit(StatusFailed, errorKindFromProvider(aerr), aerr, nil)
+			return commit(StatusFailed, errorKindFromProvider(aerr), aerr, nil, nil)
 		}
 
 		batch := ar.valid
+		var batchVecs []novelty.Vector
 		if feed.Kind == model.KindGenerative {
-			batch = filterNovel(ctx, deps, feed.ID, batch, rejectTotals)
+			batch, batchVecs = filterNovel(ctx, deps, feed.ID, batch, rejectTotals)
 		}
 		novelItems = append(novelItems, batch...)
+		novelVecs = append(novelVecs, batchVecs...)
 
 		if len(novelItems) > 0 || feed.Kind != model.KindGenerative {
 			break
@@ -303,21 +347,24 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 		}
 		// Not an error: §9 step 5 is explicit that a skipped run is not a
 		// failed one.
-		return commit(StatusSkipped, errKind, nil, nil)
+		return commit(StatusSkipped, errKind, nil, nil, nil)
 	}
 
 	if spec.ItemsPerRun > 0 && len(novelItems) > spec.ItemsPerRun {
 		novelItems = novelItems[:spec.ItemsPerRun]
+		if len(novelVecs) > spec.ItemsPerRun {
+			novelVecs = novelVecs[:spec.ItemsPerRun]
+		}
 	}
 
 	newest, err := deps.Store.NewestPublished(ctx, feed.ID)
 	if err != nil {
-		return commit(StatusFailed, "store_error", err, nil)
+		return commit(StatusFailed, "store_error", err, nil, nil)
 	}
 
 	items := stampItems(deps, feed, novelItems, newest, deps.now())
 
-	return commit(StatusCompleted, "", nil, items)
+	return commit(StatusCompleted, "", nil, items, zipEmbeddings(items, novelVecs))
 }
 
 // --- Sample: the dry run (§11 "Sample", §12.3) ---
@@ -369,7 +416,10 @@ func Sample(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (SampleR
 
 	items := ar.valid
 	if feed.Kind == model.KindGenerative {
-		items = filterNovel(ctx, deps, feed.ID, items, rejectTotals)
+		// Sample never persists (this function's own doc comment), so the
+		// vector filterNovel may have captured is discarded here — there is
+		// nothing for it to be written against.
+		items, _ = filterNovel(ctx, deps, feed.ID, items, rejectTotals)
 	}
 	if spec.ItemsPerRun > 0 && len(items) > spec.ItemsPerRun {
 		items = items[:spec.ItemsPerRun]
@@ -557,13 +607,38 @@ func repairNote(reasons map[string]int) string {
 // an unchecked item through as "novel" — an item that skipped the dedup
 // check because the check itself broke is exactly the failure mode §9 step 5
 // exists to prevent.
-func filterNovel(ctx context.Context, deps Deps, feedID int64, items []model.Item, rejectTotals map[string]int) []model.Item {
+//
+// The second return value is the embedding vector captured for each SURVIVING
+// item, in the same order, ONLY when deps.Novelty implements VectorNovelty
+// (the production adapter does). It is nil whenever there is no gate, the
+// gate is the plain Novelty shape (tests, Sample callers that don't care),
+// or every candidate in items was rejected — callers must not assume its
+// length equals len(items) coming in, only that it lines up with what this
+// function returns as the first value.
+func filterNovel(ctx context.Context, deps Deps, feedID int64, items []model.Item, rejectTotals map[string]int) ([]model.Item, []novelty.Vector) {
 	if deps.Novelty == nil {
-		return items
+		return items, nil
 	}
+	vn, hasVectors := deps.Novelty.(VectorNovelty)
+
 	out := make([]model.Item, 0, len(items))
+	var vecs []novelty.Vector
+	if hasVectors {
+		vecs = make([]novelty.Vector, 0, len(items))
+	}
 	for _, it := range items {
-		dup, _, _, err := deps.Novelty.Check(ctx, feedID, it.Title+" "+it.SummaryText)
+		text := it.Title + " " + it.SummaryText
+
+		var (
+			dup bool
+			vec novelty.Vector
+			err error
+		)
+		if hasVectors {
+			dup, _, _, vec, err = vn.CheckVector(ctx, feedID, text)
+		} else {
+			dup, _, _, err = deps.Novelty.Check(ctx, feedID, text)
+		}
 		if err != nil {
 			rejectTotals[ReasonNoveltyCheckFailed]++
 			continue
@@ -573,6 +648,27 @@ func filterNovel(ctx context.Context, deps Deps, feedID int64, items []model.Ite
 			continue
 		}
 		out = append(out, it)
+		if hasVectors {
+			vecs = append(vecs, vec)
+		}
+	}
+	return out, vecs
+}
+
+// zipEmbeddings pairs stamped items with the novelty vectors filterNovel
+// captured for them, by position — valid because stampItems (called just
+// before this) preserves order and never drops or reorders entries. A length
+// mismatch means vecs came from a Novelty that does not implement
+// VectorNovelty (or there was no gate at all, e.g. a grounded feed); in that
+// case there is nothing to zip, so this returns nil rather than guessing —
+// CommitRun's embeddings argument is optional for exactly this reason.
+func zipEmbeddings(items []model.Item, vecs []novelty.Vector) []ItemEmbedding {
+	if len(vecs) == 0 || len(vecs) != len(items) {
+		return nil
+	}
+	out := make([]ItemEmbedding, len(items))
+	for i, it := range items {
+		out[i] = ItemEmbedding{ItemKey: it.ItemKey, Vector: vecs[i]}
 	}
 	return out
 }

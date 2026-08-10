@@ -49,6 +49,21 @@ service ItemService {
   // "Correction:". It does not mutate the original item's row, so it does
   // not require the original's expected_version.
   rpc PublishCorrection(ItemServicePublishCorrectionRequest) returns (ItemServicePublishCorrectionResponse);
+  // ListRevisions returns an item's edit history, newest first, with enough
+  // per entry to render a diff without a second call (PLAN.md §12.4: "edits
+  // are recorded in item_revisions with a diff view and revert"). An item
+  // with no edits returns an empty list, not an error.
+  rpc ListRevisions(ItemServiceListRevisionsRequest) returns (ItemServiceListRevisionsResponse);
+  // RevertRevision is an ORDINARY EDIT, not a rewind: it restores the field
+  // values recorded as `old_value` on the chosen revision and records that
+  // restoration as a brand-new item_revisions entry, through the same path
+  // Update uses. It never deletes a row from item_revisions — history that
+  // could be erased by the thing it audits would not be history. It takes
+  // expected_version like every other mutation (PLAN.md §11) so a revert
+  // racing a concurrent edit conflicts loudly instead of silently winning.
+  // item_key is never touched — "revert restores the old state" is exactly
+  // the reasoning that would wrongly restore an old guid too (PLAN.md §5.1).
+  rpc RevertRevision(ItemServiceRevertRevisionRequest) returns (ItemServiceRevertRevisionResponse);
 }
 
 // Item mirrors internal/model.Item. Field numbers are grouped in blocks of
@@ -179,5 +194,53 @@ message ItemServicePublishCorrectionRequest {
 }
 
 message ItemServicePublishCorrectionResponse {
+  Item item = 1;
+}
+
+// ItemRevisionChange is one field's before/after within a revision
+// (`item_revisions`, PLAN.md §10). old_value/new_value use "" for a field
+// that was/became NULL — the same convention items.go's nullString already
+// uses for answer_html/link/source_name, kept consistent rather than adding
+// a second way to spell "absent".
+message ItemRevisionChange {
+  string field = 1;
+  string old_value = 2;
+  string new_value = 3;
+}
+
+// ItemRevision groups every item_revisions row written by one edit (they
+// share the same `at`) into a single entry, so the diff view renders one
+// revision per edit rather than one row per changed field.
+message ItemRevision {
+  // The item_revisions.id of the first field-row this edit wrote — stable
+  // and immutable (rows are never updated or deleted), so it is safe to use
+  // as this revision's identifier in RevertRevision below.
+  int64 id = 1;
+  int64 item_id = 2;
+  google.protobuf.Timestamp at = 3;
+  repeated ItemRevisionChange changes = 4;
+}
+
+message ItemServiceListRevisionsRequest {
+  int64 item_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ItemServiceListRevisionsResponse {
+  // Newest first (PLAN.md §12.4). Empty, not an error, for an item with no
+  // recorded edits.
+  repeated ItemRevision revisions = 1;
+  string next_page_token = 2;
+}
+
+message ItemServiceRevertRevisionRequest {
+  int64 item_id = 1;
+  // ItemRevision.id from a prior ListRevisions call.
+  int64 revision_id = 2;
+  int64 expected_version = 3;
+}
+
+message ItemServiceRevertRevisionResponse {
   Item item = 1;
 }

@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -451,7 +452,13 @@ func TestItemInvalidator_CalledOnEveryMutatingPath(t *testing.T) {
 	}
 	expect(t, "publish correction")
 
-	payload := `[{"candidateId":"c1","title":"Promoted","summaryText":"promoted summary","bodyHtml":"<p>promoted</p>"}]`
+	// Field names are the generated struct's encoding/json tags, NOT protojson
+	// aliases: sample.go writes this payload with encoding/json over
+	// []*affv1.SampleCandidate, so the wire name is `candidate_id`. This
+	// fixture asserted `candidateId` and passed for as long as the decoder
+	// carried the same mistake — a hand-written fixture mirroring a
+	// hand-written decoder agreed with each other and with nothing else.
+	payload := `[{"candidate_id":"c1","title":"Promoted","summary_text":"promoted summary","body_html":"<p>promoted</p>"}]`
 	sampleID, err := st.PutSample(ctx, feedID, []byte(payload), 10, 20, 0.01, time.Hour)
 	if err != nil {
 		t.Fatalf("put sample: %v", err)
@@ -492,5 +499,406 @@ func TestItemService_NoPurgeDeletedMethod(t *testing.T) {
 		if implType.Method(i).Name == "PurgeDeleted" {
 			t.Fatal("*ItemServer must not implement PurgeDeleted (PLAN.md §12.4)")
 		}
+	}
+}
+
+// TestItemListRevisions_EmptyForItemWithNoEdits proves an item that has
+// never been edited returns an empty list, not an error (PLAN.md §12.4).
+func TestItemListRevisions_EmptyForItemWithNoEdits(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-no-revisions")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	resp, err := srv.ListRevisions(ctx, &affv1.ItemServiceListRevisionsRequest{ItemId: created.GetItem().GetId()})
+	if err != nil {
+		t.Fatalf("list revisions on a never-edited item must not error: %v", err)
+	}
+	if len(resp.GetRevisions()) != 0 {
+		t.Fatalf("expected 0 revisions, got %d", len(resp.GetRevisions()))
+	}
+	if resp.GetNextPageToken() != "" {
+		t.Fatalf("expected no next_page_token, got %q", resp.GetNextPageToken())
+	}
+}
+
+// TestItemListRevisions_NewestFirstWithPagination proves ListRevisions
+// groups the per-field rows one entry per edit, orders them newest first,
+// and paginates without splitting a group across pages (PLAN.md §12.4).
+func TestItemListRevisions_NewestFirstWithPagination(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-revisions-page")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "v0", SummaryText: "s0", BodyHtml: "<p>b0</p>",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	id := created.GetItem().GetId()
+	version := created.GetItem().GetVersion()
+
+	// item_revisions groups rows sharing `at`, and `at` comes from srv.now()
+	// at RFC3339Nano precision — back-to-back Updates in a tight test loop
+	// can land on the same wall-clock instant on a coarse system clock and
+	// wrongly merge into one group. An injected, strictly increasing clock
+	// (the same pattern auth_test.go/interceptor_test.go use) makes each
+	// edit's `at` distinct by construction rather than by hoping the clock
+	// is fine-grained enough.
+	clock := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	srv.now = func() time.Time {
+		clock = clock.Add(time.Second)
+		return clock
+	}
+
+	// Three edits, each touching both title and summary_text — two
+	// item_revisions rows per edit, three edits total.
+	const edits = 3
+	for i := 1; i <= edits; i++ {
+		updated, err := srv.Update(ctx, &affv1.ItemServiceUpdateRequest{
+			Item: &affv1.Item{
+				Id: id, Title: fmt.Sprintf("v%d", i), SummaryText: fmt.Sprintf("s%d", i), BodyHtml: "<p>b0</p>",
+			},
+			ExpectedVersion: version,
+		})
+		if err != nil {
+			t.Fatalf("update %d: %v", i, err)
+		}
+		version = updated.GetItem().GetVersion()
+	}
+
+	// Page 1: size 2 of 3 edits.
+	page1, err := srv.ListRevisions(ctx, &affv1.ItemServiceListRevisionsRequest{ItemId: id, PageSize: 2})
+	if err != nil {
+		t.Fatalf("list revisions page 1: %v", err)
+	}
+	if len(page1.GetRevisions()) != 2 {
+		t.Fatalf("page 1: got %d revisions, want 2", len(page1.GetRevisions()))
+	}
+	if page1.GetNextPageToken() == "" {
+		t.Fatal("page 1: expected a next_page_token, edits remain")
+	}
+	// Newest first: the most recent edit (title "v3") must come first.
+	if got := page1.GetRevisions()[0].GetChanges(); !itemRevisionChangesContain(got, "title", "v2", "v3") {
+		t.Fatalf("page 1[0] changes = %+v, want a title v2->v3 change", got)
+	}
+	if got := page1.GetRevisions()[1].GetChanges(); !itemRevisionChangesContain(got, "title", "v1", "v2") {
+		t.Fatalf("page 1[1] changes = %+v, want a title v1->v2 change", got)
+	}
+	// Each revision bundles both fields changed in that edit — no second
+	// call needed to render its diff.
+	if got := len(page1.GetRevisions()[0].GetChanges()); got != 2 {
+		t.Fatalf("page 1[0]: got %d field changes, want 2 (title + summary_text)", got)
+	}
+
+	// Page 2: the remaining oldest edit.
+	page2, err := srv.ListRevisions(ctx, &affv1.ItemServiceListRevisionsRequest{
+		ItemId: id, PageSize: 2, PageToken: page1.GetNextPageToken(),
+	})
+	if err != nil {
+		t.Fatalf("list revisions page 2: %v", err)
+	}
+	if len(page2.GetRevisions()) != 1 {
+		t.Fatalf("page 2: got %d revisions, want 1", len(page2.GetRevisions()))
+	}
+	if page2.GetNextPageToken() != "" {
+		t.Fatalf("page 2: expected no next_page_token, got %q", page2.GetNextPageToken())
+	}
+	if got := page2.GetRevisions()[0].GetChanges(); !itemRevisionChangesContain(got, "title", "v0", "v1") {
+		t.Fatalf("page 2[0] changes = %+v, want a title v0->v1 change", got)
+	}
+
+	// Every returned revision id must be unique — proves grouping did not
+	// collapse distinct edits together.
+	seen := map[int64]bool{}
+	for _, rev := range append(append([]*affv1.ItemRevision{}, page1.GetRevisions()...), page2.GetRevisions()...) {
+		if seen[rev.GetId()] {
+			t.Fatalf("duplicate revision id %d across pages", rev.GetId())
+		}
+		seen[rev.GetId()] = true
+	}
+}
+
+func itemRevisionChangesContain(changes []*affv1.ItemRevisionChange, field, oldValue, newValue string) bool {
+	for _, c := range changes {
+		if c.GetField() == field && c.GetOldValue() == oldValue && c.GetNewValue() == newValue {
+			return true
+		}
+	}
+	return false
+}
+
+// TestItemRevertRevision_CreatesNewRevisionNeverDeletesOld proves revert is
+// an ordinary edit: it produces a NEW item_revisions entry and leaves every
+// prior revision row in place (PLAN.md §12.4 — history that could be erased
+// by the thing it audits would not be history).
+func TestItemRevertRevision_CreatesNewRevisionNeverDeletesOld(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-revert-history")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "Original", SummaryText: "orig", BodyHtml: "<p>b</p>",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	updated, err := srv.Update(ctx, &affv1.ItemServiceUpdateRequest{
+		Item: &affv1.Item{
+			Id: created.GetItem().GetId(), Title: "Edited wrong", SummaryText: "wrong", BodyHtml: "<p>b</p>",
+		},
+		ExpectedVersion: created.GetItem().GetVersion(),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	before, err := srv.ListRevisions(ctx, &affv1.ItemServiceListRevisionsRequest{ItemId: created.GetItem().GetId()})
+	if err != nil {
+		t.Fatalf("list revisions before revert: %v", err)
+	}
+	if len(before.GetRevisions()) != 1 {
+		t.Fatalf("before revert: got %d revisions, want 1", len(before.GetRevisions()))
+	}
+	editRevisionID := before.GetRevisions()[0].GetId()
+
+	reverted, err := srv.RevertRevision(ctx, &affv1.ItemServiceRevertRevisionRequest{
+		ItemId: created.GetItem().GetId(), RevisionId: editRevisionID, ExpectedVersion: updated.GetItem().GetVersion(),
+	})
+	if err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+	if got := reverted.GetItem().GetTitle(); got != "Original" {
+		t.Fatalf("reverted title = %q, want %q", got, "Original")
+	}
+	if got := reverted.GetItem().GetSummaryText(); got != "orig" {
+		t.Fatalf("reverted summary_text = %q, want %q", got, "orig")
+	}
+
+	after, err := srv.ListRevisions(ctx, &affv1.ItemServiceListRevisionsRequest{ItemId: created.GetItem().GetId()})
+	if err != nil {
+		t.Fatalf("list revisions after revert: %v", err)
+	}
+	if len(after.GetRevisions()) != 2 {
+		t.Fatalf("after revert: got %d revisions, want 2 (original edit + the revert as a new edit)", len(after.GetRevisions()))
+	}
+	// The original edit's row must still be present, byte-identical.
+	var stillPresent bool
+	for _, rev := range after.GetRevisions() {
+		if rev.GetId() == editRevisionID {
+			stillPresent = true
+			if !itemRevisionChangesContain(rev.GetChanges(), "title", "Original", "Edited wrong") {
+				t.Fatalf("original revision %d's changes were mutated: %+v", editRevisionID, rev.GetChanges())
+			}
+		}
+	}
+	if !stillPresent {
+		t.Fatalf("original revision %d was deleted by revert — history must never be erased", editRevisionID)
+	}
+	// The newest revision is the revert itself, recorded as an ordinary
+	// forward edit (Edited wrong -> Original), not a rewind.
+	newest := after.GetRevisions()[0]
+	if newest.GetId() == editRevisionID {
+		t.Fatal("revert did not write a new revision row")
+	}
+	if !itemRevisionChangesContain(newest.GetChanges(), "title", "Edited wrong", "Original") {
+		t.Fatalf("revert's own revision changes = %+v, want a title Edited wrong->Original change", newest.GetChanges())
+	}
+}
+
+// TestItemRevertRevision_PreservesItemKey is the specific guard the task
+// calls out by name: "revert restores the old state" is exactly the
+// reasoning that would wrongly restore an old guid too, so this is tested
+// on the revert path directly rather than assumed from the Update test
+// (PLAN.md §5.1).
+func TestItemRevertRevision_PreservesItemKey(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-revert-guid")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "Original", SummaryText: "orig", BodyHtml: "<p>b</p>",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	originalKey := created.GetItem().GetItemKey()
+	if originalKey == "" {
+		t.Fatal("expected item_key to be assigned on create")
+	}
+
+	updated, err := srv.Update(ctx, &affv1.ItemServiceUpdateRequest{
+		Item: &affv1.Item{
+			Id: created.GetItem().GetId(), Title: "Edited", SummaryText: "edited", BodyHtml: "<p>b</p>",
+		},
+		ExpectedVersion: created.GetItem().GetVersion(),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	revisions, err := srv.ListRevisions(ctx, &affv1.ItemServiceListRevisionsRequest{ItemId: created.GetItem().GetId()})
+	if err != nil {
+		t.Fatalf("list revisions: %v", err)
+	}
+	revisionID := revisions.GetRevisions()[0].GetId()
+
+	reverted, err := srv.RevertRevision(ctx, &affv1.ItemServiceRevertRevisionRequest{
+		ItemId: created.GetItem().GetId(), RevisionId: revisionID, ExpectedVersion: updated.GetItem().GetVersion(),
+	})
+	if err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+	if got := reverted.GetItem().GetItemKey(); got != originalKey {
+		t.Fatalf("item_key changed on revert: got %q, want %q (byte-identical, PLAN.md §5.1)", got, originalKey)
+	}
+
+	// Re-read from storage to rule out the response echoing a stale value.
+	reread, err := srv.Get(ctx, &affv1.ItemServiceGetRequest{Id: created.GetItem().GetId()})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := reread.GetItem().GetItemKey(); got != originalKey {
+		t.Fatalf("stored item_key changed on revert: got %q, want %q", got, originalKey)
+	}
+}
+
+// TestItemRevertRevision_VersionMismatch proves a revert racing a concurrent
+// edit conflicts loudly rather than silently winning (PLAN.md §11).
+func TestItemRevertRevision_VersionMismatch(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-revert-version")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "Original", SummaryText: "orig", BodyHtml: "<p>b</p>",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	updated, err := srv.Update(ctx, &affv1.ItemServiceUpdateRequest{
+		Item: &affv1.Item{
+			Id: created.GetItem().GetId(), Title: "Edited", SummaryText: "edited", BodyHtml: "<p>b</p>",
+		},
+		ExpectedVersion: created.GetItem().GetVersion(),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	revisions, err := srv.ListRevisions(ctx, &affv1.ItemServiceListRevisionsRequest{ItemId: created.GetItem().GetId()})
+	if err != nil {
+		t.Fatalf("list revisions: %v", err)
+	}
+	revisionID := revisions.GetRevisions()[0].GetId()
+
+	// A second, concurrent edit bumps the version out from under the revert.
+	if _, err := srv.Update(ctx, &affv1.ItemServiceUpdateRequest{
+		Item: &affv1.Item{
+			Id: created.GetItem().GetId(), Title: "Raced ahead", SummaryText: "raced", BodyHtml: "<p>b</p>",
+		},
+		ExpectedVersion: updated.GetItem().GetVersion(),
+	}); err != nil {
+		t.Fatalf("racing update: %v", err)
+	}
+
+	_, err = srv.RevertRevision(ctx, &affv1.ItemServiceRevertRevisionRequest{
+		ItemId: created.GetItem().GetId(), RevisionId: revisionID, ExpectedVersion: updated.GetItem().GetVersion(), // now stale
+	})
+	if err == nil {
+		t.Fatal("expected a version-conflict error on a revert racing a concurrent edit")
+	}
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition, got %v (%v)", got, err)
+	}
+
+	// The racing edit's content must be untouched by the failed revert.
+	reread, err := srv.Get(ctx, &affv1.ItemServiceGetRequest{Id: created.GetItem().GetId()})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := reread.GetItem().GetTitle(); got != "Raced ahead" {
+		t.Fatalf("title = %q after failed revert, want the racing edit's %q untouched", got, "Raced ahead")
+	}
+}
+
+// TestItemRevertRevision_InvalidatesCache proves RULE-6: a revert changes
+// published output while looking like internal bookkeeping over
+// item_revisions, so it must invalidate the feed's render cache exactly like
+// any other write that changes rendered output (PLAN.md §11).
+func TestItemRevertRevision_InvalidatesCache(t *testing.T) {
+	srv, st, inv := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-revert-invalidate")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "Original", SummaryText: "orig", BodyHtml: "<p>b</p>",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	updated, err := srv.Update(ctx, &affv1.ItemServiceUpdateRequest{
+		Item: &affv1.Item{
+			Id: created.GetItem().GetId(), Title: "Edited", SummaryText: "edited", BodyHtml: "<p>b</p>",
+		},
+		ExpectedVersion: created.GetItem().GetVersion(),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	revisions, err := srv.ListRevisions(ctx, &affv1.ItemServiceListRevisionsRequest{ItemId: created.GetItem().GetId()})
+	if err != nil {
+		t.Fatalf("list revisions: %v", err)
+	}
+	revisionID := revisions.GetRevisions()[0].GetId()
+
+	before := inv.count()
+	if _, err := srv.RevertRevision(ctx, &affv1.ItemServiceRevertRevisionRequest{
+		ItemId: created.GetItem().GetId(), RevisionId: revisionID, ExpectedVersion: updated.GetItem().GetVersion(),
+	}); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+	if got := inv.count(); got != before+1 {
+		t.Fatalf("expected invalidator to fire exactly once for revert, cumulative went %d -> %d", before, got)
+	}
+	if got := inv.slugs[len(inv.slugs)-1]; got != "feed-revert-invalidate" {
+		t.Fatalf("invalidated slug = %q, want %q", got, "feed-revert-invalidate")
+	}
+}
+
+// TestItemRevertRevision_UnknownItemOrRevision proves both "item does not
+// exist" and "revision does not exist on this item" are refused with
+// NotFound rather than panicking or silently no-op'ing.
+func TestItemRevertRevision_UnknownItemOrRevision(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-revert-notfound")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "Original", SummaryText: "orig", BodyHtml: "<p>b</p>",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if _, err := srv.RevertRevision(ctx, &affv1.ItemServiceRevertRevisionRequest{
+		ItemId: 999999, RevisionId: 1, ExpectedVersion: 1,
+	}); status.Code(err) != codes.NotFound {
+		t.Fatalf("unknown item_id: got %v, want NotFound", err)
+	}
+
+	if _, err := srv.RevertRevision(ctx, &affv1.ItemServiceRevertRevisionRequest{
+		ItemId: created.GetItem().GetId(), RevisionId: 999999, ExpectedVersion: created.GetItem().GetVersion(),
+	}); status.Code(err) != codes.NotFound {
+		t.Fatalf("unknown revision_id: got %v, want NotFound", err)
 	}
 }

@@ -614,10 +614,78 @@ func itemDiff(old, updated model.Item) []itemRevisionEdit {
 	return out
 }
 
+// itemApplyEdit is the shared commit path for every write that changes an
+// item's title/summary/body/answer/link/source/published_at under optimistic
+// concurrency: it UPDATEs the row (item_key and feed_id excluded from the SET
+// list by construction, not by a runtime check — PLAN.md §5.1) and records
+// item_revisions rows for whatever itemDiff(old, updated) finds changed, all
+// in one transaction, so a revision row can never exist for an edit that did
+// not actually commit or vice versa.
+//
+// Update and RevertRevision both call this. That sharing is deliberate and
+// load-bearing: RevertRevision (PLAN.md §12.4) is defined as "an ordinary
+// edit, not a rewind," and the only way to make that true rather than
+// merely asserted is for it to run through literally the same commit path
+// as a hand-typed edit — same version check, same guid-preserving column
+// list, same revision bookkeeping.
+func (s *ItemServer) itemApplyEdit(ctx context.Context, db *sql.DB, old, updated model.Item, expectedVersion int64, now time.Time) (model.Item, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Item{}, status.Errorf(codes.Internal, "rpc: begin edit item %d: %v", old.ID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE items
+		SET title = ?, summary_text = ?, body_html = ?, answer_html = ?, link = ?, source_name = ?,
+		    published_at = ?, edited_at = ?, updated_at = ?, version = version + 1
+		WHERE id = ? AND version = ?`,
+		updated.Title, updated.SummaryText, updated.BodyHTML, itemNullString(updated.AnswerHTML),
+		itemNullString(updated.Link), itemNullString(updated.SourceName),
+		itemFormatTime(updated.PublishedAt), itemFormatTime(now), itemFormatTime(now),
+		old.ID, expectedVersion)
+	if err != nil {
+		return model.Item{}, status.Errorf(codes.Internal, "rpc: updating item %d: %v", old.ID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return model.Item{}, status.Errorf(codes.Internal, "rpc: rows affected updating item %d: %v", old.ID, err)
+	}
+	if n == 0 {
+		// Deliberately queries through tx, not db: db is the underlying
+		// *sql.DB, which SQLite's config (store.go: SetMaxOpenConns(1)) limits
+		// to a single connection — the one this still-open transaction is
+		// holding. Querying db here would block forever waiting for a
+		// connection tx will not release until this function returns and its
+		// deferred Rollback runs, which can never happen while this call is
+		// itself blocked: a self-deadlock. tx satisfies itemQuerier and reuses
+		// the same connection instead.
+		return model.Item{}, itemVersionConflictErr(ctx, tx, old.ID, expectedVersion)
+	}
+
+	for _, rev := range itemDiff(old, updated) {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO item_revisions (item_id, at, field, old_value, new_value) VALUES (?, ?, ?, ?, ?)`,
+			old.ID, itemFormatTime(now), rev.field, rev.oldValue, rev.newValue,
+		); err != nil {
+			return model.Item{}, status.Errorf(codes.Internal, "rpc: recording revision for item %d: %v", old.ID, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.Item{}, status.Errorf(codes.Internal, "rpc: commit edit %d: %v", old.ID, err)
+	}
+
+	out, err := itemLoadByID(ctx, db, old.ID)
+	if err != nil {
+		return model.Item{}, status.Errorf(codes.Internal, "rpc: reloading item %d: %v", old.ID, err)
+	}
+	return out, nil
+}
+
 // Update edits title/summary/body/answer/link/source/published_at under
 // optimistic concurrency, records the change in item_revisions, and bumps
-// updated_at — all atomically in one transaction, so a revision row can never
-// exist for an edit that did not actually commit or vice versa.
+// updated_at, via itemApplyEdit.
 //
 // item.ItemKey and item.FeedId on the request are READ BUT NEVER WRITTEN:
 // item_key is immutable by construction (PLAN.md §5.1 — the guid derives
@@ -676,65 +744,15 @@ func (s *ItemServer) Update(ctx context.Context, req *affv1.ItemServiceUpdateReq
 	updated.PublishedAt = newPublished
 	// updated.ItemKey and updated.FeedID stay old's — see doc comment above.
 
-	now := s.now()
-	tx, err := db.BeginTx(ctx, nil)
+	out, err := s.itemApplyEdit(ctx, db, old, updated, req.GetExpectedVersion(), s.now())
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "rpc: begin update %d: %v", id, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// item_key is deliberately absent from this SET list, the same way
-	// internal/store/items.go's UpdateItem omits it — by construction, not a
-	// runtime check.
-	res, err := tx.ExecContext(ctx, `
-		UPDATE items
-		SET title = ?, summary_text = ?, body_html = ?, answer_html = ?, link = ?, source_name = ?,
-		    published_at = ?, edited_at = ?, updated_at = ?, version = version + 1
-		WHERE id = ? AND version = ?`,
-		updated.Title, updated.SummaryText, updated.BodyHTML, itemNullString(updated.AnswerHTML),
-		itemNullString(updated.Link), itemNullString(updated.SourceName),
-		itemFormatTime(updated.PublishedAt), itemFormatTime(now), itemFormatTime(now),
-		id, req.GetExpectedVersion())
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "rpc: updating item %d: %v", id, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "rpc: rows affected updating item %d: %v", id, err)
-	}
-	if n == 0 {
-		// Deliberately queries through tx, not db: db is the underlying
-		// *sql.DB, which SQLite's config (store.go: SetMaxOpenConns(1)) limits
-		// to a single connection — the one this still-open transaction is
-		// holding. Querying db here would block forever waiting for a
-		// connection tx will not release until this function returns and its
-		// deferred Rollback runs, which can never happen while this call is
-		// itself blocked: a self-deadlock. tx satisfies itemQuerier and reuses
-		// the same connection instead.
-		return nil, itemVersionConflictErr(ctx, tx, id, req.GetExpectedVersion())
-	}
-
-	for _, rev := range itemDiff(old, updated) {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO item_revisions (item_id, at, field, old_value, new_value) VALUES (?, ?, ?, ?, ?)`,
-			id, itemFormatTime(now), rev.field, rev.oldValue, rev.newValue,
-		); err != nil {
-			return nil, status.Errorf(codes.Internal, "rpc: recording revision for item %d: %v", id, err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, status.Errorf(codes.Internal, "rpc: commit update %d: %v", id, err)
+		return nil, err
 	}
 
 	if slug, serr := itemFeedSlug(ctx, db, old.FeedID); serr == nil {
 		s.invalidate(slug)
 	}
 
-	out, err := itemLoadByID(ctx, db, id)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "rpc: reloading item %d: %v", id, err)
-	}
 	return &affv1.ItemServiceUpdateResponse{Item: itemToProto(out)}, nil
 }
 
@@ -813,41 +831,40 @@ func (s *ItemServer) Restore(ctx context.Context, req *affv1.ItemServiceRestoreR
 	return &affv1.ItemServiceRestoreResponse{Item: itemToProto(out)}, nil
 }
 
-// itemSampleCandidate is the JSON shape this method expects to find inside a
-// samples row's payload_json for one candidate. SampleService (package rpc's
-// sample.go, built concurrently with this file) owns the actual payload
-// format; this assumes protojson-style field names for
-// aff.v1.SampleCandidate (gen/aff/v1/sample.pb.go), either as a bare JSON
-// array or wrapped in {"candidates": [...]}. If SampleService lands on a
-// different shape, this struct and itemFindCandidate are the only things
-// that need to change.
-type itemSampleCandidate struct {
-	CandidateID string `json:"candidateId"`
-	Title       string `json:"title"`
-	SummaryText string `json:"summaryText"`
-	BodyHTML    string `json:"bodyHtml"`
-	AnswerHTML  string `json:"answerHtml"`
-	Link        string `json:"link"`
-	SourceName  string `json:"sourceName"`
-}
-
-func itemFindCandidate(payload []byte, candidateID string) (itemSampleCandidate, error) {
-	var list []itemSampleCandidate
+// itemFindCandidate resolves one candidate out of a samples row's
+// payload_json.
+//
+// It decodes into the GENERATED type, deliberately. This file previously
+// carried a hand-written mirror of the candidate struct, on the assumption
+// that the payload used protojson field names (`candidateId`). It does not:
+// sample.go writes the payload with encoding/json over
+// []*affv1.SampleCandidate, and encoding/json honours the generated
+// `json:"candidate_id,omitempty"` tag rather than the protobuf `json=`
+// alias. Every field matched by coincidence except the one that mattered, so
+// the lookup always fell through and PromoteSample could not resolve any
+// candidate a real Sample call had produced — the whole promote journey (§22
+// J4) was dead, and it failed with "not present in sample payload", which
+// reads like missing data rather than a decode mismatch.
+//
+// Sharing the generated type is what actually fixes it. Two hand-maintained
+// definitions of one wire format will drift again; there is now one.
+func itemFindCandidate(payload []byte, candidateID string) (*affv1.SampleCandidate, error) {
+	var list []*affv1.SampleCandidate
 	if err := json.Unmarshal(payload, &list); err != nil {
 		var wrapper struct {
-			Candidates []itemSampleCandidate `json:"candidates"`
+			Candidates []*affv1.SampleCandidate `json:"candidates"`
 		}
 		if werr := json.Unmarshal(payload, &wrapper); werr != nil {
-			return itemSampleCandidate{}, fmt.Errorf("parsing sample payload: %w", err)
+			return nil, fmt.Errorf("parsing sample payload: %w", err)
 		}
 		list = wrapper.Candidates
 	}
 	for _, c := range list {
-		if c.CandidateID == candidateID {
+		if c.GetCandidateId() == candidateID {
 			return c, nil
 		}
 	}
-	return itemSampleCandidate{}, fmt.Errorf("candidate %q not present in sample payload", candidateID)
+	return nil, fmt.Errorf("candidate %q not present in sample payload", candidateID)
 }
 
 // PromoteSample persists a chosen sample candidate as a real item, origin =
@@ -897,13 +914,13 @@ func (s *ItemServer) PromoteSample(ctx context.Context, req *affv1.ItemServicePr
 	now := s.now()
 	it := model.Item{
 		ItemKey:     s.ids.NewItemKey(now),
-		ContentHash: itemContentHash(feedID, cand.Title, cand.SummaryText, cand.BodyHTML, cand.Link),
-		Title:       cand.Title,
-		SummaryText: cand.SummaryText,
-		BodyHTML:    cand.BodyHTML,
-		AnswerHTML:  cand.AnswerHTML,
-		Link:        cand.Link,
-		SourceName:  cand.SourceName,
+		ContentHash: itemContentHash(feedID, cand.GetTitle(), cand.GetSummaryText(), cand.GetBodyHtml(), cand.GetLink()),
+		Title:       cand.GetTitle(),
+		SummaryText: cand.GetSummaryText(),
+		BodyHTML:    cand.GetBodyHtml(),
+		AnswerHTML:  cand.GetAnswerHtml(),
+		Link:        cand.GetLink(),
+		SourceName:  cand.GetSourceName(),
 		Origin:      model.OriginSampled,
 	}
 
@@ -1041,4 +1058,311 @@ func (s *ItemServer) PublishCorrection(ctx context.Context, req *affv1.ItemServi
 		return nil, status.Errorf(codes.Internal, "rpc: reloading correction item %d: %v", itemID, err)
 	}
 	return &affv1.ItemServicePublishCorrectionResponse{Item: itemToProto(out)}, nil
+}
+
+// --- revision history and revert -------------------------------------------
+//
+// item_revisions (migrations/0002_feeds_items.sql) is one row PER CHANGED
+// FIELD, not one row per edit: itemDiff/itemApplyEdit above insert several
+// rows sharing a single `at` for a single Update or RevertRevision call. The
+// history UI wants one entry per edit with its fields bundled (PLAN.md
+// §12.4: "enough per row to render a diff without a second call"), so
+// everything below groups by `at` rather than exposing the raw rows.
+//
+// An ItemRevision's id is the smallest item_revisions.id in its group. That
+// is stable forever because rows are only ever inserted, never updated or
+// deleted (the whole "history that can be erased by the thing it audits is
+// not history" property), which is what makes it safe to hand back out of
+// ListRevisions and accept back into RevertRevision as an opaque identifier.
+
+const (
+	itemRevisionDefaultPageSize = 20
+	itemRevisionMaxPageSize     = 100
+)
+
+// itemRevisionEncodePageToken/itemRevisionDecodePageToken make ListRevisions'
+// cursor opaque (PLAN.md §11), mirroring itemEncodePageToken/
+// itemDecodePageToken above but keyed on `at` alone: a revision GROUP is the
+// pagination unit here, not a row, and every row in a group shares one `at`.
+func itemRevisionEncodePageToken(at time.Time) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(itemFormatTime(at)))
+}
+
+func itemRevisionDecodePageToken(tok string) (time.Time, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(tok)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("rpc: decoding page_token: %w", err)
+	}
+	t, err := itemParseTime(string(raw))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("rpc: page_token at: %w", err)
+	}
+	return t, nil
+}
+
+// itemLoadRevisionFields fetches every item_revisions row sharing `at` for
+// item_id, ordered by id (i.e. the order itemDiff originally wrote them in).
+func itemLoadRevisionFields(ctx context.Context, db itemQuerier, itemID int64, at string) (*affv1.ItemRevision, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, field, old_value, new_value FROM item_revisions WHERE item_id = ? AND at = ? ORDER BY id ASC`,
+		itemID, at)
+	if err != nil {
+		return nil, fmt.Errorf("reading revision fields: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	rev := &affv1.ItemRevision{ItemId: itemID}
+	first := true
+	for rows.Next() {
+		var (
+			id                 int64
+			field              string
+			oldValue, newValue sql.NullString
+		)
+		if err := rows.Scan(&id, &field, &oldValue, &newValue); err != nil {
+			return nil, fmt.Errorf("scanning revision field: %w", err)
+		}
+		if first {
+			rev.Id = id // the group's identifier — see file-section doc comment above.
+			first = false
+		}
+		rev.Changes = append(rev.Changes, &affv1.ItemRevisionChange{
+			Field: field, OldValue: oldValue.String, NewValue: newValue.String,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating revision fields: %w", err)
+	}
+	if first {
+		return nil, store.ErrNotFound // `at` matched no rows at all
+	}
+	atTime, err := itemParseTime(at)
+	if err != nil {
+		return nil, fmt.Errorf("parsing revision at %q: %w", at, err)
+	}
+	rev.At = timestamppb.New(atTime)
+	return rev, nil
+}
+
+// ListRevisions returns item_id's edit history newest-first, one entry per
+// edit, paginated by `at` so a page boundary can never split one edit's
+// field changes across two pages (PLAN.md §12.4). An item with no recorded
+// edits returns an empty list, not an error.
+func (s *ItemServer) ListRevisions(ctx context.Context, req *affv1.ItemServiceListRevisionsRequest) (*affv1.ItemServiceListRevisionsResponse, error) {
+	itemID := req.GetItemId()
+	if itemID == 0 {
+		return nil, status.Error(codes.InvalidArgument, "rpc: item_id is required")
+	}
+	if _, err := itemLoadByID(ctx, s.st.Reader(), itemID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, status.Errorf(codes.NotFound, "rpc: item %d not found", itemID)
+		}
+		return nil, status.Errorf(codes.Internal, "rpc: loading item %d: %v", itemID, err)
+	}
+
+	pageSize := int(req.GetPageSize())
+	if pageSize <= 0 {
+		pageSize = itemRevisionDefaultPageSize
+	}
+	if pageSize > itemRevisionMaxPageSize {
+		pageSize = itemRevisionMaxPageSize
+	}
+
+	query := `SELECT DISTINCT at FROM item_revisions WHERE item_id = ?`
+	args := []any{itemID}
+	if tok := req.GetPageToken(); tok != "" {
+		after, err := itemRevisionDecodePageToken(tok)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, "rpc: invalid page_token")
+		}
+		query += ` AND at < ?`
+		args = append(args, itemFormatTime(after))
+	}
+	query += ` ORDER BY at DESC LIMIT ?`
+	args = append(args, pageSize+1) // +1 to detect a next page without a COUNT(*)
+
+	rows, err := s.st.Reader().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "rpc: listing revisions for item %d: %v", itemID, err)
+	}
+	var ats []string
+	for rows.Next() {
+		var at string
+		if err := rows.Scan(&at); err != nil {
+			_ = rows.Close()
+			return nil, status.Errorf(codes.Internal, "rpc: scanning revision timestamp for item %d: %v", itemID, err)
+		}
+		ats = append(ats, at)
+	}
+	rowsErr := rows.Err()
+	_ = rows.Close()
+	if rowsErr != nil {
+		return nil, status.Errorf(codes.Internal, "rpc: iterating revisions for item %d: %v", itemID, rowsErr)
+	}
+
+	resp := &affv1.ItemServiceListRevisionsResponse{}
+	if len(ats) > pageSize {
+		last, err := itemParseTime(ats[pageSize-1])
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "rpc: parsing revision timestamp for item %d: %v", itemID, err)
+		}
+		resp.NextPageToken = itemRevisionEncodePageToken(last)
+		ats = ats[:pageSize]
+	}
+
+	for _, at := range ats {
+		rev, err := itemLoadRevisionFields(ctx, s.st.Reader(), itemID, at)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "rpc: loading revision fields for item %d: %v", itemID, err)
+		}
+		resp.Revisions = append(resp.Revisions, rev)
+	}
+	return resp, nil
+}
+
+// itemRevisionGroupAt resolves revisionID to the `at` value its group shares,
+// scoped to itemID so a revision id from a DIFFERENT item can never be
+// applied here (the request only carries the numeric ids, not a foreign-key
+// guarantee).
+func itemRevisionGroupAt(ctx context.Context, db itemQuerier, itemID, revisionID int64) (string, error) {
+	var at string
+	err := db.QueryRowContext(ctx,
+		`SELECT at FROM item_revisions WHERE id = ? AND item_id = ?`, revisionID, itemID,
+	).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", store.ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading revision %d: %w", revisionID, err)
+	}
+	return at, nil
+}
+
+// itemApplyRevisionField sets one field on target to a revision change's
+// recorded old_value, reconstructing target's state immediately BEFORE that
+// revision's edit was applied — which is the definition of "revert" (PLAN.md
+// §12.4). published_at is stored and read back unconditionally (itemDiff
+// never itemNullString's it); every other field follows items.go's
+// NULL-means-"" convention, matching how itemDiff wrote it in the first
+// place. item_key/feed_id are deliberately absent from this switch: no
+// revision row is ever written for them (itemDiff never diffs either), so
+// there is no field value here that could resurrect an old guid (PLAN.md
+// §5.1) even by an unrecognized-field bug — an unknown field name errors
+// instead of silently doing nothing.
+func itemApplyRevisionField(target *model.Item, field, oldValue string) error {
+	switch field {
+	case "title":
+		target.Title = oldValue
+	case "summary_text":
+		target.SummaryText = oldValue
+	case "body_html":
+		target.BodyHTML = oldValue
+	case "answer_html":
+		target.AnswerHTML = oldValue
+	case "link":
+		target.Link = oldValue
+	case "source_name":
+		target.SourceName = oldValue
+	case "published_at":
+		t, err := itemParseTime(oldValue)
+		if err != nil {
+			return fmt.Errorf("parsing published_at revision value %q: %w", oldValue, err)
+		}
+		target.PublishedAt = t
+	default:
+		return fmt.Errorf("unrecognized revision field %q", field)
+	}
+	return nil
+}
+
+// RevertRevision is an ORDINARY EDIT, not a rewind (PLAN.md §12.4): it
+// reconstructs the item's state immediately before the chosen revision's
+// edit (by applying each of that revision's recorded old_values) and commits
+// that through itemApplyEdit — the exact same path Update uses. That commit
+// writes a BRAND-NEW set of item_revisions rows recording the revert as its
+// own edit; nothing here deletes or rewrites the reverted-past revision or
+// any row between it and now. History that could be erased by the thing it
+// audits would not be history.
+//
+// item_key is never touched: updated starts as a copy of old, and
+// itemApplyRevisionField's field switch has no case that writes it (see its
+// doc comment) — "revert restores the old state" is exactly the reasoning
+// that would wrongly restore an old guid too, so there is deliberately no
+// code path here that could.
+func (s *ItemServer) RevertRevision(ctx context.Context, req *affv1.ItemServiceRevertRevisionRequest) (*affv1.ItemServiceRevertRevisionResponse, error) {
+	itemID := req.GetItemId()
+	if itemID == 0 {
+		return nil, status.Error(codes.InvalidArgument, "rpc: item_id is required")
+	}
+	revisionID := req.GetRevisionId()
+	if revisionID == 0 {
+		return nil, status.Error(codes.InvalidArgument, "rpc: revision_id is required")
+	}
+
+	db := s.st.Writer()
+	old, err := itemLoadByID(ctx, db, itemID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, status.Errorf(codes.NotFound, "rpc: item %d not found", itemID)
+		}
+		return nil, status.Errorf(codes.Internal, "rpc: loading item %d: %v", itemID, err)
+	}
+
+	at, err := itemRevisionGroupAt(ctx, db, itemID, revisionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, status.Errorf(codes.NotFound, "rpc: revision %d for item %d not found", revisionID, itemID)
+		}
+		return nil, status.Errorf(codes.Internal, "rpc: resolving revision %d: %v", revisionID, err)
+	}
+	rev, err := itemLoadRevisionFields(ctx, db, itemID, at)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "rpc: loading revision %d fields: %v", revisionID, err)
+	}
+
+	updated := old
+	for _, ch := range rev.GetChanges() {
+		if err := itemApplyRevisionField(&updated, ch.GetField(), ch.GetOldValue()); err != nil {
+			return nil, status.Errorf(codes.Internal, "rpc: reverting item %d to revision %d: %v", itemID, revisionID, err)
+		}
+	}
+	if strings.TrimSpace(updated.Title) == "" {
+		// Cannot actually happen — Update/Create both reject an empty title
+		// before it is ever written to item_revisions — but failing loudly
+		// beats silently persisting an invalid item if that invariant is
+		// ever violated elsewhere.
+		return nil, status.Error(codes.FailedPrecondition, "rpc: reverting would leave item.title empty")
+	}
+
+	if !updated.PublishedAt.Equal(old.PublishedAt) {
+		// Same RULE-7 guard Update applies, and for the same reason: a revert
+		// is an ordinary edit, and an ordinary edit that backdates a feed's
+		// newest item is invisible to Slack forever regardless of how the
+		// new timestamp was chosen.
+		newest, err := itemNewestPublished(ctx, db, old.FeedID, old.ID)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "rpc: %v", err)
+		}
+		if err := itemRejectBackdated(updated.PublishedAt, newest, strconv.FormatInt(old.FeedID, 10)); err != nil {
+			return nil, err
+		}
+	}
+
+	out, err := s.itemApplyEdit(ctx, db, old, updated, req.GetExpectedVersion(), s.now())
+	if err != nil {
+		return nil, err
+	}
+
+	// RULE-6: a revert changes published output (it can touch every field
+	// content:encoded/description/link/pubDate are built from) while reading,
+	// at the RPC surface, like an internal bookkeeping operation over
+	// item_revisions — precisely the kind of write that is easy to leave
+	// uninvalidated. Fire strictly after itemApplyEdit's commit, matching
+	// every other mutation in this file, so a rolled-back revert never
+	// invalidates a cache for a write that did not happen.
+	if slug, serr := itemFeedSlug(ctx, db, old.FeedID); serr == nil {
+		s.invalidate(slug)
+	}
+
+	return &affv1.ItemServiceRevertRevisionResponse{Item: itemToProto(out)}, nil
 }

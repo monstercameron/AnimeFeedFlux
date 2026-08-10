@@ -103,9 +103,9 @@ func newTestHandler(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
 	st := openTestStore(t)
 	cfg := testConfig(t)
-	h, err := buildPublishHandler(st, cfg, "test")
+	h, _, err := buildPublishHandlerWithInvalidator(st, cfg, "test")
 	if err != nil {
-		t.Fatalf("buildPublishHandler: %v", err)
+		t.Fatalf("buildPublishHandlerWithInvalidator: %v", err)
 	}
 	return h, st
 }

@@ -1,13 +1,12 @@
 // Command animefeedflux is the AnimeFeedFlux server.
 //
-// It boots, validates its configuration, opens and migrates the store, serves
-// the read-only publish plane (§2), and shuts down cleanly. The control plane
-// and scheduler arrive in later phases.
+// It boots, validates its configuration, opens and migrates the store, and
+// serves the publish plane, the control plane, and the scheduler (wire.go's
+// runAll) until it shuts down cleanly on SIGTERM/SIGINT.
 package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -98,6 +97,7 @@ func run() int {
 		slog.String("commit", commit),
 		slog.String("build_date", buildDate),
 		slog.String("publish_addr", cfg.PublishAddr),
+		slog.String("admin_addr", cfg.AdminAddr),
 		slog.String("public_base_url", cfg.PublicBaseURL.String()),
 		slog.Bool("generation_enabled", cfg.GenerationEnabled),
 	)
@@ -106,66 +106,9 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
-	// Open the store BEFORE the listener. Migrations and stale-run reclamation
-	// (§15) must finish before anything can serve, and a boot that fails here
-	// should fail before a reader ever sees a half-migrated database.
-	st, err := openStore(ctx, cfg)
-	if err != nil {
-		log.Error("opening store", slog.Any("error", err))
-		return exitRuntimeFail
-	}
-	defer func() {
-		if err := st.Close(); err != nil {
-			log.Error("closing store", slog.Any("error", err))
-		}
-	}()
-
-	handler, err := buildPublishHandler(st, cfg, version)
-	if err != nil {
-		log.Error("building publish handler", slog.Any("error", err))
-		return exitRuntimeFail
-	}
-
-	srv := &http.Server{
-		Addr:    cfg.PublishAddr,
-		Handler: handler,
-
-		// Explicit, never the zero-value defaults. An internet-facing server
-		// with no timeouts holds a connection open until the client decides
-		// otherwise (§6).
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 16,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		log.Info("publish listener up", slog.String("addr", srv.Addr))
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-	}()
-
-	select {
-	case err := <-errCh:
-		log.Error("publish listener failed", slog.Any("error", err))
-		return exitRuntimeFail
-	case <-ctx.Done():
-		log.Info("shutdown signal received, draining")
-	}
-
-	// Drain rather than drop. A reader mid-fetch gets its bytes; anything still
-	// open at the deadline is cut.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("graceful shutdown failed", slog.Any("error", err))
-		return exitRuntimeFail
-	}
-
-	log.Info("stopped cleanly")
-	return exitOK
+	// runAll (wire.go) is the composition root: it opens the store, reclaims
+	// stale runs, builds the publish plane, the control plane, and the
+	// scheduler, starts all three, and shuts them down cleanly on ctx
+	// cancellation (PLAN.md §15).
+	return runAll(ctx, cfg, log)
 }

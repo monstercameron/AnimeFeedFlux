@@ -252,8 +252,19 @@ func (h *Hooked) RestoreItem(ctx context.Context, itemKey string) error {
 // strictly after commit, satisfying RULE-6's "outside the transaction"
 // requirement without this file ever opening or touching a transaction
 // itself.
-func (h *Hooked) CommitRun(ctx context.Context, runID int64, items []model.Item, summary RunSummary) error {
-	if err := h.Store.CommitRun(ctx, runID, items, summary); err != nil {
+//
+// embeddings is forwarded to *Store.CommitRun exactly as received — variadic
+// only because *Store.CommitRun's own parameter is (embeddings.go's doc
+// comment explains why it is optional-variadic there). A FIXED four-argument
+// wrapper here would silently DROP every embedding a caller passed the
+// moment the generation layer started passing them: the call would still
+// compile (Go allows calling a variadic parameter with zero arguments) and
+// still succeed, so nothing would ever surface the loss — item_embeddings
+// would stay empty behind a green build, the exact failure shape this whole
+// change exists to close, recreated one layer up. Forwarding the slice is
+// what keeps that from happening.
+func (h *Hooked) CommitRun(ctx context.Context, runID int64, items []model.Item, summary RunSummary, embeddings ...ItemEmbedding) error {
+	if err := h.Store.CommitRun(ctx, runID, items, summary, embeddings...); err != nil {
 		return err
 	}
 	slug, serr := h.slugForRunID(ctx, runID)

@@ -1085,6 +1085,364 @@ func (x *ItemServicePublishCorrectionResponse) GetItem() *Item {
 	return nil
 }
 
+// ItemRevisionChange is one field's before/after within a revision
+// (`item_revisions`, PLAN.md §10). old_value/new_value use "" for a field
+// that was/became NULL — the same convention items.go's nullString already
+// uses for answer_html/link/source_name, kept consistent rather than adding
+// a second way to spell "absent".
+type ItemRevisionChange struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Field         string                 `protobuf:"bytes,1,opt,name=field,proto3" json:"field,omitempty"`
+	OldValue      string                 `protobuf:"bytes,2,opt,name=old_value,json=oldValue,proto3" json:"old_value,omitempty"`
+	NewValue      string                 `protobuf:"bytes,3,opt,name=new_value,json=newValue,proto3" json:"new_value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ItemRevisionChange) Reset() {
+	*x = ItemRevisionChange{}
+	mi := &file_aff_v1_item_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ItemRevisionChange) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ItemRevisionChange) ProtoMessage() {}
+
+func (x *ItemRevisionChange) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_item_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ItemRevisionChange.ProtoReflect.Descriptor instead.
+func (*ItemRevisionChange) Descriptor() ([]byte, []int) {
+	return file_aff_v1_item_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ItemRevisionChange) GetField() string {
+	if x != nil {
+		return x.Field
+	}
+	return ""
+}
+
+func (x *ItemRevisionChange) GetOldValue() string {
+	if x != nil {
+		return x.OldValue
+	}
+	return ""
+}
+
+func (x *ItemRevisionChange) GetNewValue() string {
+	if x != nil {
+		return x.NewValue
+	}
+	return ""
+}
+
+// ItemRevision groups every item_revisions row written by one edit (they
+// share the same `at`) into a single entry, so the diff view renders one
+// revision per edit rather than one row per changed field.
+type ItemRevision struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The item_revisions.id of the first field-row this edit wrote — stable
+	// and immutable (rows are never updated or deleted), so it is safe to use
+	// as this revision's identifier in RevertRevision below.
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	ItemId        int64                  `protobuf:"varint,2,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
+	At            *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=at,proto3" json:"at,omitempty"`
+	Changes       []*ItemRevisionChange  `protobuf:"bytes,4,rep,name=changes,proto3" json:"changes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ItemRevision) Reset() {
+	*x = ItemRevision{}
+	mi := &file_aff_v1_item_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ItemRevision) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ItemRevision) ProtoMessage() {}
+
+func (x *ItemRevision) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_item_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ItemRevision.ProtoReflect.Descriptor instead.
+func (*ItemRevision) Descriptor() ([]byte, []int) {
+	return file_aff_v1_item_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ItemRevision) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *ItemRevision) GetItemId() int64 {
+	if x != nil {
+		return x.ItemId
+	}
+	return 0
+}
+
+func (x *ItemRevision) GetAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.At
+	}
+	return nil
+}
+
+func (x *ItemRevision) GetChanges() []*ItemRevisionChange {
+	if x != nil {
+		return x.Changes
+	}
+	return nil
+}
+
+type ItemServiceListRevisionsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ItemId        int64                  `protobuf:"varint,1,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
+	PageSize      int32                  `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	PageToken     string                 `protobuf:"bytes,3,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ItemServiceListRevisionsRequest) Reset() {
+	*x = ItemServiceListRevisionsRequest{}
+	mi := &file_aff_v1_item_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ItemServiceListRevisionsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ItemServiceListRevisionsRequest) ProtoMessage() {}
+
+func (x *ItemServiceListRevisionsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_item_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ItemServiceListRevisionsRequest.ProtoReflect.Descriptor instead.
+func (*ItemServiceListRevisionsRequest) Descriptor() ([]byte, []int) {
+	return file_aff_v1_item_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *ItemServiceListRevisionsRequest) GetItemId() int64 {
+	if x != nil {
+		return x.ItemId
+	}
+	return 0
+}
+
+func (x *ItemServiceListRevisionsRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *ItemServiceListRevisionsRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+type ItemServiceListRevisionsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Newest first (PLAN.md §12.4). Empty, not an error, for an item with no
+	// recorded edits.
+	Revisions     []*ItemRevision `protobuf:"bytes,1,rep,name=revisions,proto3" json:"revisions,omitempty"`
+	NextPageToken string          `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ItemServiceListRevisionsResponse) Reset() {
+	*x = ItemServiceListRevisionsResponse{}
+	mi := &file_aff_v1_item_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ItemServiceListRevisionsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ItemServiceListRevisionsResponse) ProtoMessage() {}
+
+func (x *ItemServiceListRevisionsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_item_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ItemServiceListRevisionsResponse.ProtoReflect.Descriptor instead.
+func (*ItemServiceListRevisionsResponse) Descriptor() ([]byte, []int) {
+	return file_aff_v1_item_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ItemServiceListRevisionsResponse) GetRevisions() []*ItemRevision {
+	if x != nil {
+		return x.Revisions
+	}
+	return nil
+}
+
+func (x *ItemServiceListRevisionsResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
+type ItemServiceRevertRevisionRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	ItemId int64                  `protobuf:"varint,1,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
+	// ItemRevision.id from a prior ListRevisions call.
+	RevisionId      int64 `protobuf:"varint,2,opt,name=revision_id,json=revisionId,proto3" json:"revision_id,omitempty"`
+	ExpectedVersion int64 `protobuf:"varint,3,opt,name=expected_version,json=expectedVersion,proto3" json:"expected_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ItemServiceRevertRevisionRequest) Reset() {
+	*x = ItemServiceRevertRevisionRequest{}
+	mi := &file_aff_v1_item_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ItemServiceRevertRevisionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ItemServiceRevertRevisionRequest) ProtoMessage() {}
+
+func (x *ItemServiceRevertRevisionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_item_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ItemServiceRevertRevisionRequest.ProtoReflect.Descriptor instead.
+func (*ItemServiceRevertRevisionRequest) Descriptor() ([]byte, []int) {
+	return file_aff_v1_item_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ItemServiceRevertRevisionRequest) GetItemId() int64 {
+	if x != nil {
+		return x.ItemId
+	}
+	return 0
+}
+
+func (x *ItemServiceRevertRevisionRequest) GetRevisionId() int64 {
+	if x != nil {
+		return x.RevisionId
+	}
+	return 0
+}
+
+func (x *ItemServiceRevertRevisionRequest) GetExpectedVersion() int64 {
+	if x != nil {
+		return x.ExpectedVersion
+	}
+	return 0
+}
+
+type ItemServiceRevertRevisionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Item          *Item                  `protobuf:"bytes,1,opt,name=item,proto3" json:"item,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ItemServiceRevertRevisionResponse) Reset() {
+	*x = ItemServiceRevertRevisionResponse{}
+	mi := &file_aff_v1_item_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ItemServiceRevertRevisionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ItemServiceRevertRevisionResponse) ProtoMessage() {}
+
+func (x *ItemServiceRevertRevisionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_item_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ItemServiceRevertRevisionResponse.ProtoReflect.Descriptor instead.
+func (*ItemServiceRevertRevisionResponse) Descriptor() ([]byte, []int) {
+	return file_aff_v1_item_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ItemServiceRevertRevisionResponse) GetItem() *Item {
+	if x != nil {
+		return x.Item
+	}
+	return nil
+}
+
 var File_aff_v1_item_proto protoreflect.FileDescriptor
 
 const file_aff_v1_item_proto_rawDesc = "" +
@@ -1161,12 +1519,36 @@ const file_aff_v1_item_proto_rawDesc = "" +
 	"\fsummary_text\x18\x03 \x01(\tR\vsummaryText\x12\x1b\n" +
 	"\tbody_html\x18\x04 \x01(\tR\bbodyHtml\"H\n" +
 	"$ItemServicePublishCorrectionResponse\x12 \n" +
+	"\x04item\x18\x01 \x01(\v2\f.aff.v1.ItemR\x04item\"d\n" +
+	"\x12ItemRevisionChange\x12\x14\n" +
+	"\x05field\x18\x01 \x01(\tR\x05field\x12\x1b\n" +
+	"\told_value\x18\x02 \x01(\tR\boldValue\x12\x1b\n" +
+	"\tnew_value\x18\x03 \x01(\tR\bnewValue\"\x99\x01\n" +
+	"\fItemRevision\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x17\n" +
+	"\aitem_id\x18\x02 \x01(\x03R\x06itemId\x12*\n" +
+	"\x02at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x124\n" +
+	"\achanges\x18\x04 \x03(\v2\x1a.aff.v1.ItemRevisionChangeR\achanges\"v\n" +
+	"\x1fItemServiceListRevisionsRequest\x12\x17\n" +
+	"\aitem_id\x18\x01 \x01(\x03R\x06itemId\x12\x1b\n" +
+	"\tpage_size\x18\x02 \x01(\x05R\bpageSize\x12\x1d\n" +
+	"\n" +
+	"page_token\x18\x03 \x01(\tR\tpageToken\"~\n" +
+	" ItemServiceListRevisionsResponse\x122\n" +
+	"\trevisions\x18\x01 \x03(\v2\x14.aff.v1.ItemRevisionR\trevisions\x12&\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\x87\x01\n" +
+	" ItemServiceRevertRevisionRequest\x12\x17\n" +
+	"\aitem_id\x18\x01 \x01(\x03R\x06itemId\x12\x1f\n" +
+	"\vrevision_id\x18\x02 \x01(\x03R\n" +
+	"revisionId\x12)\n" +
+	"\x10expected_version\x18\x03 \x01(\x03R\x0fexpectedVersion\"E\n" +
+	"!ItemServiceRevertRevisionResponse\x12 \n" +
 	"\x04item\x18\x01 \x01(\v2\f.aff.v1.ItemR\x04item*\x94\x01\n" +
 	"\rDeletedFilter\x12\x1e\n" +
 	"\x1aDELETED_FILTER_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eDELETED_FILTER_EXCLUDE_DELETED\x10\x01\x12\x1f\n" +
 	"\x1bDELETED_FILTER_ONLY_DELETED\x10\x02\x12\x1e\n" +
-	"\x1aDELETED_FILTER_INCLUDE_ALL\x10\x032\xaf\x05\n" +
+	"\x1aDELETED_FILTER_INCLUDE_ALL\x10\x032\xfa\x06\n" +
 	"\vItemService\x12G\n" +
 	"\x04List\x12\x1e.aff.v1.ItemServiceListRequest\x1a\x1f.aff.v1.ItemServiceListResponse\x12D\n" +
 	"\x03Get\x12\x1d.aff.v1.ItemServiceGetRequest\x1a\x1e.aff.v1.ItemServiceGetResponse\x12M\n" +
@@ -1175,7 +1557,9 @@ const file_aff_v1_item_proto_rawDesc = "" +
 	"\x06Delete\x12 .aff.v1.ItemServiceDeleteRequest\x1a!.aff.v1.ItemServiceDeleteResponse\x12P\n" +
 	"\aRestore\x12!.aff.v1.ItemServiceRestoreRequest\x1a\".aff.v1.ItemServiceRestoreResponse\x12b\n" +
 	"\rPromoteSample\x12'.aff.v1.ItemServicePromoteSampleRequest\x1a(.aff.v1.ItemServicePromoteSampleResponse\x12n\n" +
-	"\x11PublishCorrection\x12+.aff.v1.ItemServicePublishCorrectionRequest\x1a,.aff.v1.ItemServicePublishCorrectionResponseB:Z8github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1b\x06proto3"
+	"\x11PublishCorrection\x12+.aff.v1.ItemServicePublishCorrectionRequest\x1a,.aff.v1.ItemServicePublishCorrectionResponse\x12b\n" +
+	"\rListRevisions\x12'.aff.v1.ItemServiceListRevisionsRequest\x1a(.aff.v1.ItemServiceListRevisionsResponse\x12e\n" +
+	"\x0eRevertRevision\x12(.aff.v1.ItemServiceRevertRevisionRequest\x1a).aff.v1.ItemServiceRevertRevisionResponseB:Z8github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1b\x06proto3"
 
 var (
 	file_aff_v1_item_proto_rawDescOnce sync.Once
@@ -1190,7 +1574,7 @@ func file_aff_v1_item_proto_rawDescGZIP() []byte {
 }
 
 var file_aff_v1_item_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_aff_v1_item_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_aff_v1_item_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_aff_v1_item_proto_goTypes = []any{
 	(DeletedFilter)(0),                           // 0: aff.v1.DeletedFilter
 	(*Item)(nil),                                 // 1: aff.v1.Item
@@ -1210,19 +1594,25 @@ var file_aff_v1_item_proto_goTypes = []any{
 	(*ItemServicePromoteSampleResponse)(nil),     // 15: aff.v1.ItemServicePromoteSampleResponse
 	(*ItemServicePublishCorrectionRequest)(nil),  // 16: aff.v1.ItemServicePublishCorrectionRequest
 	(*ItemServicePublishCorrectionResponse)(nil), // 17: aff.v1.ItemServicePublishCorrectionResponse
-	(Origin)(0),                   // 18: aff.v1.Origin
-	(*timestamppb.Timestamp)(nil), // 19: google.protobuf.Timestamp
+	(*ItemRevisionChange)(nil),                   // 18: aff.v1.ItemRevisionChange
+	(*ItemRevision)(nil),                         // 19: aff.v1.ItemRevision
+	(*ItemServiceListRevisionsRequest)(nil),      // 20: aff.v1.ItemServiceListRevisionsRequest
+	(*ItemServiceListRevisionsResponse)(nil),     // 21: aff.v1.ItemServiceListRevisionsResponse
+	(*ItemServiceRevertRevisionRequest)(nil),     // 22: aff.v1.ItemServiceRevertRevisionRequest
+	(*ItemServiceRevertRevisionResponse)(nil),    // 23: aff.v1.ItemServiceRevertRevisionResponse
+	(Origin)(0),                   // 24: aff.v1.Origin
+	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
 }
 var file_aff_v1_item_proto_depIdxs = []int32{
-	18, // 0: aff.v1.Item.origin:type_name -> aff.v1.Origin
-	19, // 1: aff.v1.Item.published_at:type_name -> google.protobuf.Timestamp
-	19, // 2: aff.v1.Item.created_at:type_name -> google.protobuf.Timestamp
-	19, // 3: aff.v1.Item.updated_at:type_name -> google.protobuf.Timestamp
-	19, // 4: aff.v1.Item.edited_at:type_name -> google.protobuf.Timestamp
-	19, // 5: aff.v1.Item.deleted_at:type_name -> google.protobuf.Timestamp
-	18, // 6: aff.v1.ItemServiceListRequest.origin:type_name -> aff.v1.Origin
-	19, // 7: aff.v1.ItemServiceListRequest.published_after:type_name -> google.protobuf.Timestamp
-	19, // 8: aff.v1.ItemServiceListRequest.published_before:type_name -> google.protobuf.Timestamp
+	24, // 0: aff.v1.Item.origin:type_name -> aff.v1.Origin
+	25, // 1: aff.v1.Item.published_at:type_name -> google.protobuf.Timestamp
+	25, // 2: aff.v1.Item.created_at:type_name -> google.protobuf.Timestamp
+	25, // 3: aff.v1.Item.updated_at:type_name -> google.protobuf.Timestamp
+	25, // 4: aff.v1.Item.edited_at:type_name -> google.protobuf.Timestamp
+	25, // 5: aff.v1.Item.deleted_at:type_name -> google.protobuf.Timestamp
+	24, // 6: aff.v1.ItemServiceListRequest.origin:type_name -> aff.v1.Origin
+	25, // 7: aff.v1.ItemServiceListRequest.published_after:type_name -> google.protobuf.Timestamp
+	25, // 8: aff.v1.ItemServiceListRequest.published_before:type_name -> google.protobuf.Timestamp
 	0,  // 9: aff.v1.ItemServiceListRequest.deleted_filter:type_name -> aff.v1.DeletedFilter
 	1,  // 10: aff.v1.ItemServiceListResponse.items:type_name -> aff.v1.Item
 	1,  // 11: aff.v1.ItemServiceGetResponse.item:type_name -> aff.v1.Item
@@ -1233,27 +1623,35 @@ var file_aff_v1_item_proto_depIdxs = []int32{
 	1,  // 16: aff.v1.ItemServiceRestoreResponse.item:type_name -> aff.v1.Item
 	1,  // 17: aff.v1.ItemServicePromoteSampleResponse.item:type_name -> aff.v1.Item
 	1,  // 18: aff.v1.ItemServicePublishCorrectionResponse.item:type_name -> aff.v1.Item
-	2,  // 19: aff.v1.ItemService.List:input_type -> aff.v1.ItemServiceListRequest
-	4,  // 20: aff.v1.ItemService.Get:input_type -> aff.v1.ItemServiceGetRequest
-	6,  // 21: aff.v1.ItemService.Create:input_type -> aff.v1.ItemServiceCreateRequest
-	8,  // 22: aff.v1.ItemService.Update:input_type -> aff.v1.ItemServiceUpdateRequest
-	10, // 23: aff.v1.ItemService.Delete:input_type -> aff.v1.ItemServiceDeleteRequest
-	12, // 24: aff.v1.ItemService.Restore:input_type -> aff.v1.ItemServiceRestoreRequest
-	14, // 25: aff.v1.ItemService.PromoteSample:input_type -> aff.v1.ItemServicePromoteSampleRequest
-	16, // 26: aff.v1.ItemService.PublishCorrection:input_type -> aff.v1.ItemServicePublishCorrectionRequest
-	3,  // 27: aff.v1.ItemService.List:output_type -> aff.v1.ItemServiceListResponse
-	5,  // 28: aff.v1.ItemService.Get:output_type -> aff.v1.ItemServiceGetResponse
-	7,  // 29: aff.v1.ItemService.Create:output_type -> aff.v1.ItemServiceCreateResponse
-	9,  // 30: aff.v1.ItemService.Update:output_type -> aff.v1.ItemServiceUpdateResponse
-	11, // 31: aff.v1.ItemService.Delete:output_type -> aff.v1.ItemServiceDeleteResponse
-	13, // 32: aff.v1.ItemService.Restore:output_type -> aff.v1.ItemServiceRestoreResponse
-	15, // 33: aff.v1.ItemService.PromoteSample:output_type -> aff.v1.ItemServicePromoteSampleResponse
-	17, // 34: aff.v1.ItemService.PublishCorrection:output_type -> aff.v1.ItemServicePublishCorrectionResponse
-	27, // [27:35] is the sub-list for method output_type
-	19, // [19:27] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	25, // 19: aff.v1.ItemRevision.at:type_name -> google.protobuf.Timestamp
+	18, // 20: aff.v1.ItemRevision.changes:type_name -> aff.v1.ItemRevisionChange
+	19, // 21: aff.v1.ItemServiceListRevisionsResponse.revisions:type_name -> aff.v1.ItemRevision
+	1,  // 22: aff.v1.ItemServiceRevertRevisionResponse.item:type_name -> aff.v1.Item
+	2,  // 23: aff.v1.ItemService.List:input_type -> aff.v1.ItemServiceListRequest
+	4,  // 24: aff.v1.ItemService.Get:input_type -> aff.v1.ItemServiceGetRequest
+	6,  // 25: aff.v1.ItemService.Create:input_type -> aff.v1.ItemServiceCreateRequest
+	8,  // 26: aff.v1.ItemService.Update:input_type -> aff.v1.ItemServiceUpdateRequest
+	10, // 27: aff.v1.ItemService.Delete:input_type -> aff.v1.ItemServiceDeleteRequest
+	12, // 28: aff.v1.ItemService.Restore:input_type -> aff.v1.ItemServiceRestoreRequest
+	14, // 29: aff.v1.ItemService.PromoteSample:input_type -> aff.v1.ItemServicePromoteSampleRequest
+	16, // 30: aff.v1.ItemService.PublishCorrection:input_type -> aff.v1.ItemServicePublishCorrectionRequest
+	20, // 31: aff.v1.ItemService.ListRevisions:input_type -> aff.v1.ItemServiceListRevisionsRequest
+	22, // 32: aff.v1.ItemService.RevertRevision:input_type -> aff.v1.ItemServiceRevertRevisionRequest
+	3,  // 33: aff.v1.ItemService.List:output_type -> aff.v1.ItemServiceListResponse
+	5,  // 34: aff.v1.ItemService.Get:output_type -> aff.v1.ItemServiceGetResponse
+	7,  // 35: aff.v1.ItemService.Create:output_type -> aff.v1.ItemServiceCreateResponse
+	9,  // 36: aff.v1.ItemService.Update:output_type -> aff.v1.ItemServiceUpdateResponse
+	11, // 37: aff.v1.ItemService.Delete:output_type -> aff.v1.ItemServiceDeleteResponse
+	13, // 38: aff.v1.ItemService.Restore:output_type -> aff.v1.ItemServiceRestoreResponse
+	15, // 39: aff.v1.ItemService.PromoteSample:output_type -> aff.v1.ItemServicePromoteSampleResponse
+	17, // 40: aff.v1.ItemService.PublishCorrection:output_type -> aff.v1.ItemServicePublishCorrectionResponse
+	21, // 41: aff.v1.ItemService.ListRevisions:output_type -> aff.v1.ItemServiceListRevisionsResponse
+	23, // 42: aff.v1.ItemService.RevertRevision:output_type -> aff.v1.ItemServiceRevertRevisionResponse
+	33, // [33:43] is the sub-list for method output_type
+	23, // [23:33] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_aff_v1_item_proto_init() }
@@ -1268,7 +1666,7 @@ func file_aff_v1_item_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_aff_v1_item_proto_rawDesc), len(file_aff_v1_item_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   17,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

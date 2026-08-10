@@ -27,6 +27,8 @@ const (
 	ItemService_Restore_FullMethodName           = "/aff.v1.ItemService/Restore"
 	ItemService_PromoteSample_FullMethodName     = "/aff.v1.ItemService/PromoteSample"
 	ItemService_PublishCorrection_FullMethodName = "/aff.v1.ItemService/PublishCorrection"
+	ItemService_ListRevisions_FullMethodName     = "/aff.v1.ItemService/ListRevisions"
+	ItemService_RevertRevision_FullMethodName    = "/aff.v1.ItemService/RevertRevision"
 )
 
 // ItemServiceClient is the client API for ItemService service.
@@ -75,6 +77,21 @@ type ItemServiceClient interface {
 	// "Correction:". It does not mutate the original item's row, so it does
 	// not require the original's expected_version.
 	PublishCorrection(ctx context.Context, in *ItemServicePublishCorrectionRequest, opts ...grpc.CallOption) (*ItemServicePublishCorrectionResponse, error)
+	// ListRevisions returns an item's edit history, newest first, with enough
+	// per entry to render a diff without a second call (PLAN.md §12.4: "edits
+	// are recorded in item_revisions with a diff view and revert"). An item
+	// with no edits returns an empty list, not an error.
+	ListRevisions(ctx context.Context, in *ItemServiceListRevisionsRequest, opts ...grpc.CallOption) (*ItemServiceListRevisionsResponse, error)
+	// RevertRevision is an ORDINARY EDIT, not a rewind: it restores the field
+	// values recorded as `old_value` on the chosen revision and records that
+	// restoration as a brand-new item_revisions entry, through the same path
+	// Update uses. It never deletes a row from item_revisions — history that
+	// could be erased by the thing it audits would not be history. It takes
+	// expected_version like every other mutation (PLAN.md §11) so a revert
+	// racing a concurrent edit conflicts loudly instead of silently winning.
+	// item_key is never touched — "revert restores the old state" is exactly
+	// the reasoning that would wrongly restore an old guid too (PLAN.md §5.1).
+	RevertRevision(ctx context.Context, in *ItemServiceRevertRevisionRequest, opts ...grpc.CallOption) (*ItemServiceRevertRevisionResponse, error)
 }
 
 type itemServiceClient struct {
@@ -165,6 +182,26 @@ func (c *itemServiceClient) PublishCorrection(ctx context.Context, in *ItemServi
 	return out, nil
 }
 
+func (c *itemServiceClient) ListRevisions(ctx context.Context, in *ItemServiceListRevisionsRequest, opts ...grpc.CallOption) (*ItemServiceListRevisionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ItemServiceListRevisionsResponse)
+	err := c.cc.Invoke(ctx, ItemService_ListRevisions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *itemServiceClient) RevertRevision(ctx context.Context, in *ItemServiceRevertRevisionRequest, opts ...grpc.CallOption) (*ItemServiceRevertRevisionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ItemServiceRevertRevisionResponse)
+	err := c.cc.Invoke(ctx, ItemService_RevertRevision_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ItemServiceServer is the server API for ItemService service.
 // All implementations must embed UnimplementedItemServiceServer
 // for forward compatibility.
@@ -211,6 +248,21 @@ type ItemServiceServer interface {
 	// "Correction:". It does not mutate the original item's row, so it does
 	// not require the original's expected_version.
 	PublishCorrection(context.Context, *ItemServicePublishCorrectionRequest) (*ItemServicePublishCorrectionResponse, error)
+	// ListRevisions returns an item's edit history, newest first, with enough
+	// per entry to render a diff without a second call (PLAN.md §12.4: "edits
+	// are recorded in item_revisions with a diff view and revert"). An item
+	// with no edits returns an empty list, not an error.
+	ListRevisions(context.Context, *ItemServiceListRevisionsRequest) (*ItemServiceListRevisionsResponse, error)
+	// RevertRevision is an ORDINARY EDIT, not a rewind: it restores the field
+	// values recorded as `old_value` on the chosen revision and records that
+	// restoration as a brand-new item_revisions entry, through the same path
+	// Update uses. It never deletes a row from item_revisions — history that
+	// could be erased by the thing it audits would not be history. It takes
+	// expected_version like every other mutation (PLAN.md §11) so a revert
+	// racing a concurrent edit conflicts loudly instead of silently winning.
+	// item_key is never touched — "revert restores the old state" is exactly
+	// the reasoning that would wrongly restore an old guid too (PLAN.md §5.1).
+	RevertRevision(context.Context, *ItemServiceRevertRevisionRequest) (*ItemServiceRevertRevisionResponse, error)
 	mustEmbedUnimplementedItemServiceServer()
 }
 
@@ -244,6 +296,12 @@ func (UnimplementedItemServiceServer) PromoteSample(context.Context, *ItemServic
 }
 func (UnimplementedItemServiceServer) PublishCorrection(context.Context, *ItemServicePublishCorrectionRequest) (*ItemServicePublishCorrectionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PublishCorrection not implemented")
+}
+func (UnimplementedItemServiceServer) ListRevisions(context.Context, *ItemServiceListRevisionsRequest) (*ItemServiceListRevisionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRevisions not implemented")
+}
+func (UnimplementedItemServiceServer) RevertRevision(context.Context, *ItemServiceRevertRevisionRequest) (*ItemServiceRevertRevisionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevertRevision not implemented")
 }
 func (UnimplementedItemServiceServer) mustEmbedUnimplementedItemServiceServer() {}
 func (UnimplementedItemServiceServer) testEmbeddedByValue()                     {}
@@ -410,6 +468,42 @@ func _ItemService_PublishCorrection_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ItemService_ListRevisions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ItemServiceListRevisionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ItemServiceServer).ListRevisions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ItemService_ListRevisions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ItemServiceServer).ListRevisions(ctx, req.(*ItemServiceListRevisionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ItemService_RevertRevision_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ItemServiceRevertRevisionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ItemServiceServer).RevertRevision(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ItemService_RevertRevision_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ItemServiceServer).RevertRevision(ctx, req.(*ItemServiceRevertRevisionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ItemService_ServiceDesc is the grpc.ServiceDesc for ItemService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -448,6 +542,14 @@ var ItemService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PublishCorrection",
 			Handler:    _ItemService_PublishCorrection_Handler,
+		},
+		{
+			MethodName: "ListRevisions",
+			Handler:    _ItemService_ListRevisions_Handler,
+		},
+		{
+			MethodName: "RevertRevision",
+			Handler:    _ItemService_RevertRevision_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
