@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AnimeFeedFlux Admin</title>
+
+<!--
+  base href, TODOS.md D0-04 / PLAN.md §12: "a correct <base href> — without
+  it deep links and refreshes break, which has bitten the other Flux
+  apps." "/" is correct for this app being served at the admin host's
+  root (PLAN.md §2: "admin.anime.earlcameron.com" — a dedicated host, not
+  a sub-path of the public feed host). If this bundle is ever served from
+  a sub-path instead, this is the one line that needs to change: GWC's
+  router (router.NewHistoryRouter, mounted in web/shell/app.go) resolves
+  its pushState navigation and router.Href against this element itself
+  (confirmed in the pinned v5.0.1 module's router/use_route_wasm.go doc
+  comments), so this is the only place the base path needs to be correct
+  — no Go code reads or strips it by hand.
+-->
+<base href="/">
+
+<style>
+  /* Minimal, framework-free baseline so the shell has *something* sane
+     to look at before design tokens (D0-11/D0-12, a later wave) land.
+     Deliberately not Tailwind or any other utility framework: nothing
+     here is served from a CDN (this UI is IP-allowlisted and must work
+     with no third-party network dependency), and no CSS framework
+     dependency exists in go.mod for this project to vendor one from. */
+  :root {
+    color-scheme: light dark;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #app {
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  .af-banner {
+    padding: 0.5rem 1rem;
+    background: #7a1f1f;
+    color: #fff;
+    text-align: center;
+    font-size: 0.9rem;
+  }
+  .af-banner--hidden { display: none; }
+  .af-banner--visible { display: block; }
+
+  .af-expiry-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .af-expiry-modal--hidden { display: none; }
+  .af-expiry-modal--visible { display: flex; }
+  .af-expiry-modal > * {
+    background: canvas;
+    color: canvastext;
+    padding: 1.5rem;
+    border-radius: 0.5rem;
+    max-width: 24rem;
+  }
+
+  .af-content { flex: 1; padding: 1rem; }
+  .af-placeholder { opacity: 0.6; font-style: italic; }
+
+  #noscript-fallback {
+    padding: 2rem;
+    font-size: 1.1rem;
+  }
+</style>
+</head>
+<body>
+<noscript>
+  <div id="noscript-fallback">
+    AnimeFeedFlux Admin requires JavaScript and WebAssembly.
+  </div>
+</noscript>
+
+<div id="app"></div>
+
+<!-- wasm_exec.js is copied in at build time from GOROOT by web/build.sh
+     (see that script's step 3) — it is Go's own WASM runtime glue and is
+     not committed to the repo, since it must match the Go toolchain
+     version the binary was built with. -->
+<script src="wasm_exec.js"></script>
+<script>
+  const go = new Go();
+  // app.wasm.gz is preferred when the server advertises gzip support
+  // and sets Content-Encoding: gzip on it (D0-03); app.wasm is the
+  // uncompressed fallback for any server/tooling that only serves the
+  // plain file. This shell tries the plain .wasm first, which is what
+  // every static file server (including `python -m http.server` during
+  // local dev) can serve with zero configuration; the deployed admin
+  // host is expected to serve app.wasm.gz at the app.wasm URL with the
+  // right Content-Encoding header instead (that's a server-side
+  // decision, out of scope for this static shell).
+  WebAssembly.instantiateStreaming(fetch("app.wasm"), go.importObject)
+    .then((result) => {
+      go.run(result.instance);
+    })
+    .catch((err) => {
+      console.error("AnimeFeedFlux Admin: failed to load app.wasm", err);
+      document.getElementById("app").textContent =
+        "Failed to load the admin app. Reload, or check the console.";
+    });
+</script>
+</body>
+</html>
