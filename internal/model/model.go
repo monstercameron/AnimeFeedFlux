@@ -54,6 +54,12 @@ type Feed struct {
 	Timezone    string
 	LastBuiltAt time.Time
 
+	// CreatedAt fixes this feed's Tag URI epoch. §5.1's guid embeds a year,
+	// and it must be the year the FEED was created, not the current year:
+	// deriving it from time.Now would change every guid in every feed on New
+	// Year's Day, and a guid must be stable forever.
+	CreatedAt time.Time
+
 	Version int64
 }
 

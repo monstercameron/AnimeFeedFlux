@@ -234,6 +234,15 @@ That makes authentication the entire defense, so it gets built properly rather t
   logged. A redaction
   filter on the log writer scrubs anything matching known key shapes, as a backstop rather than a
   primary control.
+- **Encoding is part of validation.** Model output must be valid UTF-8 and free of
+  XML-illegal control characters before it is stored. Fuzzing found that neither was
+  checked: a NUL or a C0 control in a title produced a feed no parser accepts (XML 1.0
+  forbids them outright — there is no character reference for U+0000), and invalid UTF-8
+  made `encoding/json` silently substitute U+FFFD so the subscriber saw mangled text with
+  nobody told. `generate.Validate` now rejects both, and the renderers strip them as a
+  last-resort backstop. Carriage returns are normalised to newlines for a related reason:
+  XML 1.0 §2.11 requires every parser to do it, so emitting a CR guarantees the reader
+  sees something different from what was stored.
 - **Untrusted input:** LLM output and upstream RSS are both hostile input. Sanitize HTML through a
   strict allowlist before storage, escape again at render, and never interpolate model text into XML
   or HTML without going through the encoder. Upstream XML parsing disables entity expansion (billion

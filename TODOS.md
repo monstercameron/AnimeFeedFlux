@@ -243,10 +243,10 @@ an incident — which is exactly when it is switched on.
 - [x] `A6-10` Record reject reasons on the run so the sampler can show them. §10
 - [x] `A6-11` **Test: candidate carries tracking params, model echoes it verbatim → accepted.** §9.6
 - [x] `A6-12` Test: a URL absent from the candidate set is rejected.
-- [ ] `A6-13` Ranking prompt that orders candidates by newsworthiness. §1
-- [ ] `A6-14` A dead or reformatted source degrades the feed, never breaks the run. §19
-- [ ] `A6-15` Evaluate SchemaFlux `Deduplicate` on the ~40-candidate set; record the decision. §8
-- [ ] `A6-16` Summarize-and-link only; never store full upstream article text. §19
+- [x] `A6-13` Ranking prompt that orders candidates by newsworthiness. §1
+- [x] `A6-14` A dead or reformatted source degrades the feed, never breaks the run. §19
+- [x] `A6-15` Evaluate SchemaFlux `Deduplicate` on the ~40-candidate set; record the decision. §8
+- [x] `A6-16` Summarize-and-link only; never store full upstream article text. §19
 - [ ] `A6-17` Span `sources.fetch` per source: url, status, whether it 304'd, item count. §15.0a
 - [ ] `A6-18` Span `link.integrity` with candidates, accepted, rejected. §15.0a
 - [ ] `A6-19` A rejected link is logged with `reason`, never with the model's raw output. RULE-3
@@ -280,11 +280,11 @@ an incident — which is exactly when it is switched on.
 - [x] `A8-01` Dry-run path reusing the **entire** generation pipeline, writing no items. §11
 - [x] `A8-02` Return candidate items, rendered `<item>` XML, novelty verdict, and cost. §11
 - [x] `A8-03` Return grounded link verdicts including the failing URL. §12.3
-- [ ] `A8-04` Persist samples for 24h with `expires_at`. §12.3
-- [ ] `A8-05` Streaming variant emitting deltas as they arrive. §11
-- [ ] `A8-06` Sample size 1–5 and an optional temperature override. §12.3
-- [ ] `A8-07` `PromoteSample` writes the item stamped **now**, retrying on timestamp collision. §11
-- [ ] `A8-08` Sampling draws from the same budget as scheduled generation. §13
+- [x] `A8-04` Persist samples for 24h with `expires_at`. §12.3
+- [x] `A8-05` Streaming variant emitting deltas as they arrive. §11
+- [x] `A8-06` Sample size 1–5 and an optional temperature override. §12.3
+- [x] `A8-07` `PromoteSample` writes the item stamped **now**, retrying on timestamp collision. §11
+- [x] `A8-08` Sampling draws from the same budget as scheduled generation. §13
 - [x] `A8-09` Test: sampling writes nothing but a `samples` row.
 
 ## A9 — Publish plane
@@ -307,10 +307,10 @@ an incident — which is exactly when it is switched on.
 - [x] `A9-16` No stack traces, no version banner, no directory listing. §6
 - [x] `A9-17` `robots.txt`. §6
 - [x] `A9-18` Test: 304 on both validators; 405; 410; gzip correctness; `Vary` present. §17
-- [ ] `A9-19` End-to-end: generate → fetch → validator passes → item appears once over two polls. §17
-- [ ] `A9-20` Span `http.request` with route, status, and cache result (hit|miss|304). §15.0a
-- [ ] `A9-21` Child span `render.feed` on a cache miss only — a hit must stay cheap. §15.0a
-- [ ] `A9-22` `aff_http_requests_total` and `aff_cache_hits_total`; the 304 ratio is the number that matters. §15.0a
+- [x] `A9-19` End-to-end: generate → fetch → validator passes → item appears once over two polls. §17
+- [x] `A9-20` Span `http.request` with route, status, and cache result (hit|miss|304). §15.0a
+- [x] `A9-21` Child span `render.feed` on a cache miss only — a hit must stay cheap. §15.0a
+- [x] `A9-22` `aff_http_requests_total` and `aff_cache_hits_total`; the 304 ratio is the number that matters. §15.0a
 - [ ] `A9-23` Publish-plane requests are ratio-sampled; errors always sampled. §15.0a
 - [ ] `A9-24` Emit the canonical `http.request` event once per request, not per stage. §15.0
 
@@ -320,19 +320,19 @@ an incident — which is exactly when it is switched on.
 - [x] `AF-02` Any sanitizer output containing a tag or attribute outside the allowlist fails. §17.3
 - [x] `AF-03` Fuzz the URL normalizer for **idempotence**: `norm(norm(u)) == norm(u)`. §17.3
 - [x] `AF-04` State why AF-03 matters: §9.6 byte-equality is only sound if normalization is stable.
-- [ ] `AF-05` Fuzz the RSS renderer: output must always parse as well-formed XML. §17.3
-- [ ] `AF-06` Fuzz the Atom renderer likewise. §17.3
-- [ ] `AF-07` Fuzz the JSON Feed renderer: output must always be valid JSON. §17.3
-- [ ] `AF-08` Renderer fuzz asserts text content round-trips — the cheapest escaping-bug guard. §17.3
-- [ ] `AF-09` **90-day simulated soak** on the fake provider with the clock advanced. §17.4
-- [ ] `AF-10` Soak asserts: no duplicate guids across the whole run. §17.4
-- [ ] `AF-11` Soak asserts: `pubDate`s strictly decreasing and unique throughout. §17.4
-- [ ] `AF-12` Soak asserts: novelty rejections occur and do not runaway-retry. §17.4
-- [ ] `AF-13` Soak asserts: budgets enforced every day, never exceeded. §17.4
-- [ ] `AF-14` Soak asserts: run history internally consistent end to end. §17.4
-- [ ] `AF-15` Poll-load check: many concurrent conditional GETs, 304s dominate. §17.4
-- [ ] `AF-16` Poll-load asserts **no SQLite query on a cache hit**. §17.4
-- [ ] `AF-17` Poll-load asserts memory stays flat across sustained polling. §17.4
+- [x] `AF-05` Fuzz the RSS renderer: output must always parse as well-formed XML. §17.3
+- [x] `AF-06` Fuzz the Atom renderer likewise. §17.3
+- [x] `AF-07` Fuzz the JSON Feed renderer: output must always be valid JSON. §17.3
+- [x] `AF-08` Renderer fuzz asserts text content round-trips — the cheapest escaping-bug guard. §17.3
+- [x] `AF-09` **90-day simulated soak** on the fake provider with the clock advanced. §17.4
+- [x] `AF-10` Soak asserts: no duplicate guids across the whole run. §17.4
+- [x] `AF-11` Soak asserts: `pubDate`s strictly decreasing and unique throughout. §17.4
+- [x] `AF-12` Soak asserts: novelty rejections occur and do not runaway-retry. §17.4
+- [x] `AF-13` Soak asserts: budgets enforced every day, never exceeded. §17.4
+- [x] `AF-14` Soak asserts: run history internally consistent end to end. §17.4
+- [x] `AF-15` Poll-load check: many concurrent conditional GETs, 304s dominate. §17.4
+- [x] `AF-16` Poll-load asserts **no SQLite query on a cache hit**. §17.4
+- [x] `AF-17` Poll-load asserts memory stays flat across sustained polling. §17.4
 
 ---
 
@@ -413,7 +413,7 @@ These drive each flow end to end through the RPC layer, then assert the flow's i
 **resulting system state** — not against a mock's call log. This is the regression suite; it runs on
 every commit. The UI walkthroughs in `DF` come later and do not replace these.
 
-- [ ] `BF-00` Harness: run a flow against a real store and RPC server, then assert on final state.
+- [x] `BF-00` Harness: run a flow against a real store and RPC server, then assert on final state.
 - [ ] `BF-01` **J1** login: exactly one unexpired session row exists. §22
 - [ ] `BF-02` J1: cookie has `HttpOnly`, `Secure`, `SameSite=Strict`, `__Host-` prefix. §22
 - [ ] `BF-03` J1: every attempt, success or failure, lands in `auth_events`. §22
@@ -425,17 +425,17 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [ ] `BF-09` J2: each of duplicate/reserved slug, bad cron, unknown tz, unknown template var,
       grounded-without-source, and zero budget is refused **server-side**. §22
 - [ ] `BF-10` J2: no provider call was made and nothing was published. §22
-- [ ] `BF-11` **J3** sample: **`items` row count is unchanged.** The single most important one. §22
-- [ ] `BF-12` J3: a `samples` row exists with `expires_at` set. §22
-- [ ] `BF-13` J3: cost is non-zero and debited from the same budget scheduled runs use. §22
-- [ ] `BF-14` J3: returned XML fragment is byte-identical to what publishing emits. §22
-- [ ] `BF-15` J3: with the kill switch on, **no provider call is made at all**. §22
-- [ ] `BF-16` **J4** promote: exactly one new item, `origin = sampled`. §22
-- [ ] `BF-17` J4: `published_at` strictly greater than the previously newest item. §22
-- [ ] `BF-18` J4: fresh ULID, and the guid contains it. §22
+- [x] `BF-11` **J3** sample: **`items` row count is unchanged.** The single most important one. §22
+- [x] `BF-12` J3: a `samples` row exists with `expires_at` set. §22
+- [x] `BF-13` J3: cost is non-zero and debited from the same budget scheduled runs use. §22
+- [x] `BF-14` J3: returned XML fragment is byte-identical to what publishing emits. §22
+- [x] `BF-15` J3: with the kill switch on, **no provider call is made at all**. §22
+- [x] `BF-16` **J4** promote: exactly one new item, `origin = sampled`. §22
+- [x] `BF-17` J4: `published_at` strictly greater than the previously newest item. §22
+- [x] `BF-18` J4: fresh ULID, and the guid contains it. §22
 - [ ] `BF-19` J4: render cache invalidated and `lastBuildDate` bumped. §22
-- [ ] `BF-20` J4: item appears exactly once in all three formats. §22
-- [ ] `BF-21` J4: a timestamp collision retries at +1s, no constraint error escapes. §22
+- [x] `BF-20` J4: item appears exactly once in all three formats. §22
+- [x] `BF-21` J4: a timestamp collision retries at +1s, no constraint error escapes. §22
 - [ ] `BF-22` **J5** diagnose: every run reaches a terminal status; none left `running`. §22
 - [ ] `BF-23` J5: `items_added + items_rejected` reconciles with recorded reasons. §22
 - [ ] `BF-24` J5: a failed run has **zero** items attributable to it. §22

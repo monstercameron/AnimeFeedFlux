@@ -27,6 +27,8 @@ import (
 // runs.reject_reasons_json), so they must never be full sentences — a
 // sentence changes wording between commits and breaks the grouping.
 const (
+	ReasonInvalidUTF8          = "invalid_utf8"
+	ReasonControlChars         = "control_chars"
 	ReasonTitleRequired        = "title_required"
 	ReasonTitleTooShort        = "title_too_short"
 	ReasonTitleTooLong         = "title_too_long"
@@ -145,6 +147,31 @@ func Validate(in Candidate, opts Options) (model.Item, []Rejection, error) {
 	var rejections []Rejection
 	reject := func(field, reason string) {
 		rejections = append(rejections, Rejection{Field: field, Reason: reason})
+	}
+
+	// --- Encoding, before anything else ---
+	//
+	// Invalid UTF-8 or an XML-illegal control character must never reach a
+	// renderer. Fuzzing found that both produced a feed no parser accepts —
+	// escaping cannot save them, because there is no character reference for
+	// U+0000 and XML 1.0 simply forbids it. JSON is worse in a quieter way:
+	// encoding/json silently substitutes U+FFFD, so the subscriber sees mangled
+	// text rather than an error anyone notices.
+	//
+	// The renderer strips these defensively as a last resort, but rejecting here
+	// is what keeps the bad bytes out of the DATABASE, where they would
+	// otherwise sit forever behind a permanent guid.
+	for _, f := range []struct{ name, val string }{
+		{"title", in.Title},
+		{"summary_text", in.SummaryText},
+		{"body_html", in.BodyHTML},
+		{"answer_html", in.AnswerHTML},
+	} {
+		if !utf8.ValidString(f.val) {
+			reject(f.name, ReasonInvalidUTF8)
+		} else if strings.ContainsFunc(f.val, isForbiddenControl) {
+			reject(f.name, ReasonControlChars)
+		}
 	}
 
 	// --- Title ---
@@ -317,4 +344,16 @@ func firstNonEmpty(vals ...string) string {
 // silently corrupting stored content.
 func plainText(htmlStr string) string {
 	return strings.TrimSpace(stripTagsRe.ReplaceAllString(htmlStr, ""))
+}
+
+// isForbiddenControl reports whether r is a control character XML 1.0 cannot
+// carry. Tab, newline and carriage return are the three that are allowed.
+func isForbiddenControl(r rune) bool {
+	// 0x09 tab, 0x0A newline, 0x0D carriage return are the only control
+	// characters XML 1.0 permits. Written as codepoints rather than escapes so
+	// the intent survives a copy-paste.
+	if r == 0x09 || r == 0x0A || r == 0x0D {
+		return false
+	}
+	return r < 0x20 || (r >= 0x7F && r <= 0x9F) || r == 0xFFFE || r == 0xFFFF
 }

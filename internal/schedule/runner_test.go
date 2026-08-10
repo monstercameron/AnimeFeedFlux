@@ -502,7 +502,13 @@ func TestRunner_ShutdownStopsDispatchAndWaitsForInFlight(t *testing.T) {
 
 func TestRunner_RunExceedingTimeoutIsCancelled(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0).UTC())
-	job := stubJob{id: 1, slug: "slow", interval: time.Millisecond}
+	// interval is deliberately >> runTimeout: after the timeout cancels the
+	// one run under test, the job must not immediately come due again — a
+	// short interval turns the run into a busy loop of re-fire/timeout/fail
+	// cycles, which makes "InFlight dropped to 0" a racy signal (it can
+	// catch the brief gap between one cancelled run ending and the next
+	// starting) rather than the single, stable transition this test wants.
+	job := stubJob{id: 1, slug: "slow", interval: time.Hour}
 	exec := newRecordingExecutor(clock)
 	block := make(chan struct{}) // never closed: only ctx cancellation ends Execute
 	exec.block = map[int64]chan struct{}{1: block}
@@ -514,7 +520,7 @@ func TestRunner_RunExceedingTimeoutIsCancelled(t *testing.T) {
 	done := make(chan struct{})
 	go func() { r.Run(ctx); close(done) }()
 
-	nudgeUntilCalls(t, clock, exec, 1, 3*time.Millisecond, time.Second)
+	nudgeUntilCalls(t, clock, exec, 1, 2*time.Minute, 2*time.Second)
 
 	// The run is now blocked inside Execute. Advancing the clock past the
 	// run timeout must cancel its context and let Execute return. The

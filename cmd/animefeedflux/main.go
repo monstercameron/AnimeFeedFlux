@@ -1,15 +1,12 @@
 // Command animefeedflux is the AnimeFeedFlux server.
 //
-// At A0 it does one thing: boot, validate its configuration, serve /healthz on
-// the publish listener, and shut down cleanly. Everything else in PLAN.md
-// arrives in later phases; this exists so that configuration, logging, signal
-// handling and the container's healthcheck are proven before anything depends
-// on them.
+// It boots, validates its configuration, opens and migrates the store, serves
+// the read-only publish plane (§2), and shuts down cleanly. The control plane
+// and scheduler arrive in later phases.
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -109,9 +106,29 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
+	// Open the store BEFORE the listener. Migrations and stale-run reclamation
+	// (§15) must finish before anything can serve, and a boot that fails here
+	// should fail before a reader ever sees a half-migrated database.
+	st, err := openStore(ctx, cfg)
+	if err != nil {
+		log.Error("opening store", slog.Any("error", err))
+		return exitRuntimeFail
+	}
+	defer func() {
+		if err := st.Close(); err != nil {
+			log.Error("closing store", slog.Any("error", err))
+		}
+	}()
+
+	handler, err := buildPublishHandler(st, cfg, version)
+	if err != nil {
+		log.Error("building publish handler", slog.Any("error", err))
+		return exitRuntimeFail
+	}
+
 	srv := &http.Server{
 		Addr:    cfg.PublishAddr,
-		Handler: publishMux(log),
+		Handler: handler,
 
 		// Explicit, never the zero-value defaults. An internet-facing server
 		// with no timeouts holds a connection open until the client decides
@@ -151,39 +168,4 @@ func run() int {
 
 	log.Info("stopped cleanly")
 	return exitOK
-}
-
-// publishMux is the public, read-only plane (§2). Until A9 it serves only
-// health.
-func publishMux(log *slog.Logger) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", healthz(log))
-	return mux
-}
-
-// health is the shape of the /healthz body. It is deliberately JSON from the
-// start: the container healthcheck only reads the status code, but a human
-// debugging a deploy reads the body, and "ok" tells them nothing about which
-// build they are looking at.
-type health struct {
-	Status  string `json:"status"`
-	Version string `json:"version"`
-	Commit  string `json:"commit"`
-}
-
-func healthz(log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.WriteHeader(http.StatusOK)
-
-		if err := json.NewEncoder(w).Encode(health{
-			Status:  "ok",
-			Version: version,
-			Commit:  commit,
-		}); err != nil {
-			// The response is already committed, so this can only be logged.
-			log.WarnContext(r.Context(), "writing healthz body failed", slog.Any("error", err))
-		}
-	}
 }

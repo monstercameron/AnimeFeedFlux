@@ -13,6 +13,75 @@ Newest entries at the top.
 
 ---
 
+## 2026-08-10 — Phase A built in parallel waves; what six-agent fan-out actually costs
+
+Five waves of six Sonnet subagents took the repository from a specification to
+most of Phase A: store, three renderers, publish plane, sanitizer, sources,
+scheduler, generation pipeline, novelty, budget, auth, OTel. Roughly 15k lines
+with tests, all gates green.
+
+The interesting part is not the throughput. It is what went wrong.
+
+### Isolation needs more than "own your files"
+
+I told each agent to touch only its own files. That is necessary and it is not
+sufficient, three times over:
+
+- **The package namespace is shared.** Three agents independently wrote a test
+  helper called `testChannel` in package `render` and collided. They noticed and
+  renamed, but only because the build broke loudly.
+- **The build graph is shared.** I ran `go mod tidy` while agents were writing,
+  and it stripped `oklog/ulid` because nothing imported it *at that instant*,
+  breaking an agent mid-task. Later, an agent following "do not modify go.mod"
+  faithfully restored go.mod and deleted go.sum — a locally correct action that
+  was globally wrong, because a sibling had legitimately added a dependency.
+- **A spec can collide with itself.** I asked one agent for a function called
+  `Validate` in two files of the same package. That one was mine.
+
+The rule that actually works: the coordinator owns `go.mod` exclusively, adds
+every dependency *before* dispatch, and agents are told never to delete a file
+they did not create.
+
+### Cheap fuzzing found more than careful review did
+
+Three fuzz targets found real bugs that reading would not have:
+
+- `urlnorm` idempotence: multi-slash paths needed the trailing-slash strip run to
+  a fixed point, and a host that was only a port normalised to a host-less string
+  that then failed on a second pass. §9.6's byte-equality check is only sound if
+  normalization is stable, so both would have silently rejected *good* links.
+- `sanitize` idempotence: attribute entity round-tripping turned `&amp;` into
+  `&amp;amp;` on a second pass.
+
+Both classes are invisible to review because each pass looks correct in
+isolation.
+
+### An over-strict test is a bug in the test
+
+The sanitizer fuzz initially asserted that "javascript:" never appears anywhere
+in the output, and failed on the plain text input "JAVASCRiPt:". Making the
+sanitizer satisfy it would have corrupted legitimate prose — an article about XSS
+must survive with its text intact. The property was rewritten structurally: every
+surviving tag is in the allowlist, the only attribute is href on `a`, every href
+scheme is http or https. Same protection, no false positives.
+
+### Reading the dependency beat trusting the plan
+
+§8 assumed SchemaFlux would report token usage and expose embeddings. Reading the
+v1.1.0 surface found it does neither, and that a per-call `Client` does not
+isolate state the way the plan claimed — `client.Context(ctx)` is required.
+Recorded in §8.1 rather than discovered at A5. Cost is now labelled an estimate,
+and the novelty gate calls go-openai directly as a documented exception.
+
+### Ticking is part of the work, and I got it wrong
+
+A batch of 37 completed tasks silently stayed unticked because I chained the tick
+script behind `&&` after `staticcheck`, which failed on an unused constant and
+short-circuited it. Cam caught it. `AGENTS.md` now says: run the verification,
+read it, then tick — never chain the two.
+
+---
+
 ## 2026-08-09 — Specification built, reviewed three times, and tagged `v0.0.1-dev`
 
 Eleven commits, one day, no code. The repository went from empty to a specification, a build order,

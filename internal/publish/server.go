@@ -54,6 +54,9 @@ type Deps struct {
 	// TagYear is the fixed Tag URI epoch (model.Channel.TagYear) — a single
 	// deployment-wide value rather than per-feed, because model.Feed carries
 	// no creation year to derive it from. Never recomputed from "now".
+	// It is a FALLBACK. tagYearFor prefers the feed's own creation year, so a
+	// feed created in 2027 keeps a 2027 epoch even though the deployment
+	// booted in 2026.
 	TagYear int
 
 	// Now is the injectable clock used to stamp cache Last-Modified/pubDate
@@ -296,7 +299,7 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		SelfURL:   s.deps.BaseURL + "/feeds/" + slug + "." + format,
 		HTMLURL:   s.deps.BaseURL + "/",
 		Host:      s.deps.BaseURL,
-		TagYear:   s.deps.TagYear,
+		TagYear:   s.tagYearFor(feed),
 		Items:     items,
 		BuildTime: s.deps.now(),
 		Generator: s.deps.Generator,
@@ -365,7 +368,7 @@ func (s *server) handleItem(w http.ResponseWriter, r *http.Request) {
 		Feed:      feed,
 		HTMLURL:   s.deps.BaseURL + "/",
 		Host:      s.deps.BaseURL,
-		TagYear:   s.deps.TagYear,
+		TagYear:   s.tagYearFor(feed),
 		Generator: s.deps.Generator,
 	}
 
@@ -445,4 +448,17 @@ func (s *server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 // notModified check and any downstream proxy agree on what it means.
 func httpTime(t time.Time) string {
 	return t.UTC().Format(http.TimeFormat)
+}
+
+// tagYearFor resolves a feed's Tag URI epoch.
+//
+// Per feed, not per deployment: §5.1's guid embeds a year and must be stable
+// forever, so it comes from when THIS feed was created. Deps.TagYear is only a
+// fallback for a feed with no recorded creation time — falling back to
+// time.Now().Year() would silently rewrite every guid at midnight on 1 January.
+func (s *server) tagYearFor(f model.Feed) int {
+	if !f.CreatedAt.IsZero() {
+		return f.CreatedAt.UTC().Year()
+	}
+	return s.deps.TagYear
 }

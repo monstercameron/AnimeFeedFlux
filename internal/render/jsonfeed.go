@@ -57,6 +57,16 @@ type jsonFeedItem struct {
 // input order: Slack's RSS/JSON consumers require strict newest-first
 // ordering (§5.5), and a renderer that trusted caller ordering would be
 // correct only as long as every caller remembered to sort first.
+// Text is sanitized with the same function the XML renderers use, even though
+// JSON has no XML-illegal-character problem. The reason is invalid UTF-8:
+// encoding/json SILENTLY substitutes U+FFFD rather than erroring, so a
+// subscriber sees mangled text and nobody is told. Stripping the bad bytes up
+// front makes the three renderers agree on what a given item contains, which
+// matters because the same item is published in all three formats and a
+// subscriber may compare them.
+//
+// Invalid UTF-8 should never reach here at all — generate.Validate rejects it
+// (ReasonInvalidUTF8) so it never enters the database. This is the backstop.
 func JSONFeed(c model.Channel) ([]byte, error) {
 	items := make([]model.Item, len(c.Items))
 	copy(items, c.Items)
@@ -66,7 +76,7 @@ func JSONFeed(c model.Channel) ([]byte, error) {
 
 	doc := jsonFeedDoc{
 		Version:     jsonFeedVersion,
-		Title:       c.Feed.Title,
+		Title:       sanitizeXMLText(c.Feed.Title),
 		HomePageURL: c.HTMLURL,
 		FeedURL:     c.SelfURL,
 		Description: c.Feed.Description,
@@ -89,10 +99,10 @@ func JSONFeed(c model.Channel) ([]byte, error) {
 			// the caller with SummaryText first, per §5.1's ordering rule) —
 			// never in Summary below, or the channel-level preview would spoil
 			// a trivia question (§5.5).
-			ContentHTML:   it.BodyHTML,
+			ContentHTML:   sanitizeXMLText(it.BodyHTML),
 			URL:           it.Link,
-			Title:         it.Title,
-			Summary:       it.SummaryText,
+			Title:         sanitizeXMLText(it.Title),
+			Summary:       sanitizeXMLText(it.SummaryText),
 			DatePublished: RFC3339(it.PublishedAt),
 			Tags:          it.Tags,
 		})
