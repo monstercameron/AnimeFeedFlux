@@ -550,6 +550,9 @@ Per run. **The eight steps below are cited elsewhere as §9.1 … §9.8** — th
 enough (by `TODOS.md` and by other sections here) that they need stable numbers, so treat these as
 named anchors rather than incidental list markers:
 
+<!-- anchors: §9.1-§9.8 -->
+
+
 1. **Acquire context.** Generative: the last N item titles as an exclusion list. Grounded: fetch all
    sources (conditional GET against *them* too, storing their ETag/Last-Modified), parse, keep
    entries newer than the last run, cap at ~40 candidates. **Candidate URLs are normalized here,
@@ -1410,6 +1413,11 @@ else in §14 waits.
   this design it would expose the admin plane.
 
 ## 21. Open questions
+
+The four below are cited as §21.1 … §21.4, and each is tracked by an `OQ-*` task in `TODOS.md` that
+names what it blocks. Record the answer and the date here when one is decided.
+
+<!-- anchors: §21.1-§21.4 -->
 
 1. **Which feeds ship first?** Assumption: `anime-trivia-daily`, `anime-fact-daily`,
    `anime-news-daily` (grounded). Confirm or swap.

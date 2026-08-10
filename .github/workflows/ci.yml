@@ -54,21 +54,25 @@ jobs:
 
       # The spec is the product right now, so its integrity is a real gate.
       # A dangling section reference has already shipped twice in this repo.
+      # Some sections number their list items as citable anchors (§9's eight
+      # generation steps, §21's open questions) rather than as subsection
+      # headings. Those declare themselves with an `<!-- anchors: §N.a-§N.b -->`
+      # marker, so this check stays general instead of accumulating hardcoded
+      # exceptions — which is what it had after the first two, and would have
+      # kept growing.
       - name: Every plan reference resolves to a real section
         run: |
           fail=0
-          for r in $(grep -ohE '§[0-9]+(\.[0-9]+)?' PLAN.md TODOS.md AGENTS.md CONTRIBUTING.md 2>/dev/null \
-                     | sed 's/§//' | sort -u); do
+          grep -ohE '§[0-9]+(\.[0-9]+)?' PLAN.md TODOS.md AGENTS.md CONTRIBUTING.md README.md 2>/dev/null \
+            | sed 's/§//' | sort -u > /tmp/refs.txt
+          while IFS= read -r r; do
+            [ -n "$r" ] || continue
+            grep -qE "^#{2,3} ${r}[. ]" PLAN.md && continue
             base=${r%%.*}
-            if [ "$base" = "9" ] && [ "$r" != "9" ]; then
-              # §9.1-§9.8 are the generation steps, named as anchors in §9.
-              continue
-            fi
-            if ! grep -qE "^#{2,3} ${r}[. ]" PLAN.md; then
-              echo "::error::dangling reference §$r"
-              fail=1
-            fi
-          done
+            grep -qE "<!-- anchors: §${base}\." PLAN.md && continue
+            echo "::error::dangling reference §$r"
+            fail=1
+          done < /tmp/refs.txt
           [ "$fail" = 0 ] && echo "all § references resolve"
           exit $fail
 
@@ -82,6 +86,7 @@ jobs:
 
       - name: No secrets committed
         run: |
+          # shellcheck disable=SC2016  # $ here are regex anchors, not expansions
           if git ls-files | grep -qE '(^|/)\.env$|\.key$|\.db$'; then
             echo "::error::secret or database file is tracked"; exit 1
           fi
@@ -102,7 +107,7 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: 'stable' }
       - name: actionlint
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/*.yml
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/*.yml
 
       - name: Shell syntax
         run: |
@@ -145,7 +150,7 @@ jobs:
 
       - name: staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
           staticcheck ./...
 
       # -race is the reason this job exists. It cannot run on windows/arm64, so
@@ -161,7 +166,7 @@ jobs:
 
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           govulncheck ./...
 
       - name: Coverage ratchet

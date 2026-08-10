@@ -159,7 +159,12 @@ jobs:
           USER: ${{ secrets.DEPLOY_USER }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          ssh -o BatchMode=yes "$USER@$HOST" bash -euo pipefail <<EOSSH
+          # The heredoc is QUOTED and TAG is passed through the remote
+          # environment. An unquoted heredoc expands on the client, so every
+          # $variable in the remote script would be substituted here before the
+          # bytes ever reach the server — which silently rewrites the script you
+          # think you are running.
+          ssh -o BatchMode=yes "$USER@$HOST" "TAG='$TAG' bash -euo pipefail -s" <<'EOSSH'
             cd /opt/animefeedflux
             # Record what was running so rollback has something to name.
             grep -oP 'image:.*:\K\S+' compose.yaml > .previous-tag || true
