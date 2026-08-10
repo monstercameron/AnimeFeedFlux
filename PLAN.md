@@ -989,6 +989,99 @@ accept up front — these logs land in `docker logs`, not `journalctl` alongside
 services, so there are now two places to look when something is down. `/healthz` returns per-feed last-success age, enabled state, error counts, and provider
 status; it is the endpoint an external uptime checker watches.
 
+### 15.0 Structured logging
+
+Logs are JSON to stdout, and the discipline that makes them worth having is **canonical field
+names**. A field spelled `feed`, `feed_slug`, and `slug` in three packages is three fields, and no
+query finds all of them. The set is fixed here and used everywhere:
+
+| Field | On | Notes |
+|---|---|---|
+| `run_id` | anything inside a generation run | attached by the handler from context, never by hand |
+| `request_id` | anything inside an HTTP request | as above |
+| `trace_id`, `span_id` | everything, once tracing is on | the join between logs and traces (§15.0a) |
+| `feed_slug` | anything feed-scoped | bounded cardinality; safe as a metric label too |
+| `item_key` | item-scoped work | log only — **never** a metric label |
+| `model`, `tokens_in`, `tokens_out`, `cost_usd` | provider calls | |
+| `duration_ms` | anything timed | number, not a formatted string |
+| `outcome` | terminal events | `success` \| `skipped` \| `rejected` \| `failed` |
+| `reason` | any non-success outcome | a short stable token, not a sentence |
+
+**One canonical line per unit of work, not a running commentary.** A generation run emits a single
+`run.finished` record carrying every field above; a feed request emits one `http.request`. Chatty
+progress logging is what makes people stop reading logs, and the interesting question is almost
+always "what happened to this run", which a wide event answers and forty narrow ones do not.
+Debug-level lines may be chatty; info-level may not.
+
+Levels have meanings, so that alerting on them is possible: `ERROR` means a human must look;
+`WARN` means it self-healed but recurrence matters; `INFO` is the canonical events; `DEBUG` is
+development detail. A retried transient provider error is `WARN`, not `ERROR` — a log level that
+cries wolf trains the reader to ignore it.
+
+### 15.0a Tracing and metrics (OpenTelemetry)
+
+**SchemaFlux already emits OTel spans**, so wiring a `TracerProvider` gets the whole LLM path —
+attempts, retries, token counts, latency — for free. Not wiring one throws that away and leaves the
+single most expensive, most failure-prone call in the system unobserved.
+
+**Spans.** One root per unit of work, children only where they answer a question:
+
+```
+generation.run                      feed_slug, trigger, outcome
+├── sources.fetch                   per source: url, status, cached (304), items
+├── llm.generate                    (from SchemaFlux) model, tokens, attempt, finish_reason
+├── validate                        rejected count and reasons
+├── novelty.check                   max_cosine, verdict
+├── link.integrity                  candidates, accepted, rejected
+└── store.commit                    items written
+
+http.request                        route, status, cache (hit|miss|304)
+└── render.feed                      format, bytes, items       (miss only)
+```
+
+That shape answers the questions actually asked during an incident: *why was this run slow* (which
+child dominates), *why did this feed produce nothing* (which stage rejected), *is the LLM or the
+database the cost*.
+
+**Logs join traces.** `trace_id` and `span_id` go onto every log record from the active span, so a
+slow trace leads directly to the lines it produced. This is the one integration worth the effort;
+traces and logs that cannot be correlated are two tools and half the value.
+
+**Metrics**, deliberately few, and chosen so each one answers a question someone will ask:
+
+- `aff_runs_total{feed_slug,trigger,outcome}` — is generation working?
+- `aff_run_duration_seconds{feed_slug}`
+- `aff_items_published_total{feed_slug}` / `aff_items_rejected_total{feed_slug,reason}`
+- `aff_tokens_total{model,direction}` and `aff_cost_usd_total{feed_slug,model}` — the budget in §13,
+  observable rather than inferred
+- `aff_feed_staleness_seconds{feed_slug}` — the §15 watchdog's number, exported
+- `aff_http_requests_total{route,status}` and `aff_cache_hits_total{result}` — the 304 ratio, which
+  is the only publish-plane performance number that matters
+- `aff_provider_errors_total{kind}` — the §8 taxonomy, counted
+
+**Cardinality is a hard rule, not a guideline.** Labels may only be values from a bounded set:
+`feed_slug` (tens), `model` (a few), `outcome`, `reason`, `route`, `status`. **Never** `item_key`,
+a URL, a title, or anything derived from model output — one unbounded label is how a metrics
+backend falls over, and it is easier to prevent than to undo.
+
+**Sampling** reflects how often things happen: generation runs are rare and expensive, so sample
+them **always**; publish requests are constant and mostly 304s, so ratio-sample them (default 5%)
+while always sampling errors. A feed reader polling every fifteen minutes must not generate more
+telemetry than the content it fetches.
+
+**Where it goes, and the honest constraint.** The droplet has 2 GB and already runs four services;
+adding a collector plus a trace store to it would spend more on watching the system than on running
+it. So:
+
+- **Default: off.** No exporter, no collector, no overhead. `AFF_OTEL_ENABLED=0`.
+- **Enabled: OTLP straight to a hosted backend** over the network, no local collector. A free tier
+  is ample at this volume.
+- **Development: a stdout exporter**, so the span tree is inspectable with no backend at all.
+
+Instrumentation is written unconditionally; only the exporter is conditional. Code that only creates
+spans when a flag is set is code that has never run, and it breaks the first time it is switched on
+during an incident — which is exactly when it is switched on.
+
 **Staleness is the real failure mode.** A generator that silently stops is worse than one that
 crashes — the feed just goes quiet, and nobody notices for a week. A watchdog compares each enabled
 feed's last successful run against its schedule plus a grace factor and marks it **stale**: flagged
@@ -1165,6 +1258,12 @@ Environment only — no config file, and no secrets on disk beyond the host `env
 | `AFF_SCHEDULE_JITTER` | no | jitter window for same-schedule feeds, default `10m` |
 | `AFF_CACHE_MAX_BYTES` | no | render-cache LRU ceiling, default `64MiB` |
 | `AFF_LOG_LEVEL` | no | default `info` |
+| `AFF_OTEL_ENABLED` | no | default `0` — instrumentation always runs, only export is gated (§15.0a) |
+| `AFF_OTEL_EXPORTER` | no | `otlp` \| `stdout`, default `otlp` when enabled |
+| `AFF_TRACE_SAMPLE_RATIO` | no | publish-request sampling, default `0.05`; runs always sample |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no | standard OTel variable, honoured as-is |
+| `OTEL_EXPORTER_OTLP_HEADERS` | no | standard; carries the backend's auth token — a secret |
+| `OTEL_SERVICE_NAME` | no | defaults to `animefeedflux` |
 | `AFF_BACKUP_DIR` | no | nightly snapshot destination |
 | `AFF_SLACK_WEBHOOK_URL` | no | staleness/failure alerts |
 | `AFF_LIVE_LLM` | no | test-only; enables paid provider tests |

@@ -50,6 +50,50 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 - [x] `A0-16` Decide and record the SQLite driver (cgo vs pure-Go vs wasm). Blocks A1-01. §15.1
 - [x] `A0-17` Record the `MemoryDenyWriteExecute` / `CGO_ENABLED=0` consequence of A0-16. §15.1
 
+### A0-L — Structured logging (§15.0)
+
+The field names are the product here. Three packages spelling the same thing differently is three
+fields, and no query finds all of them.
+
+- [ ] `A0-L01` Define the canonical field-name constants in one place; nothing logs a bare string key. §15.0
+- [ ] `A0-L02` `feed_slug`, `item_key`, `model`, `outcome`, `reason`, `duration_ms` all fixed there. §15.0
+- [ ] `A0-L03` `duration_ms` is emitted as a **number**, never a formatted string. §15.0
+- [ ] `A0-L04` `outcome` is constrained to `success|skipped|rejected|failed`. §15.0
+- [ ] `A0-L05` `reason` is a short stable token, not a sentence — it gets grouped on. §15.0
+- [ ] `A0-L06` Document the level policy: ERROR means a human must look; WARN self-healed. §15.0
+- [ ] `A0-L07` A retried transient provider error logs **WARN**, not ERROR. §15.0
+- [ ] `A0-L08` Helper that emits the single canonical `run.finished` wide event. §15.0
+- [ ] `A0-L09` Helper that emits the single canonical `http.request` event. §15.0
+- [ ] `A0-L10` **No chatty INFO.** Progress detail is DEBUG only. §15.0
+- [ ] `A0-L11` Test: a completed run emits exactly one `run.finished` carrying every required field.
+- [ ] `A0-L12` Test: no log record is emitted with a field name outside the canonical set.
+- [ ] `A0-L13` Test: model output never reaches a log field verbatim (RULE-3 + cardinality).
+
+### A0-O — OpenTelemetry (§15.0a)
+
+Instrumentation is written unconditionally; only the **exporter** is conditional. Code that only
+creates spans when a flag is set has never run, and breaks the first time it is switched on during
+an incident — which is exactly when it is switched on.
+
+- [ ] `A0-O01` `internal/obs`: build a `TracerProvider` with resource attributes (service, version, commit). §15.0a
+- [ ] `A0-O02` Exporter selection: `otlp` \| `stdout` \| none, from config. §16
+- [ ] `A0-O03` **Default off** (`AFF_OTEL_ENABLED=0`) with a genuine no-op provider, not a nil check at each call site. §15.0a
+- [ ] `A0-O04` Honour the standard `OTEL_EXPORTER_OTLP_*` variables rather than inventing new ones. §16
+- [ ] `A0-O05` Treat `OTEL_EXPORTER_OTLP_HEADERS` as a **secret** — it carries the backend token. RULE-2
+- [ ] `A0-O06` Sampler: always-sample generation runs, ratio-sample publish requests. §15.0a
+- [ ] `A0-O07` Always sample a trace that contains an error, whatever the ratio says. §15.0a
+- [ ] `A0-O08` **Put `trace_id` and `span_id` on every log record** from the active span. §15.0a
+- [ ] `A0-O09` `MeterProvider` alongside, same exporter lifecycle.
+- [ ] `A0-O10` Register the metric set from §15.0a and no more.
+- [ ] `A0-O11` **Cardinality guard**: a helper that panics in tests if a label value is unbounded. §15.0a
+- [ ] `A0-O12` Never label a metric with `item_key`, a URL, a title, or model output. §15.0a
+- [ ] `A0-O13` Flush and shut the providers down cleanly on SIGTERM, before the process exits. §15
+- [ ] `A0-O14` A failing exporter must **never** block or crash the app — telemetry is not the product.
+- [ ] `A0-O15` Test: with OTel disabled, no exporter is constructed and no goroutine leaks.
+- [ ] `A0-O16` Test: with the stdout exporter, a run produces the §15.0a span tree, parented correctly.
+- [ ] `A0-O17` Test: `trace_id` in a log record matches the span that produced it.
+- [ ] `A0-O18` Test: an unbounded label is rejected by the cardinality guard.
+
 ### A0-T — Test infrastructure (build it before the suites that need it)
 
 - [ ] `A0-T01` Golden-file helper with an `-update` flag; a format change is one flag + a diff. §17.1
@@ -161,6 +205,10 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 - [ ] `A4-28` Test: two items in one run cannot share a timestamp.
 - [ ] `A4-29` Test: a backdated `published_at` is rejected.
 - [ ] `A4-30` One real generation run against OpenAI, manually reviewed for quality. `AFF_LIVE_LLM=1`
+- [ ] `A4-31` Span `llm.generate` comes from SchemaFlux — wire the provider, do not re-instrument. §15.0a
+- [ ] `A4-32` Span `validate` records rejected count and reasons as attributes. §15.0a
+- [ ] `A4-33` Emit `aff_tokens_total` and `aff_cost_usd_total` from the recorded usage. §15.0a
+- [ ] `A4-34` Emit the canonical `run.finished` wide event with every §15.0 field. §15.0
 
 ## A5 — Novelty
 
@@ -174,6 +222,8 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 - [ ] `A5-08` Seed a corpus of known near-duplicates and assert every one is caught. §18 A5
 - [ ] `A5-09` Assert genuinely distinct items are **not** rejected (false-positive guard).
 - [ ] `A5-10` Record the chosen threshold and the evidence for it, in-repo.
+- [ ] `A5-11` Span `novelty.check` with `max_cosine` and the verdict as attributes. §15.0a
+- [ ] `A5-12` `aff_items_rejected_total{reason="novelty"}` incremented on a rejection. §15.0a
 
 ## A6 — Grounded news
 
@@ -193,6 +243,9 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 - [ ] `A6-14` A dead or reformatted source degrades the feed, never breaks the run. §19
 - [ ] `A6-15` Evaluate SchemaFlux `Deduplicate` on the ~40-candidate set; record the decision. §8
 - [ ] `A6-16` Summarize-and-link only; never store full upstream article text. §19
+- [ ] `A6-17` Span `sources.fetch` per source: url, status, whether it 304'd, item count. §15.0a
+- [ ] `A6-18` Span `link.integrity` with candidates, accepted, rejected. §15.0a
+- [ ] `A6-19` A rejected link is logged with `reason`, never with the model's raw output. RULE-3
 
 ## A7 — Scheduler
 
@@ -214,6 +267,9 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 - [ ] `A7-16` Injectable clock; no sleeping in tests. §17
 - [ ] `A7-17` Test: both DST cases fire exactly once.
 - [ ] `A7-18` Test: 20 feeds on an identical cron spread across the jitter window. §17
+- [ ] `A7-19` Root span `generation.run` with `feed_slug`, `trigger`, `outcome`. §15.0a
+- [ ] `A7-20` `aff_runs_total` and `aff_run_duration_seconds` on every terminal state. §15.0a
+- [ ] `A7-21` Budget refusals increment `aff_runs_total{outcome="skipped"}`, not an error. §13
 
 ## A8 — Sampling
 
@@ -248,6 +304,11 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 - [ ] `A9-17` `robots.txt`. §6
 - [ ] `A9-18` Test: 304 on both validators; 405; 410; gzip correctness; `Vary` present. §17
 - [ ] `A9-19` End-to-end: generate → fetch → validator passes → item appears once over two polls. §17
+- [ ] `A9-20` Span `http.request` with route, status, and cache result (hit|miss|304). §15.0a
+- [ ] `A9-21` Child span `render.feed` on a cache miss only — a hit must stay cheap. §15.0a
+- [ ] `A9-22` `aff_http_requests_total` and `aff_cache_hits_total`; the 304 ratio is the number that matters. §15.0a
+- [ ] `A9-23` Publish-plane requests are ratio-sampled; errors always sampled. §15.0a
+- [ ] `A9-24` Emit the canonical `http.request` event once per request, not per stage. §15.0
 
 ## AF — Fuzz, soak, and load (cross-cutting; land as the pieces they target land)
 
@@ -489,6 +550,10 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [ ] `C4-13` Nightly prune: expired samples, old embeddings, `runs` past 180 days except failures. §15
 - [ ] `C4-14` Test: kill after the model returns but before commit → interrupted, zero items. §17
 - [ ] `C4-15` Expose per-feed last-success age and error counts on `/healthz`. §15
+- [ ] `C4-16` Export `aff_feed_staleness_seconds` so the watchdog's number is graphable. §15.0a
+- [ ] `C4-17` Point `OTEL_EXPORTER_OTLP_ENDPOINT` at a hosted backend; **no local collector** on a 2GB box. §15.0a
+- [ ] `C4-18` Verify a failing exporter degrades silently and does not stall a run. §15.0a
+- [ ] `C4-19` Confirm providers flush on SIGTERM before the container exits. §15
 
 ## C5 — Production deploy
 
