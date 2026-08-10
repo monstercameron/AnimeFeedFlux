@@ -16,20 +16,18 @@ import (
 	afi18n "github.com/monstercameron/AnimeFeedFlux/web/i18n"
 )
 
-// keyBannerReconnecting is the shell.* key for D0-09's DISCONNECTED banner.
-// web/i18n's shell namespace is declared empty for this wave — this
-// constant is what needs adding there, as a PLURAL message keyed on
-// {count} whole seconds (D6-06: "plurals through the library's plural
-// rules, not `if n == 1`"), e.g.:
-//
-//	shell.banner.reconnecting: {
-//	    PluralArg: "count",
-//	    Plural: map[gwci18n.PluralCategory]string{
-//	        gwci18n.PluralOne:   "Disconnected — reconnecting in {count} second…",
-//	        gwci18n.PluralOther: "Disconnected — reconnecting in {count} seconds…",
-//	    },
-//	}
-const keyBannerReconnecting = "banner.reconnecting"
+// keyBannerReconnecting is the shell.* key for D0-09's DISCONNECTED banner,
+// a PLURAL message keyed on {seconds} whole seconds (D6-06: "plurals
+// through the library's plural rules, not `if n == 1`"). Points at
+// web/i18n/keys_shell.go's real KeyShellBannerReconnectingIn
+// ("banner.reconnectingIn") now that that namespace is populated — this
+// used to be a stale local "banner.reconnecting" that matched nothing in
+// the catalogue, so the banner silently rendered the missing-key fallback
+// text instead of the intended countdown sentence. Fixed alongside the
+// route-wiring change since it's the same class of bug (component built
+// and tested against the wrong key, never caught because the fallback
+// looks like plausible text).
+const keyBannerReconnecting = afi18n.KeyShellBannerReconnectingIn
 
 // renderBanner is the DISCONNECTED banner (D0-09). It is a real rendered
 // component, so it uses the hook form state.UseAtomKey — this is the one
@@ -120,6 +118,6 @@ func renderBanner() ui.Node {
 			"af-banner--visible": visible,
 			"af-banner--hidden":  !visible,
 		})),
-		h.Text(t.T(keyBannerReconnecting, gwci18n.Arguments{"count": secondsLeft})),
+		h.Text(t.T(keyBannerReconnecting, gwci18n.Arguments{"seconds": secondsLeft})),
 	)
 }

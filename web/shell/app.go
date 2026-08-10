@@ -115,10 +115,25 @@ func Conn() *wsconn.Conn {
 }
 
 // Mount dials the control plane, resolves the initial ANON/AUTH state,
-// registers the five routes (plus "*") with their guards, and mounts the
-// router at selector. It blocks briefly (see initialSessionTimeout)
-// before the first render so the guard's very first decision is correct.
-func Mount(ctx context.Context, selector string) {
+// hands the dialed connection (possibly nil — see below) to wire, then
+// registers the five routes (plus "*") with their guards and mounts the
+// router at selector. It blocks briefly (see initialSessionTimeout) before
+// the first render so the guard's very first decision is correct.
+//
+// wire is the client-side composition root's hook (web/main.go): it runs
+// AFTER the connection is dialed but BEFORE the router renders anything,
+// specifically so that by the time any page's own Render is first called,
+// its Init has already installed real dependencies — a page's Init has no
+// way to force a re-render of an already-mounted fiber (GWC re-renders on
+// state changes, not on an unrelated package var being reassigned), so
+// calling wire any later would leave the first-rendered route stuck
+// showing its "not wired" state until the next navigation. wire receives
+// the dialed *wsconn.Conn directly, or nil if the initial dial failed
+// outright (see the DISCONNECTED fallback just below) — callers must
+// nil-check before reading any field off it, same contract Conn() already
+// documents. wire may be nil (e.g. a future non-page caller of Mount that
+// has nothing to wire).
+func Mount(ctx context.Context, selector string, wire func(*wsconn.Conn)) {
 	dialedConn, err := wsconn.Connect(ctx, wsconn.DefaultEndpoint, applyEvent)
 	if err != nil {
 		// The initial dial failing outright (not merely "not yet Ready")
@@ -131,6 +146,10 @@ func Mount(ctx context.Context, selector string) {
 	} else {
 		conn = dialedConn
 		resolveInitialSession(ctx)
+	}
+
+	if wire != nil {
+		wire(conn)
 	}
 
 	r := router.NewHistoryRouter(router.RouterOptions{DefaultRoute: guard.DefaultAnon})

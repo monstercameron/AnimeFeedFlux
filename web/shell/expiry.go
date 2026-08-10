@@ -11,15 +11,17 @@ import (
 	afi18n "github.com/monstercameron/AnimeFeedFlux/web/i18n"
 )
 
-// keyExpiryMessage/keyExpiryLogin are the shell.* keys this modal needs.
-// web/i18n's shell namespace is declared empty for this wave — these two
-// constants are what need adding there:
-//
-//	shell.expiry.message: {Text: "Your session expired. Your unsaved changes are kept until you log in again."}
-//	shell.expiry.login:   {Text: "Log in"}
+// keyExpiryMessage/keyExpiryLogin are the shell.* keys this modal needs,
+// pointed at web/i18n/keys_shell.go's real KeyShellExpiryBody/
+// KeyShellExpiryLogin now that that namespace is populated — these used to
+// be stale local keys ("expiry.message"/"expiry.login") that matched
+// nothing in the catalogue, so the modal silently rendered the
+// missing-key fallback instead of the intended sentence. Fixed alongside
+// the route-wiring change (same class of bug as pages.go's placeholder key
+// and banner.go's countdown key).
 const (
-	keyExpiryMessage = "expiry.message"
-	keyExpiryLogin   = "expiry.login"
+	keyExpiryMessage = afi18n.KeyShellExpiryBody
+	keyExpiryLogin   = afi18n.KeyShellExpiryLogin
 )
 
 // renderExpiryModal is D0-08's "don't silently lose unsaved work" surface:

@@ -82,6 +82,21 @@ func applyEvent(ev appstate.Event) {
 	applyTransition(ev)
 }
 
+// ApplyEvent runs ev through appstate.Transition against SessionAtom and
+// writes back the result, exactly like the unexported applyTransition
+// above. Exported so page packages outside this one (auth's /login and
+// /recover success callbacks — EvLoginSuccess, EvRecoveryCodeAccepted,
+// EvRecoveryComplete) can drive the shared D-FLOW state machine from their
+// own event handlers/goroutines without this package handing out
+// SessionAtom.Global() itself, which would let a caller Set() an arbitrary
+// state instead of going through a validated Transition. Safe to call from
+// a goroutine (an RPC callback) or a render-triggered event handler alike,
+// per the same "Global() outside a render, UseAtomKey inside one" rule
+// documented on SessionAtom above — ApplyEvent never touches UseAtomKey.
+func ApplyEvent(ev appstate.Event) {
+	applyTransition(ev)
+}
+
 // AcknowledgeExpiry is the expiry modal's "Log in" button handler: clears
 // the hold and applies the session-expired transition the admin just
 // confirmed they've seen. Persisting the draft itself (e.g. to

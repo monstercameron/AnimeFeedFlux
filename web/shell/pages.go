@@ -3,6 +3,8 @@
 package shell
 
 import (
+	"sort"
+
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
 	gwci18n "github.com/monstercameron/GoWebComponents/v5/i18n"
 	"github.com/monstercameron/GoWebComponents/v5/router"
@@ -22,7 +24,14 @@ import (
 // Interpolated via Runtime.T's Arguments, never fmt.Sprintf/h.Textf (§12.6:
 // "interpolation through the library, never string concatenation" — a
 // concatenated/Sprintf'd fragment assumes English word order).
-const keyPagePlaceholder = "pagePlaceholder"
+// This used to be a stale local placeholder ("pagePlaceholder") that never
+// matched anything in web/i18n's real catalogue (keys_shell.go's
+// KeyShellNotImplemented, "notImplemented.placeholder"), so every
+// unregistered route was silently hitting Bundle.OnMissing (a stderr log
+// plus the raw "shell.pagePlaceholder" text) instead of the intended
+// English sentence. Fixed while wiring the five routes, as the one other
+// composition-root-adjacent bug found reading this file end to end.
+const keyPagePlaceholder = afi18n.KeyShellNotImplemented
 
 // PageRenderer builds one page's body. Later waves register the real
 // /login, /generate, /history, /settings, /recover implementations via
@@ -41,6 +50,24 @@ var pages = map[string]PageRenderer{}
 // navigation, not captured at registration time.
 func RegisterPage(path string, render PageRenderer) {
 	pages[path] = render
+}
+
+// RegisteredPaths returns the sorted set of paths that currently have a
+// real registered page body (i.e. would NOT fall through to the
+// placeholder in renderPageBody). Exported so a test can assert against
+// the fixed five-route table from outside this package (route_
+// registration_test.go, package shell_test, blank-importing the four page
+// packages so their own init()-time RegisterPage calls run) rather than
+// trusting that every page package's init() actually ran just because it
+// compiled — that gap ("built, tested, connected to nothing") is exactly
+// what made all five routes unreachable before this change.
+func RegisteredPaths() []string {
+	out := make([]string, 0, len(pages))
+	for p := range pages {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // renderPageBody is only ever called from inside renderShellWrapper's own
@@ -88,6 +115,18 @@ func renderShellWrapper(props shellWrapperProps) ui.Node {
 // per-navigation, so OnMissing's stderr logging (D6-07) isn't duplicated
 // bundle-construction noise on every route change.
 var i18nBundle = afi18n.NewBundle()
+
+// Bundle returns the shell's one gwci18n.Bundle instance — the same one
+// gwci18n.Provider is mounted with in renderShellRoot — so the composition
+// root (web/main.go) can build page-declared Translator/Formatters/Catalog
+// adapters against the real catalogue instead of each page's own
+// zero-configuration fallback. There is deliberately only ever one Bundle
+// (see renderShellRoot's doc comment on why the Provider itself is
+// mounted exactly once); this accessor hands out the same value, never a
+// second one.
+func Bundle() *gwci18n.Bundle {
+	return i18nBundle
+}
 
 // renderShellRoot mounts the i18n Provider "above the router" (D0-21: "a
 // provider inside a route cannot serve the shell's own reconnect banner or
