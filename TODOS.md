@@ -32,23 +32,23 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 
 ## A0 — Skeleton
 
-- [ ] `A0-01` Create `go.mod` as `github.com/monstercameron/AnimeFeedFlux`, Go 1.26. §3
+- [x] `A0-01` Create `go.mod` as `github.com/monstercameron/AnimeFeedFlux`, Go 1.26. §3
 - [ ] `A0-02` Create the directory layout exactly as listed in §3, with a doc comment per package.
 - [ ] `A0-03` Add `github.com/monstercameron/schemaflux` as a dependency; record the version. §8
-- [ ] `A0-04` Write `internal/config`: one struct, parsed from env, no globals. §16
-- [ ] `A0-05` Validate config at boot; fail fast with one clear message per bad variable. §16
-- [ ] `A0-06` Validate `AFF_PUBLIC_BASE_URL` is absolute with a scheme — it is baked into guids. §16
-- [ ] `A0-07` Structured logging via `log/slog` to **stdout** (container requirement). §15
-- [ ] `A0-08` Add the secret-redaction filter on the log writer as a backstop. §4
-- [ ] `A0-09` Thread a request/run id through the logger context. §15
-- [ ] `A0-10` `cmd/animefeedflux` boots, serves `/healthz`, exits cleanly on SIGTERM.
-- [ ] `A0-11` `Makefile`: `build`, `test`, `lint`, `validate`, `run`.
-- [ ] `A0-12` CI workflow: `go build`, `go vet`, `go test ./...` on ubuntu-latest.
-- [ ] `A0-13` Add `-race` to CI (it cannot run on windows/arm64 locally — CI is the only place). §8
-- [ ] `A0-14` Add `govulncheck` to CI. §4
+- [x] `A0-04` Write `internal/config`: one struct, parsed from env, no globals. §16
+- [x] `A0-05` Validate config at boot; fail fast with one clear message per bad variable. §16
+- [x] `A0-06` Validate `AFF_PUBLIC_BASE_URL` is absolute with a scheme — it is baked into guids. §16
+- [x] `A0-07` Structured logging via `log/slog` to **stdout** (container requirement). §15
+- [x] `A0-08` Add the secret-redaction filter on the log writer as a backstop. §4
+- [x] `A0-09` Thread a request/run id through the logger context. §15
+- [x] `A0-10` `cmd/animefeedflux` boots, serves `/healthz`, exits cleanly on SIGTERM.
+- [x] `A0-11` `Makefile`: `build`, `test`, `lint`, `validate`, `run`.
+- [x] `A0-12` CI workflow: `go build`, `go vet`, `go test ./...` on ubuntu-latest.
+- [x] `A0-13` Add `-race` to CI (it cannot run on windows/arm64 locally — CI is the only place). §8
+- [x] `A0-14` Add `govulncheck` to CI. §4
 - [ ] `A0-15` Commit `go.sum`; pin dependencies. §4
-- [ ] `A0-16` Decide and record the SQLite driver (cgo vs pure-Go vs wasm). Blocks A1-01. §15.1
-- [ ] `A0-17` Record the `MemoryDenyWriteExecute` / `CGO_ENABLED=0` consequence of A0-16. §15.1
+- [x] `A0-16` Decide and record the SQLite driver (cgo vs pure-Go vs wasm). Blocks A1-01. §15.1
+- [x] `A0-17` Record the `MemoryDenyWriteExecute` / `CGO_ENABLED=0` consequence of A0-16. §15.1
 
 ### A0-T — Test infrastructure (build it before the suites that need it)
 
@@ -59,11 +59,11 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 - [ ] `A0-T05` Deterministic ULID source so goldens containing guids are stable. §17.1
 - [ ] `A0-T06` `testdata/` layout convention documented in-repo. §17.1
 - [ ] `A0-T07` Assert the default `go test ./...` needs no network and no API key. RULE-1
-- [ ] `A0-T08` CI runs `go test -race` on ubuntu — the only place `-race` can run. §17.2
-- [ ] `A0-T09` `-shuffle=on` for local runs, knowing it is weaker than `-race`. §17.2
-- [ ] `A0-T10` Per-package coverage measured and reported. §17.2
+- [x] `A0-T08` CI runs `go test -race` on ubuntu — the only place `-race` can run. §17.2
+- [x] `A0-T09` `-shuffle=on` for local runs, knowing it is weaker than `-race`. §17.2
+- [x] `A0-T10` Per-package coverage measured and reported. §17.2
 - [ ] `A0-T11` Coverage **ratchet** — the number may not go down. Not a target. §17.2
-- [ ] `A0-T12` `go vet` + linter + `govulncheck` gate the build. §17.2
+- [x] `A0-T12` `go vet` + linter + `govulncheck` gate the build. §17.2
 
 ## A1 — Store
 

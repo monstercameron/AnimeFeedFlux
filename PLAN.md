@@ -156,6 +156,15 @@ Standard earlcameron shape, so the ops story is boring:
 - **Store:** SQLite, single file, `WAL`, `busy_timeout=5000`, `foreign_keys=ON`,
   `synchronous=NORMAL`. FTS5 registered (it needs an explicit build tag / registration — a known
   trap) for item search in the admin UI.
+
+  **Driver decided 2026-08-09 (A0-16): `modernc.org/sqlite`, pure Go.** The forcing constraint is
+  §15.1: the runtime image is `distroless/static` and the build is `CGO_ENABLED=0`, so a cgo driver
+  such as `mattn/go-sqlite3` cannot run there without abandoning the static image. `modernc` is a
+  transpilation of SQLite itself, ships FTS5, and needs no cgo. The consequence for §15's systemd
+  note is that `MemoryDenyWriteExecute` could safely be `yes` — unlike ArticleFlux, which uses a
+  wazero-backed driver that JIT-compiles to executable pages — but the deployment is a container
+  now, so that setting is moot and recorded only so the reasoning is not lost. Revisit only if a
+  measured query-performance problem appears; correctness and image shape come first.
 - **LLM:** **SchemaFlux** (`github.com/monstercameron/schemaflux`, v1.1.0) — the in-house typed-LLM
   library. Feeds are generated with `Generating[T]`, which returns a typed Go value instead of text
   to parse, with retries, structured-output contracts, cost tracking, and telemetry centralized in

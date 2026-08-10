@@ -39,6 +39,16 @@ printf 'Set SCHEMAFLUX_API_KEY in the environment. See RULE-2.\n' > d.md; git ad
 sh .githooks/pre-commit >/dev/null 2>&1; ck "doc mention allowed" 0 $?
 git reset -q; rm d.md
 
+# Test fixtures must be able to contain something key-shaped, or you cannot
+# prove the guard fires. Placeholders are allowed; realistic values are not.
+printf 'const k = "SCHEMAFLUX_API_KEY=hunter2hunter2hunter2"\n' > f_test.go; git add f_test.go
+sh .githooks/pre-commit >/dev/null 2>&1; ck "placeholder fixture allowed" 0 $?
+git reset -q; rm f_test.go
+
+printf 'const k = "SCHEMAFLUX_API_KEY=Xk9Qm2Vb7Rt4Zp1Ls8Nw3Yd6"\n' > g_test.go; git add g_test.go
+sh .githooks/pre-commit >/dev/null 2>&1; ck "realistic key in a test blocked" 1 $?
+git reset -q; rm g_test.go
+
 printf 'k\n' > secret.key; git add -f secret.key
 sh .githooks/pre-commit >/dev/null 2>&1; ck "*.key blocked" 1 $?
 git reset -q; rm secret.key

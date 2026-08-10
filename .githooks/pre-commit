@@ -56,13 +56,28 @@ secret_diff=$(git diff --cached -U0 -- . \
     ':(exclude).githooks/*' \
     ':(exclude)scripts/test-hooks.sh' || true)
 
-if printf '%s' "$secret_diff" | grep -qE '^\+.*(SCHEMAFLUX_API_KEY|AFF_SECRET_KEY|OPENAI_API_KEY)[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9_/+-]{16,}'; then
-    fail "a staged line assigns a real-looking value to a key variable (RULE-2)"
-fi
+# Obvious placeholders are excluded, and the SAME exclusion applies to every
+# pattern below. Test fixtures MUST contain something key-shaped — that is how
+# you prove the guard fires — and excluding *_test.go wholesale would leave a
+# hole exactly where credentials get pasted while debugging.
+#
+# Sequential runs (abcdefghij, 0123456789) count as placeholders too: no real
+# credential looks like that, and every hand-typed fake one does.
+placeholder='not-?a-?real|notreal|hunter2|example|dummy|fake|placeholder|changeme|xxxx|redacted|your-?key|test-?only|abcdefghij|0123456789|123456789012'
 
-# Provider key shapes, which are unambiguous enough to match on their own.
-if printf '%s' "$secret_diff" | grep -qE '^\+.*(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'; then
-    fail "a staged line looks like a credential — check the diff (RULE-2)"
+# 1. An assignment to a known key variable, with a plausible value.
+# 2. Provider key shapes, unambiguous enough to match on their own.
+suspects=$(printf '%s' "$secret_diff" | grep -E \
+    -e '^\+.*(SCHEMAFLUX_API_KEY|AFF_SECRET_KEY|OPENAI_API_KEY)[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9_/+-]{16,}' \
+    -e '^\+.*(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' \
+    || true)
+
+real=$(printf '%s' "$suspects" | grep -ivE "$placeholder" | grep -v '^$' || true)
+
+if [ -n "$real" ]; then
+    echo "pre-commit: these staged lines look like credentials (RULE-2):" >&2
+    printf '%s\n' "$real" | head -5 | sed 's/^/  /' >&2
+    fail "refusing to commit. If they are fixtures, make them obviously fake."
 fi
 
 # --- Go checks -------------------------------------------------------------

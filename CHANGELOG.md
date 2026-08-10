@@ -18,6 +18,25 @@ at the end of Phase C.
 
 ## [Unreleased]
 
+### Added
+
+- **First application code.** Phase A0: the module, `internal/config`, `internal/obs`, and a
+  `cmd/animefeedflux` that boots, serves `/healthz`, and shuts down cleanly.
+- `config.Load` validates the whole environment and reports **every** problem at once, so a
+  misconfigured boot is fixed in one pass rather than four deploys.
+- `config.Secret` redacts itself through `fmt`, `%#v`, and `slog`, so a secret cannot leak by being
+  part of a struct someone logged.
+- `obs.RedactingWriter` scrubs credential shapes from every log line as a third, independent
+  backstop under RULE-2.
+- Run and request identifiers are attached to log records by a handler rather than at each call
+  site — an identifier that must be remembered is missing from the line you need during an incident.
+- `Makefile` with `build`, `test`, `test-race`, `fmt-check`, `lint`, `cover`, `validate`, `hooks`.
+
+### Decided
+
+- **SQLite driver: `modernc.org/sqlite`** (A0-16). `CGO_ENABLED=0` and a `distroless/static` runtime
+  rule out a cgo driver; `modernc` is pure Go and ships FTS5.
+
 ## [0.0.2-dev] — 2026-08-09
 
 Repository process, not product. Still no application code.
