@@ -156,8 +156,10 @@ Standard earlcameron shape, so the ops story is boring:
 - **Store:** SQLite, single file, `WAL`, `busy_timeout=5000`, `foreign_keys=ON`,
   `synchronous=NORMAL`. FTS5 registered (it needs an explicit build tag / registration — a known
   trap) for item search in the admin UI.
-- **LLM:** `internal/llm` provider interface; the only v1 implementation is the official OpenAI Go
-  SDK (`github.com/openai/openai-go`), using structured outputs (JSON schema) and embeddings.
+- **LLM:** **SchemaFlux** (`github.com/monstercameron/schemaflux`, v1.1.0) — the in-house typed-LLM
+  library. Feeds are generated with `Generating[T]`, which returns a typed Go value instead of text
+  to parse, with retries, structured-output contracts, cost tracking, and telemetry centralized in
+  the library. Provider is OpenAI. See §8 for what it does and does not remove from this design.
 
 ### Layout
 
@@ -169,8 +171,7 @@ internal/auth/           argon2id, sessions, TOTP, recovery codes, rate limiting
 internal/config/         env parsing + validation, one struct, no globals
 internal/store/          SQLite schema, migrations, reader/writer split, FTS5
 internal/feedspec/       recipe validation, prompt templates, cron+timezone
-internal/llm/            Provider interface, retry/backoff, cost accounting
-internal/llm/openai/     the one v1 implementation
+internal/llm/            thin adapter over SchemaFlux: typed ops, cost capture, error mapping
 internal/generate/       generators: trivia, fact, onthisday, news
 internal/sources/        upstream feed fetch, parse, conditional GET, URL verification
 internal/render/         RSS 2.0 / Atom 1.0 / JSON Feed 1.1 serializers + permalink HTML
@@ -218,7 +219,7 @@ That makes authentication the entire defense, so it gets built properly rather t
 - **Login hardening:** per-IP and per-account exponential backoff, one generic failure message,
   uniform timing on unknown-user vs bad-password (always run the KDF), everything logged to
   `auth_events`.
-- **Secrets:** `OPENAI_API_KEY` and `AFF_SECRET_KEY` from the environment, supplied by a host
+- **Secrets:** `SCHEMAFLUX_API_KEY` and `AFF_SECRET_KEY` from the environment, supplied by a host
   `env_file` at mode 0600 — never in the DB, never in a recipe, never in an image layer, never
   logged. A redaction
   filter on the log writer scrubs anything matching known key shapes, as a backstop rather than a
@@ -364,7 +365,7 @@ separates `answer_html`, so the renderer enforces this — it is not left to the
 (per-feed default), `og:type=article`, `article:published_time`. Without these the unfurl is a bare
 URL. For trivia, `og:description` is the question, never the answer.
 
-**Practical check:** a private Slack workspace subscribes to the staging feed as part of M13. Slack
+**Practical check:** a private Slack workspace subscribes to the staging feed as part of C3. Slack
 is the one consumer whose failure mode is silent — it simply never posts — so it gets an explicit
 verification step rather than an assumption.
 
@@ -463,20 +464,47 @@ disables that feed alone and never takes the server down.
 
 ## 8. LLM provider abstraction
 
-One interface, one v1 implementation. The abstraction exists so the OpenAI SDK's types never leak
-past `internal/llm/openai` — not because a second provider is planned.
+**SchemaFlux is the LLM layer.** Generation asks for a typed Go value, not text:
 
 ```go
-type Provider interface {
-    Name() string
-    Generate(ctx context.Context, req GenerateRequest) (GenerateResult, error) // JSON-schema constrained
-    Stream(ctx context.Context, req GenerateRequest) (iter.Seq2[Delta, error], error)
-    Embed(ctx context.Context, texts []string) ([][]float32, error)
-    Pricing() PriceTable
-}
+items, err := schemaflux.Generating[[]GeneratedItem](prompt).
+    Strict().
+    Steer("One trivia question. Never repeat a listed title.").
+    RequestID(runID).
+    Run()
 ```
 
-`GenerateResult` carries the parsed items, raw JSON, token counts, model id, and finish reason.
+`internal/llm` stays as a **thin adapter**, not a second abstraction layer. Its job is narrow: build
+the typed call, capture token counts and cost onto the run, and map SchemaFlux errors onto the
+taxonomy below. It exists so SchemaFlux's types do not spread through `internal/generate`, which
+keeps the generator testable and would make a library swap a contained change.
+
+**What SchemaFlux removes from this plan:** hand-rolled JSON-schema plumbing, response parsing,
+retry/backoff, and per-call cost accounting — all centralized in the library. Earlier drafts
+specified those here; they are now a dependency, not scope.
+
+**What it explicitly does NOT remove — do not conflate typed with valid.** SchemaFlux guarantees the
+*shape* of the value. Every business rule in §9 is still ours and still runs: summary length caps,
+answer-leakage into `summary_text`, HTML allowlist sanitizing, URL absolutization, and above all
+**grounded link byte-equality**. A typed struct with a hallucinated URL in it is perfectly typed and
+completely wrong. The Go-side validation pass stays exactly as specified.
+
+Three dependency facts, taken from SchemaFlux's own README rather than assumed:
+
+- **Only OpenAI is live-verified** among its seven registered providers; the rest are implemented
+  and unit-tested but never called against real endpoints. Using OpenAI keeps us on the proven path.
+- **Process-wide state still exists** (`ops.defaultProvider`, observer, cache policy). This design
+  varies model and parameters *per recipe*, so it must construct an explicit `Client` per call and
+  never rely on package defaults — otherwise one feed's settings leak into another's run.
+- **Its smoke tests replay committed cassettes**, which fits the standing rule that the default test
+  run never calls a paid API (§17). Prefer SchemaFlux's cassette mechanism over hand-building a
+  `FakeProvider` if it can be driven from our tests; decide at A4 and record which was chosen.
+
+`Deduplicate(items, threshold)` is deliberately **not** used for the novelty gate: it asks the model
+about pairs, so it is O(n²) *model calls*, against a novelty window of 500 items. One embedding call
+plus a dot product is orders of magnitude cheaper and is what §9 step 5 specifies. It may be worth
+it for deduplicating the ~40-candidate grounded set, where n is small — evaluate at A6, do not
+assume.
 
 **Error taxonomy**, because "the API failed" is not actionable at 4am. Every provider error maps to
 one of: `Transient` (429, 5xx, timeout, connection reset) → retry with exponential backoff and
@@ -916,7 +944,7 @@ list. History already paginates.
 
 ### 14.4 Scale envelope
 
-Honest estimates, to be replaced with measurements once M9 exists:
+Honest estimates, to be replaced with measurements once A7 exists:
 
 | Feeds | Binding constraint | Notes |
 |---|---|---|
@@ -963,7 +991,7 @@ The copy is then **shipped off the box, encrypted**, following the lesson alread
 droplet: fourteen verified ArticleFlux backups, their source database, and the key that decrypts
 them all lived on one DigitalOcean volume, so the single event they insured against took all of them
 at once. A backup on the same disk defends against `rm`, not against loss. Restore is documented and
-**tested once during M14** — an untested backup is not a backup.
+**tested once during C4** — an untested backup is not a backup.
 
 **Deploy — containerized, built in CI, pulled by the droplet.**
 
@@ -995,8 +1023,8 @@ Multi-stage, and the runtime stage carries no toolchain:
   places Docker pays for itself here.
 - **`CGO_ENABLED=0` forces the SQLite driver decision.** A cgo driver (`mattn/go-sqlite3`, which is
   how FTS5 is usually registered) cannot be built static this way without extra work; a pure-Go or
-  wasm driver can. This is the same decision §15's `MemoryDenyWriteExecute` note flagged for M1, and
-  it now has a second forcing reason. Decide it at M1, not at M15.
+  wasm driver can. This is the same decision §15's `MemoryDenyWriteExecute` note flagged for A1, and
+  it now has a second forcing reason. Decide it at A1, not at C5.
 - The image declares a non-root user and pre-creates the data directory **owned by that user**. This
   is not cosmetic: Docker initializes an empty *named volume* from the image path including
   ownership, so a directory created as root in the image yields a volume the non-root process cannot
@@ -1075,7 +1103,7 @@ scheduler. The backup and staleness jobs therefore need a host-side systemd time
 inside the container. **In-process is the better fit here** — the app already has a cron scheduler
 (§9), the backup is already a `SystemService.Backup` RPC, and it keeps the job in the one place that
 understands WAL. The nightly backup and prune therefore become internal scheduled jobs rather than
-host units, and that decision needs to be reflected in M14.
+host units, and that decision needs to be reflected in C4.
 
 **Graceful shutdown.** SIGTERM stops the scheduler from starting new runs, lets in-flight runs
 finish within a timeout (a partially-charged LLM call should not be wasted), drains HTTP and gRPC
@@ -1106,7 +1134,7 @@ Environment only — no config file, and no secrets on disk beyond the host `env
 | `AFF_ADMIN_ADDR` | yes | control-plane listener bind address |
 | `AFF_ALLOWED_ORIGINS` | yes | comma list for the WS `Origin` check |
 | `AFF_SECRET_KEY` | yes | derives the TOTP-secret encryption key |
-| `OPENAI_API_KEY` | yes | provider credential |
+| `SCHEMAFLUX_API_KEY` | yes | provider credential, read by SchemaFlux (§8) — not `OPENAI_API_KEY` |
 | `AFF_GENERATION_ENABLED` | no | cold-start kill switch, default `1` |
 | `AFF_MAX_CONCURRENT_RUNS` | no | scheduler worker pool size, default `3` (§14.3) |
 | `AFF_PROVIDER_MAX_INFLIGHT` | no | global cap on concurrent provider calls, default `4` |
@@ -1168,54 +1196,87 @@ as absolute with a scheme, since it is baked into every guid.
 
 ## 18. Milestones
 
+Ordered **core engine first, UI last**. The engine must be complete, correct, and generating real
+feeds before a single component is written. Every phase before D is driven by tests and the `aff`
+CLI, so the product is provably working while it still has no interface.
+
+**Phase A — Core engine.** No network surface, no auth, no UI. Driven entirely by tests.
+
 | # | Milestone | Done when |
 |---|-----------|-----------|
-| M0 | Skeleton | Module, layout, buf codegen, config validation, `/healthz`, CI green |
-| M1 | Store | Schema, migrations, reader/writer split, FTS5, migration tests |
-| M2 | Renderers | RSS/Atom/JSON + permalink page from seeded items; goldens pass |
-| M3 | Compliance | External validator clean on all three; Slack-compatibility tests green |
-| M4 | Publish plane | Conditional GET, HEAD, gzip, cache, 404/410/405, rate limit, read-only proof |
-| M5 | Auth | argon2id + TOTP + recovery + sessions + backoff; `aff admin init`; tests green |
-| M6 | Bridge + RPC | GoGRPCBridge wired, interceptor auth, Feed/System services, CLI client |
-| M7 | Generative feed | Trivia + fact end-to-end on `FakeProvider`, then one real OpenAI run |
-| M8 | Novelty | Embeddings, dedup, retry; harness proven against a *seeded* near-duplicate corpus |
-| M9 | Scheduler | Cron + timezone + DST, jitter, worker pool, budgets, accounting, kill switch |
-| M10 | Grounded news | Source fetch, candidate set, link-integrity enforcement, ranking prompt |
-| M11 | Sampling | `Sample`/`SampleStream`, sample persistence, promote, cost reporting |
-| M12 | Admin UI | Five GWC pages against real RPCs, responsive, empty/error states |
-| M11a | Container | Dockerfile, `.dockerignore`, image builds and runs locally with `--platform linux/amd64` |
-| M11b | Pipeline | Actions: test → build → GHCR with `sha-`/`v`/`latest`; Docker installed on droplet |
-| M12a | Staging host | `staging.anime.earlcameron.com`: nginx vhost, TLS, compose up, publish plane reachable |
-| M13 | Slack proof | Private workspace subscribes to staging; items post, no dupes, no spoilers |
-| M14 | Ops | In-process backup + tested restore, staleness watchdog, graceful shutdown, crash recovery |
-| M15 | Deploy | Production vhosts, pinned image tag, health-gated deploy job, rollback drill, live |
-| M16 | Integration | ArticleFlux subscribes; verify rendering, dedup, refresh behavior |
-| M17 | Multi-feed | **Deferred.** Aggregates, feed index, shared source cache, LRU eviction |
+| A0 | Skeleton | Module, layout, config validation with fail-fast boot, CI green, `govulncheck` |
+| A1 | Store | Schema, migrations, reader/writer split, WAL boot ordering, FTS5, migration tests |
+| A2 | Renderers | RSS/Atom/JSON + permalink HTML from seeded items; goldens pass |
+| A3 | Compliance | External validator clean on all three; Slack-compatibility tests green (§5.5) |
+| A4 | Generation | SchemaFlux wired; trivia + fact end-to-end on cassettes, then one real run |
+| A5 | Novelty | Embeddings, dedup, retry; harness proven against a *seeded* near-duplicate corpus |
+| A6 | Grounded news | Source fetch, candidate normalization, link-integrity enforcement, ranking |
+| A7 | Scheduler | Cron + timezone + DST, jitter, worker pool, budgets, accounting, kill switch |
+| A8 | Sampling | Dry-run pipeline returning items + XML + verdicts + cost, writing nothing |
+| A9 | Publish plane | Conditional GET, HEAD, gzip, cache, 404/410/405, rate limit, read-only proof |
 
-M1–M4 are plumbing and should land fast. M8 and M10 are the actual engineering. M5/M6 come before
-anything is exposed, because that is where mistakes are expensive. M13 is deliberately before
-deploy: discovering Slack drops your items after go-live is the expensive ordering.
+**Phase B — Control surface, still headless.** The app becomes operable without a browser.
 
-M12a exists because M13 was otherwise unsatisfiable. Slack is an external service that polls over
-public TLS, so "subscribe to staging" needs a real reachable HTTPS host — which the milestone table
-did not deliver until M15. M12a is the *minimum* to be reachable (subdomain, nginx vhost, certificate,
-publish plane only); the admin IP allowlist and production cutover stay in M15. The staging host
-serves throwaway content and is torn down or repointed after M16.
+| # | Milestone | Done when |
+|---|-----------|-----------|
+| B0 | Auth | argon2id + TOTP + recovery codes + sessions + backoff; `aff admin init`; tests green |
+| B1 | RPC | All six services implemented, auth interceptor, optimistic concurrency, pagination |
+| B2 | Bridge | GoGRPCBridge wired, `Origin` check, keepalive paired, streaming RPCs verified |
+| B3 | CLI | `aff` drives every workflow end to end — create, sample, promote, run, history |
 
-M11a/M11b come before staging for the same reason: staging is the first thing that must be *pulled*
-rather than built locally, so the image and the pipeline have to exist first. Doing them early also
-front-loads the two failures most likely to waste an afternoon — the arm64/amd64 mismatch and the
-named-volume ownership problem (§15.1) — into a milestone where nothing depends on them yet.
-**M15 is not done until a rollback has actually been performed**, not merely described: an untested
-rollback is the same species of lie as an untested backup.
+**Phase C — Ship the engine.** Live, Slack-proven, backed up, before any UI exists.
 
-**M17 is deferred on purpose, and that is a correction to an earlier draft.** §14.4 says the v1
+| # | Milestone | Done when |
+|---|-----------|-----------|
+| C0 | Container | Dockerfile, `.dockerignore`, image builds and runs with `--platform linux/amd64` |
+| C1 | Pipeline | Actions: test → build → GHCR with `sha-`/`v`/`latest`; Docker on the droplet |
+| C2 | Staging | `staging.anime.earlcameron.com`: nginx vhost, TLS, compose up, publish plane live |
+| C3 | Slack proof | Private workspace subscribes; items post, no dupes, no spoilers, 7-day window |
+| C4 | Ops | In-process backup + tested restore, staleness watchdog, shutdown, crash recovery |
+| C5 | Deploy | Production vhosts, pinned tag, health-gated deploy, **rollback actually performed** |
+
+**Phase D — UI, last.** GoWebComponents against RPCs that are already proven in production.
+
+| # | Milestone | Done when |
+|---|-----------|-----------|
+| D0 | Shell | Build pipeline, `<base href>`, routing, auth guard, WS reconnect, design tokens |
+| D1 | Auth pages | Login and recovery, generic errors, backoff surfaced, recovery drill passes |
+| D2 | Generate | Feed rail, recipe editor, sampler with streaming and Slack preview, promote |
+| D3 | History | Runs tab with live watch; items tab with full CRUD, revisions, corrections |
+| D4 | Settings | Security, provider, generation, publishing, data, about |
+| D5 | Polish | Responsive breakpoints, empty/loading/error states everywhere, keyboard paths |
+
+**Phase E — After.**
+
+| # | Milestone | Done when |
+|---|-----------|-----------|
+| E0 | Integration | ArticleFlux subscribes; verify rendering, dedup, refresh behavior |
+| E1 | Multi-feed | **Deferred.** Aggregates, feed index, shared source cache, LRU eviction (§14) |
+
+A1–A3 are plumbing and should land fast. A5 and A6 are the actual engineering. B0–B2 come before
+anything is exposed, because that is where mistakes are expensive.
+
+**Why the UI is last, concretely.** Every RPC it will call is exercised first by the CLI, so the UI
+is built against an API whose semantics are settled rather than co-evolving with it — no screen gets
+built twice because a service changed shape. It also means the product is *delivering feeds to
+Slack* long before it has a front end, which is the actual goal; a UI built earlier would be
+polishing an admin surface for a system that was not yet producing anything worth administering.
+
+C3 (Slack proof) is deliberately before C5 (production deploy): discovering Slack silently drops
+your items after go-live is the expensive ordering. C2 exists because C3 is otherwise unsatisfiable
+— Slack polls over public TLS, so "subscribe to staging" needs a real reachable HTTPS host. C0/C1
+come first because staging is the first thing that is *pulled* rather than built locally, which also
+front-loads the two failures most likely to waste an afternoon: the arm64/amd64 mismatch and the
+named-volume ownership problem (§15.1). **C5 is not done until a rollback has actually been
+performed** — an untested rollback is the same species of lie as an untested backup.
+
+**E1 is deferred on purpose, and that is a correction to an earlier draft.** §14.4 says the v1
 target of 1–10 feeds needs none of that machinery, so scheduling it ahead of backups and deploy
 would have blocked real launch readiness on speculative scale. Build it when a fourth or fifth feed
 actually creates the problem. Two pieces stay in the earlier milestones because they are nearly free
-and the schema should not churn later: `feeds.jitter_offset` with cron jitter (M9 — three feeds all
+and the schema should not churn later: `feeds.jitter_offset` with cron jitter (A7 — three feeds all
 firing at noon already bunches provider calls, and retrofitting it changes scheduler semantics), and
-the `item_key`/`content_hash` split (M1 — a schema decision, not a scaling feature). Everything
+the `item_key`/`content_hash` split (A1 — a schema decision, not a scaling feature). Everything
 else in §14 waits.
 
 ## 19. Definition of done (v1)
@@ -1225,7 +1286,7 @@ else in §14 waits.
 3. Slack subscribes to all three; over a 7-day window every generated item posts exactly once, no
    duplicates, no missed items, no trivia answers visible in the channel.
 4. Thirty consecutive days of *production* trivia contain no near-duplicate pairs above the novelty
-   threshold. This is the real test of the novelty gate; M8 can only prove the harness works,
+   threshold. This is the real test of the novelty gate; A5 can only prove the harness works,
    because a canned corpus proves nothing about a live model's tendency to repeat itself.
 5. Zero invented URLs: an audit over the full item table shows every grounded item's link matched
    the fetched candidate set **at generation time**. Deliberately not "every link still resolves
@@ -1241,16 +1302,16 @@ else in §14 waits.
 
 ## 20. Risks
 
-- **Repetition** in daily generative feeds. M8 mitigates, but embeddings only catch surface
+- **Repetition** in daily generative feeds. A5 mitigates, but embeddings only catch surface
   similarity; expect to add a topic-coverage ledger (series, decade, genre already used) later.
 - **Wrong facts.** Trivia will sometimes be wrong and there is no cheap oracle. Mitigation: narrow
   claims, cite a source when the model can name one, a report link in the feed footer, and the
   correction mechanism (§12.4). A nonzero error rate is the honest expectation, not a bug to close.
 - **Hallucinated links** — structurally prevented (§9, step 6), not prompted away.
 - **Slack's silent failure mode.** It does not error; it simply stops posting. Hence the dedicated
-  test suite, the Slack preview in the sampler, and M13 before deploy.
+  test suite, the Slack preview in the sampler, and C3 before deploy.
 - **Bridge fragility.** gRPC-over-WS through nginx is the least standard piece, and the
-  keepalive/GOAWAY flap is a known failure. Budget real time for M6 and keep the CLI working as an
+  keepalive/GOAWAY flap is a known failure. Budget real time for B2 and keep the CLI working as an
   independent check when the browser path misbehaves. Three nginx settings are load-bearing for the
   admin vhost and are the first thing to check when it misbehaves: `proxy_http_version 1.1` with the
   `Upgrade`/`Connection` headers (without them the WebSocket upgrade never happens), a
