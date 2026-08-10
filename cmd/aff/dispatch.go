@@ -30,6 +30,17 @@ Commands:
   system stats|kill-switch|backup|version
   admin init|reset                   LOCAL-ONLY, requires filesystem DB access
 
+The following are also LOCAL-ONLY (deploy/RUNBOOK.md, PLAN.md §15): direct
+filesystem access to the SQLite file, no server involved.
+  backup [--out DIR] [--keep N]      VACUUM INTO snapshot with integrity check
+  restore --from PATH --to PATH      overwrite --to with a verified backup
+  verify PATH                        integrity check alone, no side effects
+  encrypt --in PATH --out PATH       AES-256-GCM; key from $AFF_BACKUP_ENCRYPTION_KEY
+  decrypt --in PATH --out PATH       reverse of encrypt
+  prune [--dry-run]                  retention pass; dry-run is the default
+  stale                              run the watchdog now, print what's stale
+  doctor                             one-screen health check, exit non-zero if unhealthy
+
 Global flags (accepted by every command):
   --server ADDR        admin gRPC address (default: $AFF_ADMIN_ADDR)
   --session-file PATH  local session file (default: OS config dir)
@@ -72,6 +83,22 @@ func (a *app) run(args []string) int {
 		return a.cmdSystem(rest)
 	case "admin":
 		return a.cmdAdmin(rest)
+	case "backup":
+		return a.cmdBackup(rest)
+	case "restore":
+		return a.cmdRestore(rest)
+	case "verify":
+		return a.cmdVerify(rest)
+	case "encrypt":
+		return a.cmdEncrypt(rest)
+	case "decrypt":
+		return a.cmdDecrypt(rest)
+	case "prune":
+		return a.cmdPrune(rest)
+	case "stale":
+		return a.cmdStale(rest)
+	case "doctor":
+		return a.cmdDoctor(rest)
 	default:
 		fmt.Fprintf(a.Stderr, "aff: unknown command %q\n\n", cmd)
 		fmt.Fprint(a.Stderr, usage)
