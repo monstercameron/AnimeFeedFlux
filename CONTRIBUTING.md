@@ -114,7 +114,13 @@ git checkout dev
 means production is running code that never sat on the working branch — fix that rather than
 forcing it through with a merge commit.
 
-The `pre-push` hook enforces three things so none of them depend on remembering:
+`main` is also protected **server-side**, because a hook is client-side and one clone that never ran
+`setup-hooks.sh` has none of it: force pushes are refused, deletion is refused, linear history is
+required, and the rules apply to admins too. Those three are exactly the operations that cannot be
+undone, which is why they are enforced where a bypass is not possible. Once CI exists, required
+status checks join them (§17.2).
+
+The `pre-push` hook enforces three further things locally, so none of them depend on remembering:
 
 - pushing any ref other than `main` **to** `main` is refused (a refspec typo is how a feature branch
   becomes production);
