@@ -11,13 +11,15 @@ begin — tasks are in dependency order, and Phase A must be real before Phase B
 
 ## The document set, and which one wins
 
-Two documents, one specification. Each owns something the other must not duplicate, because
+Four documents, one specification. Each owns something the others must not duplicate, because
 duplicated facts drift and drifted facts get implemented.
 
 | Doc | Owns |
 |---|---|
 | **`PLAN.md`** | The spec of record — architecture, compliance rules, data model, RPC surface, user flows (§22), testing strategy (§17), risks (§20), open questions (§21) |
 | **`TODOS.md`** | Build order — atomic tasks in dependency order, standing rules, flow sanity suites, operational runbook |
+| **`DEVLOG.md`** | The narrative — dated entries on what was learned and what was reversed. Never a source of requirements; if the devlog and the plan disagree, the plan is right and the devlog is history |
+| **`CHANGELOG.md`** | What changed per version, for someone deciding whether to upgrade |
 
 `PLAN.md` wins. If `TODOS.md` contradicts it, `TODOS.md` is wrong and gets fixed. **If the
 implementation contradicts `PLAN.md`, the plan is wrong — and it gets corrected in the same change,
@@ -90,6 +92,16 @@ therefore stated plainly:
 - Reference the task ID and the plan section.
 - If the change corrects the plan, say what was wrong with it and why the new version is right.
 - Do not skip hooks or bypass signing.
+
+## Keeping the devlog
+
+Add an entry when something was **learned**, not when something was merely done. Good triggers: a
+decision was reversed, research overturned an assumption, a bug was nearly shipped, or an approach
+was tried and abandoned.
+
+Write the wrong turn down, not just the destination. A plan that records only its final state loses
+the reasoning that makes it defensible later, and the same bad idea gets proposed again by someone
+who cannot tell it was already considered and rejected. Routine progress belongs in commits.
 
 ## Security
 

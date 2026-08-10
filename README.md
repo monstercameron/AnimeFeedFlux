@@ -97,6 +97,8 @@ Built on the same stack as the rest of the Flux projects:
 |---|---|
 | **`PLAN.md`** | The spec of record — architecture, compliance rules, data model, user flows (§22), risks, open questions |
 | **`TODOS.md`** | Build order — atomic tasks in dependency order, each citing a plan section |
+| **`DEVLOG.md`** | The narrative — what was learned, and the decisions that were reversed |
+| **`CHANGELOG.md`** | What changed per version |
 
 `PLAN.md` wins. If `TODOS.md` contradicts it, `TODOS.md` is wrong and gets fixed. **If the
 implementation contradicts `PLAN.md`, the plan is wrong — and it gets corrected in the same change,

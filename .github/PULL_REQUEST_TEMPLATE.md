@@ -14,6 +14,19 @@ Explain WHY, not what. The diff already says what.
       later — a spec that has drifted still gets trusted.
 - [ ] The task's stated check passes. (Code existing is not done.)
 
+## Records updated in this change
+
+See `AGENTS.md` → "What you must update alongside your change". Tick or strike through.
+
+- [ ] `TODOS.md` — task ticked `[x]`, or added/split/`[-]` with a reason
+- [ ] `CHANGELOG.md` — under `[Unreleased]`, if observable behaviour, a format, an interface, or a
+      default changed. Not for refactors.
+- [ ] `DEVLOG.md` — if a decision was **reversed**, research overturned an assumption, a bug was
+      nearly shipped, or an approach was abandoned. Write the wrong turn down, not just the
+      destination.
+- [ ] `PLAN.md` §21 — if this answers an open question, the answer and date are recorded and the
+      `OQ-*` task ticked
+
 ## Verification
 
 <!-- What you actually ran, and what it proved. "CI will tell me" is not verification. -->

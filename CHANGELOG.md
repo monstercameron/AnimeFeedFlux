@@ -3,6 +3,11 @@
 Notable changes to AnimeFeedFlux. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+This file answers **"what changed, and do I need to care?"** For *why* a thing changed — including
+the decisions that were made and then reversed — see [`DEVLOG.md`](DEVLOG.md). Keeping the two apart
+is deliberate: a changelog that carries reasoning becomes unreadable, and a narrative that carries
+version diffs becomes unmaintainable.
+
 No software is released yet. The project is in planning — see `README.md` → "Status".
 
 `0.0.1-dev` versions the **specification**, not an implementation. The `-dev` pre-release tag is
@@ -25,6 +30,9 @@ at the end of Phase C.
   rules; flow sanity suites; fuzz, soak and load tasks; an operational runbook and drills.
 - Repository scaffolding — licence, contribution and security policy, code of conduct, agent
   orientation, issue and pull-request templates, dependabot, line-ending policy.
+- `DEVLOG.md` — the narrative record, including the reversals: a content-derived guid replaced by an
+  opaque ULID, Docker rejected on evidence and then adopted for learning value, `PurgeDeleted`
+  specified and cut, multi-feed scaling deferred.
 
 ### Decided
 

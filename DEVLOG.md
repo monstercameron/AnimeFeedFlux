@@ -1,0 +1,179 @@
+# Devlog
+
+A running narrative of how this project was built and why it looks the way it does.
+
+**This is not the changelog.** `CHANGELOG.md` records *what changed* per version, for someone
+deciding whether to upgrade. This file records *what was learned*, including the wrong turns — the
+decisions that were made and then reversed, the research that overturned an assumption, and the
+things that were nearly shipped wrong. Reversals are the point: a plan that only records its final
+state loses the reasoning that makes it defensible six months later, and the same bad idea gets
+proposed again by someone who cannot tell it was already considered.
+
+Newest entries at the top.
+
+---
+
+## 2026-08-09 — Specification built, reviewed three times, and tagged `v0.0.1-dev`
+
+Eleven commits, one day, no code. The repository went from empty to a specification, a build order,
+and full scaffolding. What follows is the arc, not a commit list — the log itself is in git.
+
+### The plan came out of research, not memory
+
+The first draft (`d9fb7c5`) was written from what I already knew about RSS. That was wrong, and the
+second pass fixed it by actually reading the RSS 2.0 specification, the RSS Advisory Board's Best
+Practices Profile, RFC 4287, and JSON Feed 1.1. Three decisions changed as a direct result:
+
+- **`guid`'s `isPermaLink` defaults to `true`.** A silent default. Left implicit, every guid would
+  have claimed to be a permalink.
+- **RSS uses RFC 822 dates; Atom uses RFC 3339.** Two formatters, and crossing them is a whole class
+  of bug. The plan now forbids it by rule and asserts it in a test.
+- **The Best Practices Profile prefers hexadecimal character references** over named entities, and
+  notes RSS has **no base-URL mechanism** — so relative URLs are unusable and every href must be
+  absolutized before storage.
+
+The lesson worth keeping: for anything with a written specification, read it. The cost was two
+WebFetch calls; the saving was three bugs that would each have surfaced only in someone else's
+reader, weeks later.
+
+### Slack turned out to be stricter than the spec, and quietly
+
+Researching Slack's RSS app was the highest-value hour of the day. Its documented behaviour imposes
+four requirements beyond valid RSS: a date tag on every item, items in sequence, **no duplicate
+timestamps**, and a feed that passes the W3C validator.
+
+The duplicate-timestamp rule was a live bug in the plan. A grounded news run publishing three items
+in one pass would naturally have stamped them identically, and Slack would have kept one and dropped
+two — with **no error anywhere**. It does not fail loudly; it just stops posting. That single fact
+reshaped the design:
+
+- distinct, strictly-increasing timestamps enforced by `UNIQUE(feed_id, published_at)` — a
+  constraint, not a convention;
+- a no-backdating rule, because Slack advances a bookmark past the newest item it has seen and a
+  backdated item is therefore invisible forever;
+- **corrections instead of edits**, because an edit does not change the guid or date and so is never
+  re-delivered;
+- plain-text `description` with the HTML moved to `content:encoded`, since Slack renders a snippet
+  and mangles rich markup;
+- OpenGraph tags on permalinks so the unfurl is not a bare URL;
+- trivia answers kept out of `description` and `og:description`, or every question is spoiled in the
+  channel preview.
+
+A consumer whose failure mode is silence deserves its own test suite. It got one, plus a milestone
+(C3) that sits deliberately *before* production deploy.
+
+### Three adversarial review rounds, converging
+
+Ran the plan past an adversarial reviewer three times: **16 findings, then 7, then 3.** Clear
+convergence, and the third round confirmed the earlier fixes held. Most of it was real; the two
+findings I rejected are noted below.
+
+**Round 1 — the structural one.** The `guid` was derived from `sha256(slug | title | date)` while
+the plan simultaneously promised it never changes on edit. True only by convention: any later code
+path that re-derived it — a renderer refactor, a repair script — would mint a new guid after a title
+edit and resurface the item as a duplicate in *every* subscriber's inbox. Items now carry an opaque
+ULID, so the property is true by construction, and idempotency moved to a separate `content_hash`.
+Separating identity from deduplication was the right factoring and I had them conflated.
+
+Round 1 also caught that I had multi-feed scaling work gating backups and deploy, which contradicts
+my own §14.4 claim that 1–10 feeds need none of it. Deferred to E1.
+
+**Round 2 — the one I would have shipped.** The grounded link-integrity check compared
+*asymmetrically normalized* URLs: candidates kept their `utm_*` and `fbclid` parameters while the
+output path stripped them. A model faithfully echoing a real article URL would fail byte-equality
+and be silently dropped. It fails safe — no hallucination gets through — but it would have starved
+the news feed while appearing to work, and the symptom would have looked like the model
+misbehaving. Normalization now happens once, at fetch, and both sides use the same function. There
+is a test for exactly this.
+
+Round 2 also found that a crash between "items committed" and "run closed" would leave live items
+beside a run the watchdog marks `interrupted` — history lying about what happened, which is the
+exact failure the plan cites when it forbids editing runs. Items and their run row now commit in one
+transaction.
+
+**Round 3 — deleting something.** A `PurgeDeleted` RPC I had specified contradicted three of the
+plan's own promises: only runs and embeddings are ever pruned, the guid is never freed, and the
+permalink 410s forever. Purging leaves nothing to 410 on. Cut it outright rather than reconciling
+it — no definition-of-done item needed it.
+
+**What I rejected:** a suggestion to treat cron jitter as premature scaling work (it is nearly free
+and retrofitting it changes scheduler semantics), and a framing quibble about `SameSite=Strict`
+versus `Origin` checking that I resolved by rewording rather than redesigning.
+
+### Docker: rejected on evidence, then adopted anyway
+
+Asked whether to deploy with Docker, I inspected the droplet instead of guessing — and the plan was
+wrong about the platform. `Earl-Cameron-dot-com` runs **nginx, not Caddy** (the plan said Caddy in
+six places), with three Go services and seven sibling timer units under systemd, no Docker
+installed, 2 GB RAM, 4 GB swap already configured, Go 1.26.5 on-box.
+
+I recommended against Docker: a second deployment model, a second log destination, and 100–200 MB of
+2 GB for a daemon, against a static binary that systemd already sandboxes comparably.
+
+Cam overrode it for the learning value of a real container pipeline. That is a legitimate reason my
+analysis did not weigh, so §15 was rewritten for Docker **and records the trade explicitly** rather
+than quietly flipping. Three things came out of doing it properly:
+
+- **The build machine is ARM64 Windows; the droplet is amd64.** A local build produces an image that
+  builds and pushes fine and then dies at `docker run` with an exec-format error. Building in CI
+  removes the trap rather than requiring discipline — and keeps the WASM link, the memory spike, off
+  a 2 GB box.
+- **Named volumes inherit ownership from the image path; bind mounts do not.** Distroless runs
+  non-root, so a root-owned data directory yields a volume SQLite cannot write.
+- **Docker writes DNAT rules ahead of the host firewall chain**, so publishing to `0.0.0.0` exposes
+  a port *past* `ufw`. Here that would put the admin plane on the internet.
+
+Also inherited a hard-won lesson from `articleflux.service`: `StartLimitIntervalSec` and
+`StartLimitBurst` are `[Unit]` keys, not `[Service]` — misplaced, systemd ignores them silently and
+the rate limit does not exist. And from a real incident on that box: fourteen verified backups, the
+source database, and the decryption key all lived on one volume, so the single event they insured
+against took all three. Backups here go off-box, encrypted.
+
+### SchemaFlux, and the line it does not cross
+
+Adopted `github.com/monstercameron/schemaflux` as the LLM layer, which deletes real scope: schema
+plumbing, parsing, retries, cost accounting. Reading its README rather than assuming gave three
+facts worth having — only OpenAI is live-verified among its seven providers, process-wide state
+means we must build an explicit `Client` per call since model varies per recipe, and its cassettes
+may replace the planned fake provider.
+
+The important line, written into §8: **typed is not valid.** SchemaFlux guarantees the *shape* of a
+value. A struct containing a hallucinated URL is perfectly typed and completely wrong. Every
+business rule stays ours.
+
+Also rejected its `Deduplicate` for the novelty gate — it asks the model about pairs, so O(n²)
+*model calls* against a 500-item window, versus one embedding and a dot product.
+
+### Core engine first, UI last
+
+Restructured milestones into phases A–E on Cam's direction. The argument that convinced me while
+writing it: every RPC the UI calls gets exercised by the CLI first, so the UI is built once against
+settled semantics instead of co-evolving with a changing API. And the product is delivering feeds to
+Slack long before it has a front end — a UI built earlier would be polishing an admin surface for a
+system not yet producing anything worth administering.
+
+### The reference audit
+
+Auditing every `§` cross-reference mechanically found four defects that reading would have missed:
+`TODOS.md` cited `§9.1`–`§9.6` when §9 was an unnumbered list (the *second* time a dangling §9.x
+reference appeared — now fixed at the source by making the eight generation steps citable anchors);
+the load-bearing nginx directives were filed under Risks instead of deployment config; §21's open
+questions had no tasks at all and would have been resolved by accident; and `D-FLOW` duplicated the
+journey list it should have referenced.
+
+**Ten user flows** (`J1`–`J10`) were promoted from a sketch into canonical §22 definitions with
+sanity assertions — deliberately *system-state* invariants rather than unit assertions, because that
+is the level this design's real failures live at. Each is automated twice: headless at Phase B as
+the regression suite, and as a UI walkthrough at Phase D. The single most important is `BF-11`:
+sampling leaves the item count unchanged. A sampler that publishes would look like a feature
+working.
+
+### Where it stands
+
+452 → ~520 atomic tasks across five phases, every one citing a plan section. Zero lines of Go.
+Tagged `v0.0.1-dev`, which versions the specification and sorts below any future `0.0.1`.
+
+**Open before Phase A can finish:** `OQ-02`, public versus private feeds. Private needs
+per-subscriber URL tokens and changes the caching design, so it cannot be decided late.
+
+**Next:** `A0-01`.

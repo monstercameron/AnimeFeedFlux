@@ -13,3 +13,6 @@ Three reminders that are cheap to state and expensive to forget:
 - **Verify before claiming done.** The default test run makes no network calls by design, so it
   proves nothing about the provider; `-race` runs only in CI; feed correctness needs
   `make validate`. See `AGENTS.md` → "Verifying your work".
+- **Update the records in the same change.** Ticking `TODOS.md`, and a `CHANGELOG.md` or `DEVLOG.md`
+  entry where the triggers apply, is part of finishing — see `AGENTS.md` → "What you must update
+  alongside your change".
