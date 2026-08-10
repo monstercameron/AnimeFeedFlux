@@ -1,0 +1,205 @@
+# Release — runs on a push to main. A push to main IS the deploy.
+#
+# Build and deploy are one workflow run on purpose. A "when the image publishes,
+# deploy it" workflow would never fire: pushes made with GITHUB_TOKEN do not
+# trigger other workflows, so the chain waits forever. That is a known trap and
+# the reason these are not two files.
+#
+# Until the droplet secrets exist, the deploy job reports skipped rather than
+# failing. A red release workflow on every promotion is how people stop reading
+# it.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Existing image tag to deploy (rollback). Leave empty to build from this ref.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # Never two deploys at once. SQLite has one writer and the volume is shared:
+  # two containers against it is corruption, not contention (§14.5).
+  group: release-production
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  verify:
+    name: Verify before shipping
+    runs-on: ubuntu-latest
+    outputs:
+      has_go: ${{ steps.check.outputs.has_go }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f go.mod ]; then echo "has_go=true" >> "$GITHUB_OUTPUT"
+          else echo "has_go=false" >> "$GITHUB_OUTPUT"; echo "::notice::pre-A0, nothing to build"; fi
+
+      # A failing test must fail the job BEFORE anything is pushed (§15.3).
+      # Otherwise CI cheerfully publishes a broken image and the registry ends up
+      # holding artefacts nobody should ever deploy.
+      - uses: actions/setup-go@v5
+        if: steps.check.outputs.has_go == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test
+        if: steps.check.outputs.has_go == 'true'
+        run: go test -race ./...
+      - name: Validate feeds
+        if: steps.check.outputs.has_go == 'true'
+        run: make validate
+
+  build:
+    name: Build and push image
+    needs: verify
+    if: needs.verify.outputs.has_go == 'true' && inputs.image_tag == ''
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.sha_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        run: |
+          short=$(git rev-parse --short HEAD)
+          echo "sha_tag=sha-${short}" >> "$GITHUB_OUTPUT"
+          echo "built sha-${short}"
+
+      # linux/amd64 explicitly. The maintainer's machine is arm64 Windows; an
+      # image built there runs nowhere on the droplet and fails at `docker run`
+      # with an exec-format error, not at build time (§15.2). Runners are amd64,
+      # but naming the platform means a future self-hosted arm runner cannot
+      # silently publish the wrong thing.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.sha_tag }}
+            ${{ env.IMAGE }}:latest
+            ${{ startsWith(github.ref, 'refs/tags/v') && format('{0}:{1}', env.IMAGE, github.ref_name) || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+
+  deploy:
+    name: Deploy to production
+    needs: [verify, build]
+    if: always() && needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check deploy is configured
+        id: cfg
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -z "$HOST" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DEPLOY_HOST not set — skipping deploy (expected before Phase C1)."
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve tag to deploy
+        if: steps.cfg.outputs.ready == 'true'
+        id: tag
+        run: |
+          # A manual run may name an existing tag: that is the rollback path.
+          # Production NEVER pins `latest` — it makes "what is running?"
+          # unanswerable at the exact moment you need to know (§15.2).
+          t="${{ inputs.image_tag }}"
+          [ -z "$t" ] && t="${{ needs.build.outputs.tag }}"
+          if [ -z "$t" ] || [ "$t" = "latest" ]; then
+            echo "::error::refusing to deploy an empty or 'latest' tag"; exit 1
+          fi
+          echo "tag=$t" >> "$GITHUB_OUTPUT"
+          echo "deploying $t"
+
+      - name: SSH key
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pinned host key, not StrictHostKeyChecking=no. Accepting any key
+          # turns a deploy into a credential handed to whoever answers.
+          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Deploy
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          ssh -o BatchMode=yes "$USER@$HOST" bash -euo pipefail <<EOSSH
+            cd /opt/animefeedflux
+            # Record what was running so rollback has something to name.
+            grep -oP 'image:.*:\K\S+' compose.yaml > .previous-tag || true
+            sed -i "s|\(image: .*animefeedflux\):.*|\1:${TAG}|" compose.yaml
+            docker compose pull
+            docker compose up -d --remove-orphans
+          EOSSH
+
+      # Without this gate the pipeline reports green while the service
+      # crash-loops (§15.3). A deploy that is not health-checked is a deploy you
+      # find out about from a subscriber.
+      - name: Wait for healthy
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o BatchMode=yes "$USER@$HOST" bash -euo pipefail <<'EOSSH'
+            for i in $(seq 1 30); do
+              s=$(docker inspect -f '{{.State.Health.Status}}' animefeedflux 2>/dev/null || echo starting)
+              [ "$s" = "healthy" ] && { echo "healthy after ${i}0s"; exit 0; }
+              [ "$s" = "unhealthy" ] && { echo "container unhealthy"; docker compose logs --tail=50; exit 1; }
+              sleep 10
+            done
+            echo "never became healthy"; docker compose logs --tail=50; exit 1
+          EOSSH
+
+      - name: Verify the feeds actually serve
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          # Healthy is not the same as correct. The product is a URL that
+          # returns valid XML, so the deploy is not done until one does.
+          url="https://anime.earlcameron.com/healthz"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$url" || echo 000)
+          [ "$code" = "200" ] || { echo "::error::$url returned $code"; exit 1; }
+          echo "public endpoint responding"
+
+      - name: Prune old images
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: ssh -o BatchMode=yes "$USER@$HOST" 'docker image prune -af --filter "until=720h"' || true

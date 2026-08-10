@@ -1,0 +1,193 @@
+# CI — the gate that dev must pass before it can become main.
+#
+# This runs on a repository that currently has no Go code, and it must be green
+# anyway. A workflow that is red from the day it is added trains everyone to
+# ignore it, and by the time real code arrives nobody trusts the badge. So every
+# Go job detects go.mod and skips with a notice until Phase A0 lands.
+#
+# It is also the authoritative gate for the things the pre-commit hook
+# deliberately does NOT run (PLAN.md §17.2): the race detector, which cannot run
+# on the maintainer's windows/arm64 machine at all, and the external feed
+# validator.
+
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push supersedes an in-flight run on the same ref. main is excluded:
+  # cancelling a run on main would cancel the verification a promotion depends on.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  detect:
+    name: Detect project state
+    runs-on: ubuntu-latest
+    outputs:
+      has_go: ${{ steps.check.outputs.has_go }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f go.mod ]; then
+            echo "has_go=true" >> "$GITHUB_OUTPUT"
+            echo "Go module present — full gate active."
+          else
+            echo "has_go=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No go.mod yet (pre-A0). Go jobs will skip."
+          fi
+
+  docs:
+    name: Docs and hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The spec is the product right now, so its integrity is a real gate.
+      # A dangling section reference has already shipped twice in this repo.
+      - name: Every plan reference resolves to a real section
+        run: |
+          fail=0
+          for r in $(grep -ohE '§[0-9]+(\.[0-9]+)?' PLAN.md TODOS.md AGENTS.md CONTRIBUTING.md 2>/dev/null \
+                     | sed 's/§//' | sort -u); do
+            base=${r%%.*}
+            if [ "$base" = "9" ] && [ "$r" != "9" ]; then
+              # §9.1-§9.8 are the generation steps, named as anchors in §9.
+              continue
+            fi
+            if ! grep -qE "^#{2,3} ${r}[. ]" PLAN.md; then
+              echo "::error::dangling reference §$r"
+              fail=1
+            fi
+          done
+          [ "$fail" = 0 ] && echo "all § references resolve"
+          exit $fail
+
+      - name: Task IDs are unique
+        run: |
+          dupes=$(grep -oE '`[A-Z]+[0-9]*-[0-9]+[a-z]?`' TODOS.md | sort | uniq -d)
+          if [ -n "$dupes" ]; then
+            echo "::error::duplicate task IDs: $dupes"; exit 1
+          fi
+          echo "task IDs unique"
+
+      - name: No secrets committed
+        run: |
+          if git ls-files | grep -qE '(^|/)\.env$|\.key$|\.db$'; then
+            echo "::error::secret or database file is tracked"; exit 1
+          fi
+          echo "no secret material tracked"
+
+  hooks:
+    name: Git hooks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hook test suite
+        run: sh scripts/test-hooks.sh
+      - name: Hooks are executable and LF
+        run: |
+          for h in .githooks/*; do
+            [ -x "$h" ] || { echo "::error::$h is not executable"; exit 1; }
+            if head -c 200 "$h" | grep -q $'\r'; then
+              echo "::error::$h has CRLF — it will fail as 'bad interpreter'"; exit 1
+            fi
+          done
+          echo "hooks executable, LF endings"
+
+  go:
+    name: Build, vet, test
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "::error::not gofmt'd:"; echo "$out"; exit 1; fi
+
+      - run: go build ./...
+      - run: go vet ./...
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
+      # -race is the reason this job exists. It cannot run on windows/arm64, so
+      # CI is the ONLY place it ever happens (§17.2). Never weaken this to plain
+      # `go test` to make a run green.
+      - name: go test -race
+        run: go test -race ./...
+        env:
+          # RULE-1: the default suite must not call a paid API. Asserting the
+          # variable is unset here means a test that quietly needs one fails in
+          # CI rather than silently billing.
+          AFF_LIVE_LLM: ""
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Coverage ratchet
+        run: |
+          go test -coverprofile=cover.out ./... >/dev/null 2>&1 || true
+          pct=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "coverage: ${pct}%"
+          echo "$pct" > coverage.txt
+          # A ratchet, not a target (§17.2). Enforced once a baseline is stored;
+          # until then this records the number so the first baseline is real.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.txt
+
+  feeds:
+    name: Feed validator
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Gates on warnings as well as errors (§5.6). Slack's own troubleshooting
+      # advice is to run the feed through a validator, so this is a
+      # compatibility gate, not a tidiness one.
+      - name: make validate
+        run: make validate
+
+  # A single required check to point branch protection at, so the required-check
+  # list does not need editing every time a job is added or renamed.
+  gate:
+    name: CI gate
+    needs: [docs, hooks, go, feeds]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if anything failed
+        run: |
+          results='${{ join(needs.*.result, " ") }}'
+          echo "results: $results"
+          case "$results" in
+            *failure*|*cancelled*) echo "::error::a required job did not pass"; exit 1 ;;
+          esac
+          echo "gate green"

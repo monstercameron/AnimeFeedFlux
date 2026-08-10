@@ -104,8 +104,21 @@ decided to make — so promotion is explicit, and it is Cam's call. Never promot
 initiative.
 
 ```bash
+sh scripts/promote.sh --check    # verify only, changes nothing
+sh scripts/promote.sh            # verify, confirm, promote
+```
+
+The script does by hand what four typed commands did not: it verifies **CI is green at the exact
+commit being promoted**. "It passed when I pushed it" is not the same as "the tip of `dev` passes",
+and the gap between those two is where a broken promotion lives. It also refuses a dirty tree, a
+`dev` that differs from `origin/dev`, a `main` that has diverged, and an empty promotion; warns if
+`CHANGELOG.md` has not moved; and requires you to type `PROMOTE`.
+
+The underlying operation is still just:
+
+```bash
 git checkout main
-git merge --ff-only dev        # main must never diverge from dev
+git merge --ff-only dev
 AFF_PROMOTE=1 git push origin main
 git checkout dev
 ```
@@ -114,11 +127,34 @@ git checkout dev
 means production is running code that never sat on the working branch — fix that rather than
 forcing it through with a merge commit.
 
+### Rollback
+
+**Rollback is not a git operation.** `main` is a pointer; production runs a pinned image tag.
+Reverting `main` rebuilds from source — slow, produces a new artefact, and not what you want when
+production is down. You want the bytes that worked ten minutes ago.
+
+```bash
+sh scripts/rollback.sh              # back to the previously deployed tag
+sh scripts/rollback.sh sha-abc1234  # back to a specific one
+sh scripts/rollback.sh --list       # what is deployable
+```
+
+This re-runs the release workflow against an existing immutable `sha-` tag. It is the entire reason
+§15.2 pins those and never deploys `latest`.
+
+Afterwards `main` still points at the bad commit, and production disagrees with it. Fix forward on
+`dev` and promote again — do not leave them diverged, because the next promotion redeploys whatever
+`main` says.
+
 `main` is also protected **server-side**, because a hook is client-side and one clone that never ran
 `setup-hooks.sh` has none of it: force pushes are refused, deletion is refused, linear history is
-required, and the rules apply to admins too. Those three are exactly the operations that cannot be
-undone, which is why they are enforced where a bypass is not possible. Once CI exists, required
-status checks join them (§17.2).
+required, the **`CI gate` status check must pass**, and all of it applies to admins too. Those are
+exactly the operations that cannot be undone or verified locally, which is why they are enforced
+where a bypass is not possible.
+
+`CI gate` is a single aggregating job that depends on every other CI job. Branch protection points
+at that one name, so adding or renaming a job never requires editing the protection rule — a
+required-check list that drifts out of date either blocks everything or gates nothing.
 
 The `pre-push` hook enforces three further things locally, so none of them depend on remembering:
 
