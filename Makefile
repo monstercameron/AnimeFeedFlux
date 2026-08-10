@@ -22,7 +22,7 @@ LDFLAGS := -s -w \
 # SQLite driver decision recorded in §15.1.
 export CGO_ENABLED := 0
 
-.PHONY: all build run test test-race fmt fmt-check vet lint validate cover tidy hooks clean help
+.PHONY: all build run test test-race fmt fmt-check vet lint validate cover tidy hooks clean web help
 
 all: fmt-check vet test ## fmt, vet, test
 
@@ -35,6 +35,14 @@ build: ## Build the server
 
 run: build ## Build and run
 	./$(BIN)
+
+# Builds into web/dist/ by default (SERVE_DIR overrides). Not wired into
+# `all`/CI yet — the admin host that serves web/dist/ (internal/publish's
+# StaticHandler, mounted by cmd/animefeedflux) is being wired concurrently;
+# see web/build.sh's header for the scratch-dir/atomic-replace details
+# (TODOS.md D0-02/D0-03).
+web: ## Build the admin WASM bundle (D0-02/D0-03)
+	sh scripts/build-web.sh
 
 test: ## Unit tests (-shuffle; no network, no API key)
 	go test -shuffle=on $(PKG)
