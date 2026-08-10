@@ -74,13 +74,15 @@ cover: ## Coverage summary
 # There are no golden feeds until A2, and a target that fails because the thing
 # it validates has not been written yet would be red from the day it was added.
 # CI runs this as soon as go.mod exists, so it skips cleanly until then.
-validate: ## Validate rendered feeds against the external validator
-	@if [ ! -d testdata/golden ]; then \
-		echo "no testdata/golden yet (pre-A2) — nothing to validate"; \
-		exit 0; \
-	fi
-	@echo "validating golden feeds"
-	@go test -run TestGolden -tags validate $(PKG)
+validate: ## Validate the rendered golden feeds
+	@set -e; \
+	golden=internal/render/testdata/golden; \
+	if [ ! -d "$$golden" ]; then \
+		echo "no $$golden yet — nothing to validate"; exit 0; \
+	fi; \
+	go build -o bin/affvalidate ./cmd/affvalidate; \
+	echo "validating $$(ls $$golden | wc -l) golden documents"; \
+	./bin/affvalidate $$golden/*.golden
 
 tidy: ## go mod tidy
 	go mod tidy
