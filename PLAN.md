@@ -181,6 +181,10 @@ internal/obs/            structured logging, metrics, staleness watchdog
 web/                     GWC admin app (WASM) + shell
 migrations/              NNNN_name.sql, forward-only
 testdata/                golden feeds, canned LLM responses, canned upstream RSS
+deploy/                  compose.yaml, nginx vhosts, env templates (no secrets)
+.github/workflows/       build → test → push to GHCR → deploy over SSH (§15.3)
+Dockerfile               multi-stage; distroless static nonroot runtime
+.dockerignore
 ```
 
 ## 4. Security and authn
@@ -214,8 +218,9 @@ That makes authentication the entire defense, so it gets built properly rather t
 - **Login hardening:** per-IP and per-account exponential backoff, one generic failure message,
   uniform timing on unknown-user vs bad-password (always run the KDF), everything logged to
   `auth_events`.
-- **Secrets:** `OPENAI_API_KEY` and `AFF_SECRET_KEY` from the environment (systemd
-  `EnvironmentFile`, mode 0600), never in the DB, never in a recipe, never logged. A redaction
+- **Secrets:** `OPENAI_API_KEY` and `AFF_SECRET_KEY` from the environment, supplied by a host
+  `env_file` at mode 0600 — never in the DB, never in a recipe, never in an image layer, never
+  logged. A redaction
   filter on the log writer scrubs anything matching known key shapes, as a backstop rather than a
   primary control.
 - **Untrusted input:** LLM output and upstream RSS are both hostile input. Sanitize HTML through a
@@ -935,8 +940,11 @@ saying so now avoids designing for a scale-out that will not happen.
 
 ## 15. Operations
 
-**Observability.** Structured JSON logs (`log/slog`) with a request/run id threaded through, secrets
-redacted. `/healthz` returns per-feed last-success age, enabled state, error counts, and provider
+**Observability.** Structured JSON logs (`log/slog`) to stdout with a request/run id threaded
+through, secrets redacted. Stdout matters in a container: the process must not manage its own log
+files, since the runtime captures stdout and the json-file driver handles rotation. A consequence to
+accept up front — these logs land in `docker logs`, not `journalctl` alongside the other three
+services, so there are now two places to look when something is down. `/healthz` returns per-feed last-success age, enabled state, error counts, and provider
 status; it is the endpoint an external uptime checker watches.
 
 **Staleness is the real failure mode.** A generator that silently stops is worse than one that
@@ -957,47 +965,117 @@ them all lived on one DigitalOcean volume, so the single event they insured agai
 at once. A backup on the same disk defends against `rm`, not against loss. Restore is documented and
 **tested once during M14** — an untested backup is not a backup.
 
-**Deploy — matching what is already on the box, verified 2026-08-09.** The target is
-`Earl-Cameron-dot-com` (167.99.232.99, Ubuntu 24.04, 2 GB / 2 vCPU, 4 GB swap already configured,
-38 GB free, Go 1.26.5 installed). It already runs `articleflux`, `cashflux`, and `earlcameron` as
-**systemd units behind nginx** — five nginx sites, per-app `-backup`, `-health`, and `-retention`
-sibling units on timers, and a `deployhook` service. AnimeFeedFlux joins that pattern rather than
-inventing a second one:
+**Deploy — containerized, built in CI, pulled by the droplet.**
 
-- `aff.service` binds **127.0.0.1** so only nginx can reach it; nginx terminates TLS and applies the
-  admin-host IP allowlist. No app port is exposed directly.
-- `aff-health.timer` clears a failed unit and retries, because `StartLimitBurst` on an unattended box
-  otherwise turns a crash loop into a grave. Note the hard-won detail from `articleflux.service`:
-  `StartLimitIntervalSec`/`StartLimitBurst` are **`[Unit]` keys, not `[Service]`** — placed wrongly
-  they are silently ignored and the limit does not exist.
-- `aff-backup.timer` runs the nightly job above; `OnFailure=` alerts, because a backup's failure is
-  invisible until the moment it is needed.
-- `Restart=always` (not `on-failure`: a clean exit nobody asked for still means the feed is down),
-  `KillSignal=SIGTERM`, `EnvironmentFile` at 0600.
-- Hardening mirrors the existing units: `NoNewPrivileges`, `PrivateTmp`, `PrivateDevices`,
-  `ProtectSystem=strict`, `ProtectHome`, `ProtectKernelTunables/Modules/Logs`,
-  `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `ProtectProc=invisible`,
-  `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `RemoveIPC`,
-  `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`, `SystemCallFilter=@system-service`,
-  `SystemCallArchitectures=native`, with `ReadWritePaths` naming only the DB and backup directories.
-  This process fetches arbitrary URLs off the internet and parses what comes back — the sandbox is
-  not ceremony.
-- **`MemoryDenyWriteExecute` depends on the SQLite driver** and must be decided at M1, not
-  discovered at M15: a wasm-based driver (wazero) JIT-compiles to executable pages and dies on first
-  query with `MemoryDenyWriteExecute=yes`, which is exactly why ArticleFlux sets it to `no`. A cgo
-  driver can keep it `yes`.
-- Built on the droplet, as the other apps are, which avoids cross-compilation surprises. The 4 GB
-  swap already present is what makes the WASM link survivable at 2 GB RAM. The WASM build runs in an
-  isolated scratch directory to dodge the known concurrent-build race, emits `.wasm.gz`, and
-  artifacts are published by atomic move so no request sees a half-written file. Logs to journald.
+The target is `Earl-Cameron-dot-com` (167.99.232.99, Ubuntu 24.04, 2 GB / 2 vCPU, 4 GB swap, 38 GB
+free, Go 1.26.5 on-box), verified 2026-08-09. It currently runs `articleflux`, `cashflux`, and
+`earlcameron` as **systemd units behind nginx**, with per-app `-backup`, `-health`, and `-retention`
+sibling timers and a `deployhook` service. Docker is not installed there yet.
 
-**Docker: no.** It was considered and rejected on evidence, not preference. The box has no Docker
-installed and runs three Go services plus seven sibling units entirely under systemd behind nginx;
-containerizing one service would add a second deployment model, a second log destination, and a
-second restart policy to maintain forever. The daemon would also cost 100–200 MB RSS of the 2 GB —
-against a static Go binary that needs none of it, next to a systemd sandbox that already provides
-comparable confinement. Docker for the *build* remains reasonable if toolchain drift ever becomes a
-problem; Docker at runtime buys nothing here.
+**This is a deliberate departure from that pattern, chosen for the learning value of a real
+container pipeline rather than because the box needs it.** Recording that honestly matters: the
+trade being accepted is a second deployment model on the box, a second log destination, and
+~100–200 MB of the 2 GB spent on the daemon. What is bought is reproducible builds, builds that do
+not run on the droplet at all, atomic rollback to any previous image, and a repo-push-to-running
+loop. On a 2 GB box that last point is worth more than it first appears — see the build section.
+
+nginx does **not** change. It stays the TLS terminator and the only thing exposed; the container
+publishes to `127.0.0.1` only. Everything in §4 about the admin host and IP allowlisting is
+unaffected.
+
+### 15.1 Image
+
+Multi-stage, and the runtime stage carries no toolchain:
+
+- **Builder stage** compiles the server (`CGO_ENABLED=0`, static) and the GWC WASM bundle, gzips the
+  wasm, and stamps version/commit/build-date via `-ldflags -X`. Build cache mounts keep rebuilds
+  cheap.
+- **Runtime stage** is `gcr.io/distroless/static:nonroot` — no shell, no package manager, nothing to
+  exec into. That is a genuine security gain over a bare binary on the host, and one of the few
+  places Docker pays for itself here.
+- **`CGO_ENABLED=0` forces the SQLite driver decision.** A cgo driver (`mattn/go-sqlite3`, which is
+  how FTS5 is usually registered) cannot be built static this way without extra work; a pure-Go or
+  wasm driver can. This is the same decision §15's `MemoryDenyWriteExecute` note flagged for M1, and
+  it now has a second forcing reason. Decide it at M1, not at M15.
+- The image declares a non-root user and pre-creates the data directory **owned by that user**. This
+  is not cosmetic: Docker initializes an empty *named volume* from the image path including
+  ownership, so a directory created as root in the image yields a volume the non-root process cannot
+  write, and SQLite fails on first write. Bind mounts do **not** inherit ownership this way and must
+  be chowned on the host — a real difference worth knowing before choosing between them.
+- `.dockerignore` excludes `.git`, local databases, and backups, so build context stays small and no
+  local DB is ever baked into an image.
+
+### 15.2 Build and registry — the platform trap
+
+**Builds run in GitHub Actions, not on the droplet and not on the desktop.** Two independent reasons:
+
+1. **The desktop is ARM64 Windows; the droplet is amd64.** A `docker build` on the desktop produces
+   an `arm64` image that will not run on the droplet, and the failure surfaces at `docker run` on
+   the server as an exec-format error, not at build time. If a local build is ever needed, it must
+   pass `--platform linux/amd64` and accept QEMU emulation. GitHub's runners are amd64, which makes
+   the mismatch disappear rather than requiring discipline.
+2. **The droplet has 2 GB.** The WASM link is the memory spike; keeping it off the box removes the
+   OOM risk entirely and is the strongest practical argument for this pipeline.
+
+Images publish to **GHCR** (`ghcr.io/monstercameron/animefeedflux`), authenticated with the
+workflow's `GITHUB_TOKEN` — but note the standing gotcha: **pushes made with `GITHUB_TOKEN` do not
+trigger other workflows**, so any chained "on image publish, deploy" workflow will wait forever.
+Deployment must be a job in the same workflow run, or triggered by something other than that push.
+
+**Tagging strategy**, in order of importance:
+
+- `sha-<short-commit>` — the immutable one. Every build gets it, nothing ever overwrites it, and it
+  is what a rollback names.
+- `v<semver>` — on release tags only.
+- `latest` — moving pointer to the newest `main` build. Convenient, and **never** what the droplet
+  pins in production, because "latest" makes "what is actually running?" unanswerable.
+
+The deployed compose file pins a `sha-` or `v` tag. Updating production is therefore an explicit
+change of one tag, which is also what makes rollback trivial: put the previous tag back and pull.
+
+### 15.3 Update loop, repo push to running service
+
+1. Push to `main` (or tag a release).
+2. Actions builds, runs the test suite and `make validate`, and pushes the image with all applicable
+   tags. **A failing test must fail the job before the push** — otherwise CI cheerfully publishes a
+   broken image.
+3. Deploy job, same run, over SSH to the droplet: write the new tag into the compose file, then
+   `docker compose pull && docker compose up -d`. Compose recreates only what changed.
+4. The deploy step **waits on the container healthcheck** and fails the job if it does not go
+   healthy. Without that gate the pipeline reports green while the service crash-loops.
+5. `docker image prune` on a schedule, because a 60 GB disk fills quietly with old layers.
+
+Rollback is step 3 with the previous `sha-` tag, which is the entire reason for immutable tags.
+
+Two honest caveats about this loop on a single host: there is a **brief gap** while the old container
+stops and the new one starts — acceptable for a feed served with a 15-minute TTL, and not worth
+building blue/green for. And SQLite means **exactly one container may hold the database**; compose's
+default recreate order does not overlap, but `--scale` on this service would corrupt it. Same
+constraint as §14.5, now with a sharper edge.
+
+### 15.4 Runtime configuration on the droplet
+
+- Publishes to `127.0.0.1:<port>` only; nginx proxies with the §20 streaming settings intact.
+- **Named volume** for `/var/lib/animefeedflux`, holding the DB and its `-wal`/`-shm`. Must be local
+  disk — WAL breaks on network filesystems, and the volume is the only copy of every item ever
+  generated.
+- Secrets by `env_file` on the host at 0600, **never** baked into the image and never in compose
+  itself. An image layer is world-readable to anyone who can pull it.
+- `restart: unless-stopped`, a healthcheck hitting `/healthz`, log rotation via the json-file driver
+  with size and file caps (unbounded container logs are a classic way to fill a small disk), and a
+  memory limit so a runaway process cannot take the whole box down with its neighbors.
+- `read_only: true` root filesystem with a tmpfs for `/tmp`, `cap_drop: ALL`,
+  `security_opt: no-new-privileges`. This is the container-side equivalent of the systemd hardening
+  the other services use, and it should be considered mandatory rather than optional.
+
+**What containerizing costs, stated plainly so it is not discovered later:** the sibling *timers*
+do not come along. `articleflux-backup.timer` and `-health.timer` are systemd, and compose has no
+scheduler. The backup and staleness jobs therefore need a host-side systemd timer invoking
+`docker compose exec` (or `docker run --rm` against the same volume), or an in-process scheduler
+inside the container. **In-process is the better fit here** — the app already has a cron scheduler
+(§9), the backup is already a `SystemService.Backup` RPC, and it keeps the job in the one place that
+understands WAL. The nightly backup and prune therefore become internal scheduled jobs rather than
+host units, and that decision needs to be reflected in M14.
 
 **Graceful shutdown.** SIGTERM stops the scheduler from starting new runs, lets in-flight runs
 finish within a timeout (a partially-charged LLM call should not be wasted), drains HTTP and gRPC
@@ -1018,7 +1096,7 @@ to be a cheap loop run often and `expires_at` filtering alone would grow the tab
 
 ## 16. Configuration
 
-Environment only — no config file, no secrets on disk beyond the systemd `EnvironmentFile`.
+Environment only — no config file, and no secrets on disk beyond the host `env_file` (0600).
 
 | Variable | Required | Purpose |
 |---|---|---|
@@ -1038,6 +1116,12 @@ Environment only — no config file, no secrets on disk beyond the systemd `Envi
 | `AFF_BACKUP_DIR` | no | nightly snapshot destination |
 | `AFF_SLACK_WEBHOOK_URL` | no | staleness/failure alerts |
 | `AFF_LIVE_LLM` | no | test-only; enables paid provider tests |
+
+Container-side, these arrive via an `env_file` on the host at 0600 — never `ENV` lines in the
+Dockerfile, never literals in `compose.yaml`, both of which are readable by anyone who can pull the
+image or read the repo. GitHub Actions needs its own secrets for the deploy job: an SSH key scoped
+to a deploy user and the droplet host key. `GITHUB_TOKEN` covers the GHCR push and needs no manual
+secret.
 
 Config is parsed and **validated at boot** — a missing or malformed required variable fails fast
 with a clear message rather than surfacing as a broken feed hours later. The base URL is validated
@@ -1099,10 +1183,12 @@ as absolute with a scheme, since it is baked into every guid.
 | M10 | Grounded news | Source fetch, candidate set, link-integrity enforcement, ranking prompt |
 | M11 | Sampling | `Sample`/`SampleStream`, sample persistence, promote, cost reporting |
 | M12 | Admin UI | Five GWC pages against real RPCs, responsive, empty/error states |
-| M12a | Staging host | `staging.anime.earlcameron.com`: subdomain, nginx vhost, TLS, publish plane reachable |
+| M11a | Container | Dockerfile, `.dockerignore`, image builds and runs locally with `--platform linux/amd64` |
+| M11b | Pipeline | Actions: test → build → GHCR with `sha-`/`v`/`latest`; Docker installed on droplet |
+| M12a | Staging host | `staging.anime.earlcameron.com`: nginx vhost, TLS, compose up, publish plane reachable |
 | M13 | Slack proof | Private workspace subscribes to staging; items post, no dupes, no spoilers |
-| M14 | Ops | Backups + tested restore, staleness watchdog, graceful shutdown, crash recovery |
-| M15 | Deploy | Production nginx vhosts, systemd + sibling timers, admin IP allowlist, `.wasm.gz`, live |
+| M14 | Ops | In-process backup + tested restore, staleness watchdog, graceful shutdown, crash recovery |
+| M15 | Deploy | Production vhosts, pinned image tag, health-gated deploy job, rollback drill, live |
 | M16 | Integration | ArticleFlux subscribes; verify rendering, dedup, refresh behavior |
 | M17 | Multi-feed | **Deferred.** Aggregates, feed index, shared source cache, LRU eviction |
 
@@ -1113,8 +1199,15 @@ deploy: discovering Slack drops your items after go-live is the expensive orderi
 M12a exists because M13 was otherwise unsatisfiable. Slack is an external service that polls over
 public TLS, so "subscribe to staging" needs a real reachable HTTPS host — which the milestone table
 did not deliver until M15. M12a is the *minimum* to be reachable (subdomain, nginx vhost, certificate,
-publish plane only); the systemd hardening, admin IP allowlist, and production cutover stay in M15.
-The staging host serves throwaway content and is torn down or repointed after M16.
+publish plane only); the admin IP allowlist and production cutover stay in M15. The staging host
+serves throwaway content and is torn down or repointed after M16.
+
+M11a/M11b come before staging for the same reason: staging is the first thing that must be *pulled*
+rather than built locally, so the image and the pipeline have to exist first. Doing them early also
+front-loads the two failures most likely to waste an afternoon — the arm64/amd64 mismatch and the
+named-volume ownership problem (§15.1) — into a milestone where nothing depends on them yet.
+**M15 is not done until a rollback has actually been performed**, not merely described: an untested
+rollback is the same species of lie as an untested backup.
 
 **M17 is deferred on purpose, and that is a correction to an earlier draft.** §14.4 says the v1
 target of 1–10 feeds needs none of that machinery, so scheduling it ahead of backups and deploy
@@ -1143,6 +1236,8 @@ else in §14 waits.
    has been performed successfully at least once.
 7. Total monthly spend under the configured ceiling, with per-feed attribution in `runs`.
 8. A backup has been restored into a scratch instance and serves identical feeds.
+9. A push to `main` reaches the running service without manual steps, and a rollback to the previous
+   image tag has been performed successfully at least once.
 
 ## 20. Risks
 
@@ -1170,6 +1265,13 @@ else in §14 waits.
 - **Cost creep** — per-feed and global caps, sampling drawing from the same budget, tracked in `runs`.
 - **Single point of failure.** One droplet, one SQLite file. Accepted for a personal project; the
   mitigation is backups that have actually been restored.
+- **Two deployment models on one box.** Accepted knowingly (§15). The concrete risks are a second
+  place to look when something is down, container logs that do not appear in `journalctl` alongside
+  the other services, and Docker's iptables rules interacting with any host firewall — which is why
+  the container publishes to `127.0.0.1` rather than `0.0.0.0`. Publishing to `0.0.0.0` would expose
+  the port **past `ufw`**, because Docker writes its own DNAT rules ahead of the host chain. That is
+  the single most common way a containerized service ends up unintentionally internet-facing, and on
+  this design it would expose the admin plane.
 
 ## 21. Open questions
 
