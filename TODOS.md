@@ -100,7 +100,7 @@ an incident — which is exactly when it is switched on.
 - [ ] `A0-T02` Seeded store builder producing a deterministic feed with known items. §17.1
 - [ ] `A0-T03` Injected `http.Client` serving `testdata/` for every upstream fetch. §17.1
 - [ ] `A0-T04` Injected clock; no test ever sleeps. §17.1
-- [ ] `A0-T05` Deterministic ULID source so goldens containing guids are stable. §17.1
+- [x] `A0-T05` Deterministic ULID source so goldens containing guids are stable. §17.1
 - [ ] `A0-T06` `testdata/` layout convention documented in-repo. §17.1
 - [ ] `A0-T07` Assert the default `go test ./...` needs no network and no API key. RULE-1
 - [x] `A0-T08` CI runs `go test -race` on ubuntu — the only place `-race` can run. §17.2
@@ -111,42 +111,42 @@ an incident — which is exactly when it is switched on.
 
 ## A1 — Store
 
-- [ ] `A1-01` Open SQLite with WAL, `busy_timeout=5000`, `foreign_keys=ON`, `synchronous=NORMAL`. §3
-- [ ] `A1-02` Register FTS5 (needs explicit build tag / registration — known trap). §3
-- [ ] `A1-03` Forward-only migration runner: numbered SQL, in a transaction, version recorded. §10
-- [ ] `A1-04` **Open the writer connection before the `mode=ro` reader** and assert the order. §2
-- [ ] `A1-05` Reader interface with **no write methods**; publish plane gets only this. §2
-- [ ] `A1-06` Migration `0001`: `admin`, `recovery_codes`, `totp_used`, `sessions`, `auth_events`. §10
-- [ ] `A1-07` `totp_used.step` is the PRIMARY KEY — the DB rejects the replay race, not the app. §4
-- [ ] `A1-08` Migration `0002`: `settings` singleton key/value table. §10
-- [ ] `A1-09` Migration `0003`: `feeds` with `kind`, `timezone`, `jitter_offset`, per-feed identity. §10
-- [ ] `A1-10` Migration `0004`: `items` with `item_key UNIQUE` (opaque ULID) and `content_hash`. §5.1
-- [ ] `A1-11` Add `UNIQUE(feed_id, content_hash)` for idempotency — separate from identity. §5.1
-- [ ] `A1-12` Add `UNIQUE(feed_id, published_at)` — Slack drops items sharing a timestamp. §5.5
-- [ ] `A1-13` Migration `0005`: `item_revisions`, `item_embeddings`, `corrections`. §10
-- [ ] `A1-14` Migration `0006`: `runs` with `lock_holder`, `heartbeat_at`, `reject_reasons_json`. §10
-- [ ] `A1-15` Constrain `runs.trigger` to `cron | manual` — no other producer exists. §10
-- [ ] `A1-16` Migration `0007`: `samples`, `sources`, `feed_members`. §10
-- [ ] `A1-17` Migration `0008`: `items_fts` external-content FTS5 table plus sync triggers. §10
-- [ ] `A1-18` ULID generation for `item_key`; assert it is never derived from content. §5.1
+- [x] `A1-01` Open SQLite with WAL, `busy_timeout=5000`, `foreign_keys=ON`, `synchronous=NORMAL`. §3
+- [x] `A1-02` Register FTS5 (needs explicit build tag / registration — known trap). §3
+- [x] `A1-03` Forward-only migration runner: numbered SQL, in a transaction, version recorded. §10
+- [x] `A1-04` **Open the writer connection before the `mode=ro` reader** and assert the order. §2
+- [x] `A1-05` Reader interface with **no write methods**; publish plane gets only this. §2
+- [x] `A1-06` Migration `0001`: `admin`, `recovery_codes`, `totp_used`, `sessions`, `auth_events`. §10
+- [x] `A1-07` `totp_used.step` is the PRIMARY KEY — the DB rejects the replay race, not the app. §4
+- [x] `A1-08` Migration `0002`: `settings` singleton key/value table. §10
+- [x] `A1-09` Migration `0003`: `feeds` with `kind`, `timezone`, `jitter_offset`, per-feed identity. §10
+- [x] `A1-10` Migration `0004`: `items` with `item_key UNIQUE` (opaque ULID) and `content_hash`. §5.1
+- [x] `A1-11` Add `UNIQUE(feed_id, content_hash)` for idempotency — separate from identity. §5.1
+- [x] `A1-12` Add `UNIQUE(feed_id, published_at)` — Slack drops items sharing a timestamp. §5.5
+- [x] `A1-13` Migration `0005`: `item_revisions`, `item_embeddings`, `corrections`. §10
+- [x] `A1-14` Migration `0006`: `runs` with `lock_holder`, `heartbeat_at`, `reject_reasons_json`. §10
+- [x] `A1-15` Constrain `runs.trigger` to `cron | manual` — no other producer exists. §10
+- [x] `A1-16` Migration `0007`: `samples`, `sources`, `feed_members`. §10
+- [x] `A1-17` Migration `0008`: `items_fts` external-content FTS5 table plus sync triggers. §10
+- [x] `A1-18` ULID generation for `item_key`; assert it is never derived from content. §5.1
 - [ ] `A1-19` Soft-delete helpers: `Delete` sets `deleted_at`, `Restore` clears it. No hard delete. §12.4
 - [ ] `A1-20` Optimistic concurrency: every mutable row carries a version, bumped on write. §11
-- [ ] `A1-21` Test: migrate from empty; migrate twice is idempotent; migrate onto seeded prior schema.
-- [ ] `A1-22` Test: cold boot opens writer before reader on a fresh WAL database. §2
-- [ ] `A1-23` Test: `UNIQUE(feed_id, content_hash)` makes a repeated run add nothing. §5.1
-- [ ] `A1-24` Test: **guid is stable across a title edit** — the whole point of the ULID. §5.1
-- [ ] `A1-25` Test: FTS5 triggers stay in sync on insert, update, and soft delete.
-- [ ] `A1-26` Test: the read-only handle **rejects writes**. Proves the §2 claim.
+- [x] `A1-21` Test: migrate from empty; migrate twice is idempotent; migrate onto seeded prior schema.
+- [x] `A1-22` Test: cold boot opens writer before reader on a fresh WAL database. §2
+- [x] `A1-23` Test: `UNIQUE(feed_id, content_hash)` makes a repeated run add nothing. §5.1
+- [x] `A1-24` Test: **guid is stable across a title edit** — the whole point of the ULID. §5.1
+- [x] `A1-25` Test: FTS5 triggers stay in sync on insert, update, and soft delete.
+- [x] `A1-26` Test: the read-only handle **rejects writes**. Proves the §2 claim.
 
 ## A2 — Renderers
 
-- [ ] `A2-01` RFC 822 formatter: four-digit year, UTC, `+0000`, no military zones. §5.1
-- [ ] `A2-02` RFC 3339 formatter: uppercase `T`, uppercase `Z`. §5.2
-- [ ] `A2-03` Test asserting neither formatter can produce the other's output. RULE-5
-- [ ] `A2-04` Tag URI builder: `tag:<host>,<year>:<slug>/<item_key>`, used by RSS and Atom alike. §5.1
-- [ ] `A2-05` Hex character-reference escaper for plain-text elements (`&#x26;`). §5.1
-- [ ] `A2-06` CDATA writer that splits `]]>` across sections. §5.1
-- [ ] `A2-07` URL absolutizer; reject or rewrite every relative href before storage. §5.1
+- [x] `A2-01` RFC 822 formatter: four-digit year, UTC, `+0000`, no military zones. §5.1
+- [x] `A2-02` RFC 3339 formatter: uppercase `T`, uppercase `Z`. §5.2
+- [x] `A2-03` Test asserting neither formatter can produce the other's output. RULE-5
+- [x] `A2-04` Tag URI builder: `tag:<host>,<year>:<slug>/<item_key>`, used by RSS and Atom alike. §5.1
+- [x] `A2-05` Hex character-reference escaper for plain-text elements (`&#x26;`). §5.1
+- [x] `A2-06` CDATA writer that splits `]]>` across sections. §5.1
+- [x] `A2-07` URL absolutizer; reject or rewrite every relative href before storage. §5.1
 - [ ] `A2-08` RSS 2.0 renderer: required channel elements plus language, ttl, generator, docs. §5.1
 - [ ] `A2-09` Emit `atom:link rel="self"` with `type="application/rss+xml"`. §5.1
 - [ ] `A2-10` Emit `guid isPermaLink="false"` — never rely on the `true` default. §5.1
