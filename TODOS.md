@@ -361,9 +361,10 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 **Pepper (optional, defence in depth)**
 
 - [ ] `SEC-07` `HMAC-SHA256(pepper, argon2idOutput)` before storage; pepper from env, never in the DB. §4
-      (primitive only — `internal/auth/pepper.go`'s `Pepper`/`VerifyPeppered` exist and are tested, but nothing in
-      `password.go`'s Hash/Verify or `internal/rpc/auth.go`'s login path calls them; a pepper is never actually
-      applied to a stored credential)
+      (wired, but in the wrong order — `internal/rpc/auth.go`'s Login/ChangePassword/CompletePasswordReset/
+      rehashAdminPassword now pepper the PASSWORD STRING before argon2id via `pepperCandidate`, not the argon2id
+      OUTPUT as this task and `pepper.go`'s own doc comment specify; `VerifyPeppered` — the post-hash function
+      matching the stated construction — has no production caller. A pepper is applied now, just not this one.)
 - [x] `SEC-08` `pepper_version` column from day one — without it rotation is impossible, not merely hard. §4
 - [x] `SEC-09` Migration adding `password_version` and `pepper_version`. §10
 - [ ] `SEC-10` Test: a database dump alone (salt + params + hash, no pepper) does not permit verification.
@@ -417,11 +418,17 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
       and `cmd` finds zero references — so "single-use" is only representable in the schema, not enforced)
 - [x] `SEC-32` Migration for `password_reset_tokens(token_hash, expires_at, used_at)`. §10
 - [ ] `SEC-33` **Using a reset revokes every existing session** — a reset that leaves old sessions
-      alive has not locked anyone out. §4 (documented as the caller's obligation in `reset.go`'s doc comment, but
-      no such caller exists yet — no revocation actually happens anywhere)
-- [ ] `SEC-34` Test: a used token is refused; an expired token is refused; sessions are gone after use.
-      (`TestResetTokenStoreSingleUseAndExpiry` only proves the schema can represent used/expired via raw SQL —
-      no function actually rejects a used or expired token, so there's nothing yet to test rejection of)
+      alive has not locked anyone out. §4 (implemented and tested — `internal/rpc/auth.go`'s
+      `CompletePasswordReset` revokes all sessions in the same transaction, proven by
+      `TestPasswordResetRevokesAllSessionsIncludingPreExisting` — but `CompletePasswordReset` itself has zero
+      callers: no proto RPC route, no CLI command. Correct code, unreachable.)
+- [x] `SEC-34` Test: a used token is refused; an expired token is refused; sessions are gone after use.
+      (now real function-level tests, not schema-only — `internal/rpc/auth_test.go`'s
+      `TestPasswordResetIsSingleUse`, `TestPasswordResetSingleUseUnderConcurrency`,
+      `TestPasswordResetExpiredTokenRefused`, `TestPasswordResetUnknownTokenRefused`, and
+      `TestPasswordResetRevokesAllSessionsIncludingPreExisting` all pass against `CompletePasswordReset` itself.
+      Ticked on its own narrow wording — the test exists and is correct — despite `CompletePasswordReset` having
+      no RPC/CLI caller yet, see SEC-31/SEC-33.)
 
 **Login protection**
 
@@ -647,13 +654,17 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 
 - [x] `C4-01` In-process nightly backup: `VACUUM INTO` plus an integrity check on the copy. §15
 - [x] `C4-02` Retain 14 days locally. §15
-- [ ] `C4-03` **Encrypt and ship the copy off the box.** §15 (encryption primitive only — `internal/ops/offsite.go`'s
-      AES-256-GCM chunked Encrypt/Decrypt is implemented and tested, but nothing calls it against a real backup and
-      no off-box transport — upload, rsync, S3, etc. — exists anywhere; the copy never leaves the box)
+- [ ] `C4-03` **Encrypt and ship the copy off the box.** §15 (encryption is now wired against real nightly backups
+      — `internal/ops/schedule.go`'s `shipOffsite` calls `encryptBackupFile` after every successful backup and
+      alerts if it's unconfigured, missing a key, or fails — but "off the box" is still not true: `OffsiteDir` is a
+      local directory on the same volume, and no network transport — upload, rsync, S3, scp — exists anywhere in
+      `internal/ops` or `cmd/aff`. Judged strictly per instruction: the copy never leaves the box.)
 - [x] `C4-04` `SystemService.Backup` on-demand download. §11
-- [ ] `C4-05` Alert on backup failure — its failure is otherwise invisible. §15 (`ops.Scheduler.runOnce` only
-      `slog.Error`s a failed backup; the Slack webhook `Notify` path is wired to the staleness watchdog only, not
-      to backup failure, so a failing nightly backup has no alert channel, only a log line)
+- [x] `C4-05` Alert on backup failure — its failure is otherwise invisible. §15 (`internal/ops/schedule.go`'s
+      `runBackup`/`alertBackup` now post via `NotifyBackupAlert` on a failed run AND, independently, when the
+      backup-absence check (`Check`, reused from the staleness watchdog) finds no successful backup within the
+      grace window — carrying the last successful timestamp either way. Every alert failure itself degrades to a
+      log line rather than compounding.)
 - [ ] `C4-06` **Restore into a scratch instance and confirm identical feeds.** §19 (requires a real deployment —
       nothing is deployed anywhere; `ops.Restore` is unit-tested but the drill itself has not been performed)
 - [x] `C4-07` Staleness watchdog comparing last success against schedule plus grace. §15
@@ -744,19 +755,19 @@ one owner, not because a second language is planned.
 - [ ] `D0-01` GWC (v5 pin) project set up under `web/`, building to WASM. §3
 - [ ] `D0-02` WASM build in an isolated scratch directory — the known concurrent-build race. §15
 - [ ] `D0-03` Emit `.wasm.gz` and serve with correct `Content-Encoding`. §12
-- [ ] `D0-04` HTML shell with a correct **`<base href>`** or deep links and refreshes break. §12
+- [x] `D0-04` HTML shell with a correct **`<base href>`** or deep links and refreshes break. §12
 - [ ] `D0-05` Client-side router for the five routes. §12
-- [ ] `D0-06` gRPC-over-WS client wired to the bridge. §3
-- [ ] `D0-07` Auth guard: `ANON` reaching an authed route redirects to `/login`. D-FLOW
+- [x] `D0-06` gRPC-over-WS client wired to the bridge. §3
+- [x] `D0-07` Auth guard: `ANON` reaching an authed route redirects to `/login`. D-FLOW
 - [ ] `D0-08` Session expiry mid-session drops to `ANON` without losing unsaved work silently. D-FLOW
-- [ ] `D0-09` **`DISCONNECTED` banner with automatic reconnect and backoff.** D-FLOW
+- [x] `D0-09` **`DISCONNECTED` banner with automatic reconnect and backoff.** D-FLOW
 - [ ] `D0-10` Queue or refuse mutations while `DISCONNECTED` — never fail silently. D-FLOW
-- [ ] `D0-11` Design tokens: colour, type scale, spacing. Load the frontend-design skill first.
-- [ ] `D0-12` Light and dark handling decided once, at the token layer.
-- [ ] `D0-13` Shared primitives: button, input, select, toggle, table, tabs, modal, toast, kebab menu.
+- [x] `D0-11` Design tokens: colour, type scale, spacing. Load the frontend-design skill first.
+- [x] `D0-12` Light and dark handling decided once, at the token layer.
+- [x] `D0-13` Shared primitives: button, input, select, toggle, table, tabs, modal, toast, kebab menu.
 - [ ] `D0-14` Shared `loading` / `empty` / `error` components used by every list. D-FLOW
-- [ ] `D0-15` Destructive actions live behind a `⋯` kebab, never a primary button. §12.6
-- [ ] `D0-16` Typed-confirmation modal for irreversible actions. §12.6
+- [x] `D0-15` Destructive actions live behind a `⋯` kebab, never a primary button. §12.6
+- [x] `D0-16` Typed-confirmation modal for irreversible actions. §12.6
 - [ ] `D0-17` GWC discipline: hooks unconditional and positional. §12.6
 - [ ] `D0-18` No `UseAtom` in render-only paths. §12.6
 - [ ] `D0-19` Declared effect deps; no browser-state reads in the render body. §12.6
@@ -764,7 +775,7 @@ one owner, not because a second language is planned.
       Superseded by `D6-*`. The original reasoning was about *languages*; the actual value is about
       *where strings live*, which applies at one user and one locale. Retrofitting later means
       touching every component written without it, which is the work that never gets scheduled. §12.6
-- [ ] `D0-21` i18n provider mounted in the **root component, above the router** — a provider inside
+- [x] `D0-21` i18n provider mounted in the **root component, above the router** — a provider inside
       a route cannot serve the shell's own reconnect banner or the guard's redirect notice. §12.6
 - [ ] `D0-22` Every shared primitive (`D0-13`) takes its labels as keys, never literals — a
       primitive with a hardcoded label defeats the catalogue everywhere it is reused. §12.6
@@ -874,17 +885,17 @@ over finished screens is the retrofit `D0-20`'s reversal exists to avoid.
 
 **Foundations**
 
-- [ ] `D6-01` Adopt GWC v5's `i18n` package; record in `PLAN.md` §12.6 what it does and does not do
+- [x] `D6-01` Adopt GWC v5's `i18n` package; record in `PLAN.md` §12.6 what it does and does not do
       (interpolation, plurals, formatters) before any keys are written. §12.6
-- [ ] `D6-02` `en` catalogue as a single checked-in source of truth, loaded at build time. §12.6
-- [ ] `D6-03` **Keys named for meaning, not for the English text** — `auth.login.submit`, never
+- [x] `D6-02` `en` catalogue as a single checked-in source of truth, loaded at build time. §12.6
+- [x] `D6-03` **Keys named for meaning, not for the English text** — `auth.login.submit`, never
       `auth.login.signIn`. A key named after its wording turns fixing wording into a rename. §12.6
-- [ ] `D6-04` Namespace keys by surface (`auth.*`, `generate.*`, `history.*`, `settings.*`,
+- [x] `D6-04` Namespace keys by surface (`auth.*`, `generate.*`, `history.*`, `settings.*`,
       `shell.*`, `common.*`) so an unused key is findable and a missing one is obvious. §12.6
-- [ ] `D6-05` Interpolation through the library, never string concatenation — concatenated
+- [x] `D6-05` Interpolation through the library, never string concatenation — concatenated
       fragments assume English word order and silently break the moment a second locale exists. §12.6
-- [ ] `D6-06` Plurals through the library's plural rules, not `if n == 1`. §12.6
-- [ ] `D6-07` A missing key renders the key itself and logs, loudly, in dev — never an empty string.
+- [x] `D6-06` Plurals through the library's plural rules, not `if n == 1`. §12.6
+- [x] `D6-07` A missing key renders the key itself and logs, loudly, in dev — never an empty string.
       A blank label is the one failure mode that looks like a styling bug. §12.6
 - [ ] `D6-08` Locale-aware formatters for dates, times, relative times, numbers and currency. The
       rail's "next run in local time" (`D2-02`) and every cost figure (`D2-25`) go through these,
