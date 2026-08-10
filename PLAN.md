@@ -150,8 +150,25 @@ corrupt data. Second, the Slack lane at the bottom is the reason for the `pubDat
 Standard earlcameron shape, so the ops story is boring:
 
 - **UI:** GoWebComponents (pin v5, per the existing `earlcameron` pin) compiled to WASM. Admin only.
-- **Transport:** GoGRPCBridge — gRPC-over-WebSocket, so the WASM client speaks real gRPC. Watch the
-  known keepalive/GOAWAY flap: pair client keepalive with server `EnforcementPolicy` explicitly.
+- **Transport:** GoGRPCBridge — gRPC-over-WebSocket, so the WASM client speaks real gRPC. The
+  primitive is `grpctunnel.BuildBridgeHandler`; `CheckOrigin` and `Authorize` are its pre-upgrade
+  hooks.
+
+  **Known caveat, verified 2026-08-10: the keepalive/GOAWAY mitigation is currently INERT, and that
+  is a deliberate trade.** The library offers `ShouldUseNativeGRPCTransport`, which is what would
+  make grpc-go's own `EnforcementPolicy` actually apply — but in native mode `grpcServer.Serve`
+  drives the transport from a bare `net.Conn` with a listener-level base context, disconnected from
+  the `*http.Request` context the validated session is attached to. Session-in-context then never
+  reaches any RPC, which breaks §4's per-RPC authentication outright. Handler mode passes the
+  request context through, so the session survives.
+  
+  Authentication wins over an unproven flap mitigation. The keepalive parameters are configured but
+  do nothing, because grpc-go's enforcement lives in a transport that is not the one serving these
+  connections — and by the same token the flap cannot currently reproduce either. If it ever does,
+  native transport is the thing that must change, and session propagation has to be solved first.
+
+  A second mismatch: `Authorize` can only produce `403`, so the session check runs in our own
+  handler *before* the bridge is entered, which is what lets a missing session return `401`.
 - **Backend:** Go, `net/http` for the publish listener, `grpc-go` behind the bridge for control.
 - **Store:** SQLite, single file, `WAL`, `busy_timeout=5000`, `foreign_keys=ON`,
   `synchronous=NORMAL`. FTS5 registered (it needs an explicit build tag / registration — a known

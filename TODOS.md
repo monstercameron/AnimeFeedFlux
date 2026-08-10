@@ -397,14 +397,14 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 
 **WebSocket upgrade**
 
-- [ ] `SEC-26` Exact-match `Origin` against an allowlist — the browser attaches the cookie to a
+- [x] `SEC-26` Exact-match `Origin` against an allowlist — the browser attaches the cookie to a
       cross-site handshake automatically, so this is the principal anti-hijacking defence. §4
-- [ ] `SEC-27` Authenticate from the cookie at upgrade; reject with 401 before switching protocols. §4
-- [ ] `SEC-28` **Revalidate the session periodically on a live socket and close when it expires or is
+- [x] `SEC-27` Authenticate from the cookie at upgrade; reject with 401 before switching protocols. §4
+- [x] `SEC-28` **Revalidate the session periodically on a live socket and close when it expires or is
       revoked.** Without it: authenticated 12:01, session expires 18:00, socket still serving at
       23:00. §4
-- [ ] `SEC-29` Test that exact clock scenario with an injected clock.
-- [ ] `SEC-30` Test: a near-miss Origin (`https://app.example.com.evil.tld`) is refused.
+- [x] `SEC-29` Test that exact clock scenario with an injected clock.
+- [x] `SEC-30` Test: a near-miss Origin (`https://app.example.com.evil.tld`) is refused.
 
 **Reset and single-use tokens**
 
@@ -416,21 +416,21 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 
 **Login protection**
 
-- [ ] `SEC-35` Rate-limit attempts per IP and per account, exponential backoff. §4
-- [ ] `SEC-36` One generic failure message for every cause, to prevent enumeration. §4
+- [x] `SEC-35` Rate-limit attempts per IP and per account, exponential backoff. §4
+- [x] `SEC-36` One generic failure message for every cause, to prevent enumeration. §4
 - [x] `SEC-37` Always run the KDF, even for an unknown account, so timing does not leak existence. §4
 - [x] `SEC-38` Log every attempt, success or failure, to `auth_events`. §4
 
 **Adversarial tests — the suite that must fail closed**
 
 - [x] `SEC-39` Timing: unknown-account and wrong-password medians are indistinguishable over N runs.
-- [ ] `SEC-40` A forged cookie with a plausible-looking token is refused.
-- [ ] `SEC-41` A valid token for a REVOKED session is refused everywhere, including mid-stream.
-- [ ] `SEC-42` A session past its absolute lifetime is refused even if recently active.
-- [ ] `SEC-43` A session past its idle timeout is refused even if within absolute lifetime.
+- [x] `SEC-40` A forged cookie with a plausible-looking token is refused.
+- [x] `SEC-41` A valid token for a REVOKED session is refused everywhere, including mid-stream.
+- [x] `SEC-42` A session past its absolute lifetime is refused even if recently active.
+- [x] `SEC-43` A session past its idle timeout is refused even if within absolute lifetime.
 - [x] `SEC-44` TOTP replay across two concurrent logins loses the race in the DB, not the app. §4
 - [x] `SEC-45` A recovery code cannot be used twice, under concurrency.
-- [ ] `SEC-46` Password change revokes all other sessions.
+- [x] `SEC-46` Password change revokes all other sessions.
 - [ ] `SEC-47` Fuzz the cookie parser: no panic, no accept, on arbitrary bytes.
 - [ ] `SEC-48` Fuzz the password validator: no panic on arbitrary Unicode, including lone surrogates.
 - [ ] `SEC-49` An argon2id hash string that is malformed, truncated, or has absurd parameters is
@@ -461,47 +461,47 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 ## B1 — RPC services
 
 - [x] `B1-01` `proto/aff/v1` definitions for all six services; buf codegen wired into the build. §11
-- [ ] `B1-02` `AuthService`. §11
-- [ ] `B1-03` `FeedService` including `ValidateSpec`, `SetMembers`, TOML export/import. §11
-- [ ] `B1-04` `SampleService`. §11
-- [ ] `B1-05` `ItemService` — **no `PurgeDeleted`; hard delete does not exist.** §12.4
-- [ ] `B1-06` `RunService` with `Watch` streaming. §11
-- [ ] `B1-07` `SystemService` including `Backup` and the kill switch. §11
-- [ ] `B1-08` Auth interceptor validating the session on **every** RPC. §4
-- [ ] `B1-09` `expected_version` optimistic concurrency on every mutation. §11
-- [ ] `B1-10` Opaque cursor pagination on list RPCs. §11
-- [ ] `B1-11` gRPC status codes with machine-readable detail for field-level errors. §11
-- [ ] `B1-12` Cache invalidation on **feed-level** writes too: `Update`, `SetEnabled`, `SetMembers`. §11
-- [ ] `B1-13` Invalidate any aggregate containing a changed feed. §11
-- [ ] `B1-14` `PublishCorrection` creating a linked, later-stamped item. §12.4
-- [ ] `B1-15` Record edits into `item_revisions`. §12.4
-- [ ] `B1-16` Reject an aggregate as a member of an aggregate. §14.2
-- [ ] `B1-17` Reject a slug change after first publish. §14.1
-- [ ] `B1-18` Reject reserved slugs. §14.1
-- [ ] `B1-19` Test: `PromoteSample` racing a scheduled run yields distinct timestamps, no raw error. §17
+- [x] `B1-02` `AuthService`. §11
+- [x] `B1-03` `FeedService` including `ValidateSpec`, `SetMembers`, TOML export/import. §11
+- [x] `B1-04` `SampleService`. §11
+- [x] `B1-05` `ItemService` — **no `PurgeDeleted`; hard delete does not exist.** §12.4
+- [x] `B1-06` `RunService` with `Watch` streaming. §11
+- [x] `B1-07` `SystemService` including `Backup` and the kill switch. §11
+- [x] `B1-08` Auth interceptor validating the session on **every** RPC. §4
+- [x] `B1-09` `expected_version` optimistic concurrency on every mutation. §11
+- [x] `B1-10` Opaque cursor pagination on list RPCs. §11
+- [x] `B1-11` gRPC status codes with machine-readable detail for field-level errors. §11
+- [x] `B1-12` Cache invalidation on **feed-level** writes too: `Update`, `SetEnabled`, `SetMembers`. §11
+- [x] `B1-13` Invalidate any aggregate containing a changed feed. §11
+- [x] `B1-14` `PublishCorrection` creating a linked, later-stamped item. §12.4
+- [x] `B1-15` Record edits into `item_revisions`. §12.4
+- [x] `B1-16` Reject an aggregate as a member of an aggregate. §14.2
+- [x] `B1-17` Reject a slug change after first publish. §14.1
+- [x] `B1-18` Reject reserved slugs. §14.1
+- [x] `B1-19` Test: `PromoteSample` racing a scheduled run yields distinct timestamps, no raw error. §17
 
 ## B2 — Bridge
 
-- [ ] `B2-01` Wire GoGRPCBridge over WebSocket for the control plane. §3
-- [ ] `B2-02` Validate the session cookie at upgrade. §4
-- [ ] `B2-03` Check `Origin` against `AFF_ALLOWED_ORIGINS` at upgrade. §4
-- [ ] `B2-04` Pair client keepalive with server `EnforcementPolicy` — the known GOAWAY flap. §3
-- [ ] `B2-05` Session revocation terminates in-flight streams. §4
-- [ ] `B2-06` Verify `SampleStream` and `RunService.Watch` actually stream through the bridge. §11
-- [ ] `B2-07` Test: an upgrade from a disallowed `Origin` is rejected. §17
+- [x] `B2-01` Wire GoGRPCBridge over WebSocket for the control plane. §3
+- [x] `B2-02` Validate the session cookie at upgrade. §4
+- [x] `B2-03` Check `Origin` against `AFF_ALLOWED_ORIGINS` at upgrade. §4
+- [x] `B2-04` Pair client keepalive with server `EnforcementPolicy` — the known GOAWAY flap. §3
+- [x] `B2-05` Session revocation terminates in-flight streams. §4
+- [x] `B2-06` Verify `SampleStream` and `RunService.Watch` actually stream through the bridge. §11
+- [x] `B2-07` Test: an upgrade from a disallowed `Origin` is rejected. §17
 
 ## B3 — CLI
 
-- [ ] `B3-01` `aff` as a gRPC client — **no privileged back door** past auth or validation. §11
-- [ ] `B3-02` `aff login` storing a session locally.
-- [ ] `B3-03` `aff feed list|get|create|update|enable|disable|delete`.
-- [ ] `B3-04` `aff recipe export|import` (TOML). §7
-- [ ] `B3-05` `aff sample <slug> [--size N] [--dry-run]` rendering results to the terminal. §11
-- [ ] `B3-06` `aff promote <sample-id>`. §11
-- [ ] `B3-07` `aff run <slug>` triggering a manual run and streaming progress. §11
-- [ ] `B3-08` `aff runs [--feed] [--status]` history. §11
-- [ ] `B3-09` `aff item list|get|create|update|delete|restore|correct`. §12.4
-- [ ] `B3-10` `aff system stats|kill-switch|backup|version`. §11
+- [x] `B3-01` `aff` as a gRPC client — **no privileged back door** past auth or validation. §11
+- [x] `B3-02` `aff login` storing a session locally.
+- [x] `B3-03` `aff feed list|get|create|update|enable|disable|delete`.
+- [x] `B3-04` `aff recipe export|import` (TOML). §7
+- [x] `B3-05` `aff sample <slug> [--size N] [--dry-run]` rendering results to the terminal. §11
+- [x] `B3-06` `aff promote <sample-id>`. §11
+- [x] `B3-07` `aff run <slug>` triggering a manual run and streaming progress. §11
+- [x] `B3-08` `aff runs [--feed] [--status]` history. §11
+- [x] `B3-09` `aff item list|get|create|update|delete|restore|correct`. §12.4
+- [x] `B3-10` `aff system stats|kill-switch|backup|version`. §11
 - [ ] `B3-11` **Drive the full lifecycle of one feed end to end with only the CLI.** §18 B3
 
 ## BF — Flow sanity tests, headless (§22, §17.5)
@@ -511,17 +511,17 @@ These drive each flow end to end through the RPC layer, then assert the flow's i
 every commit. The UI walkthroughs in `DF` come later and do not replace these.
 
 - [x] `BF-00` Harness: run a flow against a real store and RPC server, then assert on final state.
-- [ ] `BF-01` **J1** login: exactly one unexpired session row exists. §22
-- [ ] `BF-02` J1: cookie has `HttpOnly`, `Secure`, `SameSite=Strict`, `__Host-` prefix. §22
-- [ ] `BF-03` J1: every attempt, success or failure, lands in `auth_events`. §22
-- [ ] `BF-04` J1: wrong password and unknown user match in **message and timing**. §22
-- [ ] `BF-05` J1: the TOTP step just used cannot be replayed. §22
-- [ ] `BF-06` **J2** create: feed exists, disabled by default, zero items. §22
-- [ ] `BF-07` J2: `jitter_offset` populated and deterministic from the slug. §22
-- [ ] `BF-08` J2: next three runs are in the future and in the feed's timezone. §22
-- [ ] `BF-09` J2: each of duplicate/reserved slug, bad cron, unknown tz, unknown template var,
+- [x] `BF-01` **J1** login: exactly one unexpired session row exists. §22
+- [x] `BF-02` J1: cookie has `HttpOnly`, `Secure`, `SameSite=Strict`, `__Host-` prefix. §22
+- [x] `BF-03` J1: every attempt, success or failure, lands in `auth_events`. §22
+- [x] `BF-04` J1: wrong password and unknown user match in **message and timing**. §22
+- [x] `BF-05` J1: the TOTP step just used cannot be replayed. §22
+- [x] `BF-06` **J2** create: feed exists, disabled by default, zero items. §22
+- [x] `BF-07` J2: `jitter_offset` populated and deterministic from the slug. §22
+- [x] `BF-08` J2: next three runs are in the future and in the feed's timezone. §22
+- [x] `BF-09` J2: each of duplicate/reserved slug, bad cron, unknown tz, unknown template var,
       grounded-without-source, and zero budget is refused **server-side**. §22
-- [ ] `BF-10` J2: no provider call was made and nothing was published. §22
+- [x] `BF-10` J2: no provider call was made and nothing was published. §22
 - [x] `BF-11` **J3** sample: **`items` row count is unchanged.** The single most important one. §22
 - [x] `BF-12` J3: a `samples` row exists with `expires_at` set. §22
 - [x] `BF-13` J3: cost is non-zero and debited from the same budget scheduled runs use. §22
@@ -533,36 +533,36 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [ ] `BF-19` J4: render cache invalidated and `lastBuildDate` bumped. §22
 - [x] `BF-20` J4: item appears exactly once in all three formats. §22
 - [x] `BF-21` J4: a timestamp collision retries at +1s, no constraint error escapes. §22
-- [ ] `BF-22` **J5** diagnose: every run reaches a terminal status; none left `running`. §22
-- [ ] `BF-23` J5: `items_added + items_rejected` reconciles with recorded reasons. §22
-- [ ] `BF-24` J5: a failed run has **zero** items attributable to it. §22
-- [ ] `BF-25` J5: tokens and cost recorded even for failed runs — a failure that spent money shows it. §22
-- [ ] `BF-26` **J6** correct: the original's guid and `published_at` are unchanged. §22
-- [ ] `BF-27` J6: correction is a new item, new ULID, strictly later `published_at`. §22
-- [ ] `BF-28` J6: the `corrections` row links the two. §22
-- [ ] `BF-29` J6: the original is still resolvable at its permalink. §22
-- [ ] `BF-30` J6: a plain edit produces no new guid and therefore no redelivery. §22
-- [ ] `BF-31` **J7** recover: the consumed code is marked used and refused on reuse. §22
+- [x] `BF-22` **J5** diagnose: every run reaches a terminal status; none left `running`. §22
+- [x] `BF-23` J5: `items_added + items_rejected` reconciles with recorded reasons. §22
+- [x] `BF-24` J5: a failed run has **zero** items attributable to it. §22
+- [x] `BF-25` J5: tokens and cost recorded even for failed runs — a failure that spent money shows it. §22
+- [x] `BF-26` **J6** correct: the original's guid and `published_at` are unchanged. §22
+- [x] `BF-27` J6: correction is a new item, new ULID, strictly later `published_at`. §22
+- [x] `BF-28` J6: the `corrections` row links the two. §22
+- [x] `BF-29` J6: the original is still resolvable at its permalink. §22
+- [x] `BF-30` J6: a plain edit produces no new guid and therefore no redelivery. §22
+- [x] `BF-31` **J7** recover: the consumed code is marked used and refused on reuse. §22
 - [ ] `BF-32` J7: the elevated session reaches **only** password change and TOTP re-enrollment. §22
-- [ ] `BF-33` J7: all other sessions were revoked. §22
-- [ ] `BF-34` J7: remaining-code count decremented by exactly one. §22
-- [ ] `BF-35` J7: the recovery attempt appears in `auth_events`. §22
-- [ ] `BF-36` **J8** spend: sum of per-run `est_cost_usd` equals the reported total. §22
-- [ ] `BF-37` J8: editing the price table does **not** rewrite historical run costs. §22
-- [ ] `BF-38` J8: a feed at its cap logs a skipped run with a distinct status. §22
-- [ ] `BF-39` J8: sampling spend appears in the same totals as scheduled spend. §22
+- [x] `BF-33` J7: all other sessions were revoked. §22
+- [x] `BF-34` J7: remaining-code count decremented by exactly one. §22
+- [x] `BF-35` J7: the recovery attempt appears in `auth_events`. §22
+- [x] `BF-36` **J8** spend: sum of per-run `est_cost_usd` equals the reported total. §22
+- [x] `BF-37` J8: editing the price table does **not** rewrite historical run costs. §22
+- [x] `BF-38` J8: a feed at its cap logs a skipped run with a distinct status. §22
+- [x] `BF-39` J8: sampling spend appears in the same totals as scheduled spend. §22
 - [ ] `BF-40` **J9** watch: the stream terminates when the run does, in every branch. §22
 - [ ] `BF-41` J9: a dropped socket does **not** abort the run. §22
-- [ ] `BF-42` J9: reconnecting shows true current state, not a stale snapshot. §22
+- [x] `BF-42` J9: reconnecting shows true current state, not a stale snapshot. §22
 - [ ] `BF-43` J9: progress events never claim items that were not committed. §22
-- [ ] `BF-44` **J10** subscriber: feed validates with zero warnings in all three formats. §22
-- [ ] `BF-45` J10: every item has a unique, strictly decreasing `pubDate`. §22
-- [ ] `BF-46` J10: **each item delivered exactly once across many polls** — real HTTP, ≥2 cycles. §17.5
-- [ ] `BF-47` J10: an unchanged feed answers `304`, touching neither SQLite nor the LLM. §22
-- [ ] `BF-48` J10: a deleted item's permalink returns `410`, never `404`. §22
-- [ ] `BF-49` J10: no trivia answer in `description` or `og:description`. §22
-- [ ] `BF-50` J10: an edited item is not redelivered; a correction **is**. §22
-- [ ] `BF-51` J10: a backdated item is delivered to nobody. RULE-7
+- [x] `BF-44` **J10** subscriber: feed validates with zero warnings in all three formats. §22
+- [x] `BF-45` J10: every item has a unique, strictly decreasing `pubDate`. §22
+- [x] `BF-46` J10: **each item delivered exactly once across many polls** — real HTTP, ≥2 cycles. §17.5
+- [x] `BF-47` J10: an unchanged feed answers `304`, touching neither SQLite nor the LLM. §22
+- [x] `BF-48` J10: a deleted item's permalink returns `410`, never `404`. §22
+- [x] `BF-49` J10: no trivia answer in `description` or `og:description`. §22
+- [x] `BF-50` J10: an edited item is not redelivered; a correction **is**. §22
+- [x] `BF-51` J10: a backdated item is delivered to nobody. RULE-7
 - [ ] `BF-52` Wire the whole `BF` suite into CI as a required gate. §17.2
 
 ---

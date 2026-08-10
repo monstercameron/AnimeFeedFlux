@@ -13,6 +13,69 @@ Newest entries at the top.
 
 ---
 
+## 2026-08-10 — The password rule that was choosing the weaker password
+
+Cam supplied a fully-specified authentication architecture (NIST SP 800-63B +
+OWASP). Most of it matched what was already built. Three parts did not, and one
+of those was a genuine defect rather than a preference.
+
+### The composition rule was inverted
+
+`IsWeak` required a password to mix letters with digits or symbols. Applied to
+two real candidates:
+
+    "correct battery dinosaur tennis"   -> REJECTED (no digit, no symbol)
+    "P@ssw0rd2026!"                     -> ACCEPTED
+
+The rule was actively selecting the weaker password. Not failing to catch the
+weak one — *preferring* it. That is precisely the finding behind NIST dropping
+composition requirements, and seeing it happen in our own code was more
+persuasive than the citation.
+
+It is replaced by length (15–128) plus a compromised-password blocklist, and
+there is now a test whose stated purpose is to stop anyone reinstating the old
+rule, with the two candidates above as its fixtures.
+
+Related: passwords never expire. Forced rotation fails the same way — a human
+asked to change a passphrase on a schedule increments a digit.
+
+### Parallelism 4 was not "more secure"
+
+Argon2id `p=4` splits the same memory budget across four lanes. That is easier
+for an attacker with GPUs to parallelise than for us on one droplet core. OWASP
+says 1 for this memory profile. Corrected.
+
+### The blocklist is deliberately offline
+
+The obvious implementation is a k-anonymity range query against Have I Been
+Pwned. Rejected: it puts a third party on the login path, so their outage
+becomes an outage of the only way into this system, and it leaks a hash prefix
+of the admin's password on every enrolment. A local list can do neither.
+
+Repetitive and sequential strings are blocked too. That is not the composition
+rule returning by the back door, and the distinction is worth keeping straight:
+a composition rule dictates what a password must *contain*; this rejects strings
+with almost no entropy whatever they contain. NIST lists them as blocklist
+material explicitly.
+
+### One place the supplied design was not adopted
+
+Session lifetimes stayed at 12h absolute / 60m idle rather than the suggested
+7d/24h. Those figures are right for a consumer PWA; this is a single-admin
+console that can rewrite every published feed, so re-authenticating twice a day
+is cheap. Recorded in §4 as policy rather than cryptography, so it can be
+relaxed without anyone wondering whether something structural depends on it.
+
+### What was already right
+
+Opaque 256-bit session tokens stored only as SHA-256, `__Host-` cookie with no
+`Domain`, `Origin` exact-match at the WebSocket upgrade, and no JWT anywhere.
+The one genuinely missing mechanism was **periodic session revalidation on a
+live socket** — without it, authenticate at 12:01, session expires at 18:00, and
+the socket is still serving RPCs at 23:00 because nothing re-checked.
+
+---
+
 ## 2026-08-10 — Phase A built in parallel waves; what six-agent fan-out actually costs
 
 Five waves of six Sonnet subagents took the repository from a specification to
