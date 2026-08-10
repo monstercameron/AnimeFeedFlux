@@ -76,13 +76,20 @@ jobs:
           [ "$fail" = 0 ] && echo "all § references resolve"
           exit $fail
 
+      # Only DEFINITIONS count — a line that opens with a checkbox. The first
+      # version matched every occurrence anywhere, so a task that another task
+      # legitimately cross-references (OQ-04 naming what it blocks) was reported
+      # as a duplicate of itself. Cross-references are the point of stable IDs;
+      # a check that punishes them would train people to stop writing them.
       - name: Task IDs are unique
         run: |
-          dupes=$(grep -oE '`[A-Z]+[0-9]*-[0-9]+[a-z]?`' TODOS.md | sort | uniq -d)
+          # shellcheck disable=SC2016  # backticks are markdown, not substitution
+          dupes=$(grep -oE '^- \[.\] `[A-Z]+[0-9]*-[0-9]+[a-z]?`' TODOS.md \
+                  | grep -oE '`[^`]+`' | sort | uniq -d)
           if [ -n "$dupes" ]; then
             echo "::error::duplicate task IDs: $dupes"; exit 1
           fi
-          echo "task IDs unique"
+          echo "task IDs unique ($(grep -cE '^- \[.\] `[A-Z]' TODOS.md) defined)"
 
       - name: No secrets committed
         run: |
