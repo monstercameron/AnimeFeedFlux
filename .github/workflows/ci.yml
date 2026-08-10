@@ -88,10 +88,29 @@ jobs:
           echo "no secret material tracked"
 
   hooks:
-    name: Git hooks
+    name: Hooks, scripts, workflows
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # A malformed workflow fails the run BEFORE any job starts, produces no
+      # job list, and reports only "this run likely failed because of a workflow
+      # file issue" — which names no file, line, or reason. That happened on the
+      # first run of this very file (a double-quoted string in an expression;
+      # GitHub expressions only accept single quotes). Linting them here means
+      # the next one is caught with a line number instead of a scavenger hunt.
+      - uses: actions/setup-go@v5
+        with: { go-version: 'stable' }
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/*.yml
+
+      - name: Shell syntax
+        run: |
+          for s in .githooks/* scripts/*.sh; do
+            sh -n "$s" || { echo "::error::$s has a syntax error"; exit 1; }
+          done
+          echo "all shell files parse"
+
       - name: Hook test suite
         run: sh scripts/test-hooks.sh
       - name: Hooks are executable and LF
@@ -185,7 +204,7 @@ jobs:
     steps:
       - name: Fail if anything failed
         run: |
-          results='${{ join(needs.*.result, " ") }}'
+          results="${{ join(needs.*.result, ' ') }}"
           echo "results: $results"
           case "$results" in
             *failure*|*cancelled*) echo "::error::a required job did not pass"; exit 1 ;;
