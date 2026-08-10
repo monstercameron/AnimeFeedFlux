@@ -108,6 +108,70 @@ func Verify(password, encoded string) (ok bool, needsRehash bool, err error) {
 	return match, match && weaker, nil
 }
 
+// HashPeppered is Hash, but additionally mixes the optional pepper (PLAN.md §4) into the raw
+// argon2id output — via Pepper, i.e. HMAC-SHA256(pepper, argonOutput) — before it is PHC-encoded,
+// rather than into the password beforehand. That ordering is the one PLAN.md §4 and Pepper's own
+// doc comment specify: it is what lets a stolen database (salt + params + this stored value) stay
+// insufficient on its own, since reproducing what was actually compared requires the pepper, which
+// never touches the database.
+//
+// A nil/empty pepper makes this byte-for-byte identical to Hash: Pepper(x, nil) is defined as a
+// no-op, so an unconfigured deployment's stored hashes are completely unaffected by this function
+// existing. Verify (unpeppered) still reads a HashPeppered-with-nil-pepper hash correctly, because
+// the two produce identical encoded strings in that case.
+func HashPeppered(password string, p Params, pepper []byte) (string, error) {
+	if err := IsWeak(password); err != nil {
+		return "", err
+	}
+	salt := make([]byte, p.SaltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("auth: generating salt: %w", err)
+	}
+	key := argon2.IDKey([]byte(password), salt, p.Time, p.Memory, p.Threads, p.KeyLen)
+	key = Pepper(key, pepper)
+	encoded := fmt.Sprintf("$%s$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2Variant, argon2.Version, p.Memory, p.Time, p.Threads,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(key),
+	)
+	return encoded, nil
+}
+
+// VerifyPasswordPeppered is Verify, but reverses HashPeppered's Pepper step before comparing: it
+// re-derives the raw argon2id candidate exactly as Verify does, then compares it against the stored
+// value via pepper.go's VerifyPeppered — which applies the identical Pepper(candidate, pepper) step
+// HashPeppered applied before storing. This is what gives that byte-level primitive its first real
+// caller; previously nothing in the codebase invoked it, even though pepper.go's doc comment
+// describes exactly this post-hash ordering.
+//
+// Named VerifyPasswordPeppered rather than reusing "VerifyPeppered" because pepper.go already
+// exports a VerifyPeppered operating on raw byte slices (candidate, stored []byte) — Go has no
+// overloading, and the two operate at different layers (PHC string vs. raw argon2id output), so
+// giving them the same name would make call sites ambiguous about which layer they're at.
+//
+// A nil/empty pepper makes this byte-for-byte identical to Verify, for the same reason HashPeppered
+// with a nil/empty pepper is identical to Hash: Pepper is a documented no-op for that case, so an
+// unconfigured deployment's login path is unaffected by this function existing.
+func VerifyPasswordPeppered(password, encoded string, pepper []byte) (ok bool, needsRehash bool, err error) {
+	variant, version, p, salt, key, err := decode(encoded)
+	if err != nil {
+		return false, false, err
+	}
+	if variant != argon2Variant {
+		return false, false, fmt.Errorf("auth: unsupported hash variant %q", variant)
+	}
+	if version != argon2.Version {
+		return false, false, fmt.Errorf("auth: unsupported argon2 version %d", version)
+	}
+
+	candidate := argon2.IDKey([]byte(password), salt, p.Time, p.Memory, p.Threads, uint32(len(key)))
+	match := VerifyPeppered(candidate, key, pepper)
+
+	def := DefaultParams()
+	weaker := p.Time < def.Time || p.Memory < def.Memory || p.Threads < def.Threads || uint32(len(key)) < def.KeyLen
+	return match, match && weaker, nil
+}
+
 // decode parses a PHC-style argon2id string back into its components. It never panics on
 // malformed input — every index/parse step is guarded — because Verify must return an error, not
 // crash the login handler, when handed garbage (a corrupted row, a manual DB edit, etc).

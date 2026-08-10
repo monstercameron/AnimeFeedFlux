@@ -72,8 +72,12 @@ func TestEveryDeclaredKeyResolves(t *testing.T) {
 // web/pages/history and web/pages/settings already hardcode (those
 // packages cannot import this one — see keys_generate.go's doc comment),
 // so there is no Go constant in THIS package to check against; orphan
-// detection for those three namespaces is TestGenerateHistorySettingsHaveNoBlankEntries
-// below instead.
+// detection for those three namespaces is TestGenerateHistorySettingsResolve below instead,
+// which iterates every entry actually present in generateMessages/historyMessages/
+// settingsMessages and asserts each resolves to non-blank, non-fallback text — the same
+// per-entry check TestEveryDeclaredKeyResolves does for the Go-constant-backed namespaces above,
+// just driven from the catalogue's own keys instead of a hand-maintained Go slice, since these
+// three namespaces have no such slice to drive it from (see this comment's paragraph above).
 func TestNoOrphanCatalogueEntries(t *testing.T) {
 	declared := map[string]bool{}
 	for _, k := range allDeclaredAuthKeys {

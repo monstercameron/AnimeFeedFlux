@@ -42,6 +42,10 @@ func Pepper(argonOutput []byte, pepper []byte) []byte {
 // top of an already-derived argon2id output, so the two concerns (KDF correctness vs. pepper
 // correctness) stay independently testable and a pepper rotation never needs to touch argon2id
 // logic at all.
+//
+// Called by password.go's VerifyPasswordPeppered, which supplies candidate as the freshly-derived
+// argon2id output for a login attempt and stored as the PHC-decoded key from the persisted hash —
+// that is this function's real, and only, caller.
 func VerifyPeppered(candidate, stored []byte, pepper []byte) bool {
 	peppered := Pepper(candidate, pepper)
 	// subtle.ConstantTimeCompare requires equal-length inputs for its constant-time guarantee;

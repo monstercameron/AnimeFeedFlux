@@ -594,7 +594,7 @@ func TestChangePasswordAppliesConfiguredPepper(t *testing.T) {
 	if ok, _, _ := auth.Verify(newPassword, admin.PasswordHash); ok {
 		t.Error("new password verifies unpeppered against the stored hash — pepper was not actually applied")
 	}
-	if ok, _, _ := auth.Verify(pepperedPasswordInput(newPassword, testPepperKey), admin.PasswordHash); !ok {
+	if ok, _, _ := auth.VerifyPasswordPeppered(newPassword, admin.PasswordHash, testPepperKey); !ok {
 		t.Error("new password does not verify once peppered the same way ChangePassword should have peppered it")
 	}
 

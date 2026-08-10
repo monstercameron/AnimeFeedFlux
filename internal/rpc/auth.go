@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -84,10 +83,10 @@ type AuthServer struct {
 
 	// pepperKey and pepperVersion are the optional second secret PLAN.md §4
 	// describes. pepperKey is nil / pepperVersion is 0 for "no pepper
-	// configured" — see pepperKeyConfigured and pepperedPasswordInput's doc
-	// comments for why they are applied to the PASSWORD before it reaches
-	// auth.Hash/auth.Verify rather than to argon2id's output, which is what
-	// internal/auth/pepper.go's own doc comment describes.
+	// configured". Hashing goes through auth.HashPeppered and verification
+	// through auth.VerifyPasswordPeppered — see hashPassword/verifyPassword
+	// below — which apply the pepper to argon2id's OUTPUT, the order §4 and
+	// internal/auth/pepper.go's doc comment specify.
 	pepperKey     []byte
 	pepperVersion int
 }
@@ -184,49 +183,46 @@ func (s *AuthServer) pepperKeyConfigured() bool {
 	return len(s.pepperKey) > 0 && s.pepperVersion > 0
 }
 
-// pepperedPasswordInput mixes the server's pepper into password via
-// auth.Pepper (PLAN.md §4's optional second secret) BEFORE it reaches
-// auth.Hash/auth.Verify, rather than after — the order
-// internal/auth/pepper.go's own doc comment describes. auth.Hash and
-// auth.Verify only accept and produce a PHC-encoded string (salt, params
-// and key all folded into one string); there is no exported way to reach
-// the raw argon2id output they compute internally without either changing
-// internal/auth (out of scope for this change) or reimplementing PHC
-// decoding and argon2id derivation here, which would fork the one place
-// password verification is supposed to live. HMAC-ing the password before
-// it is hashed still gives the identical property a stolen database file
-// must lack (SEC-10): salt, KDF params and the resulting hash are all
-// present in a dump, but without the pepper nobody can reconstruct what was
-// actually fed to argon2id, so an offline crack attempt against the dump
-// alone cannot even try the right input. auth.Pepper is reused rather than
-// a bespoke HMAC call specifically so "no pepper configured" is the exact
-// same no-op contract auth.Pepper/VerifyPeppered are already tested for.
-//
-// Only ever call this when pepperKey is non-empty — callers decide whether
-// to pepper at all (via pepperKeyConfigured or a stored row's
-// Admin.PepperVersion), this function does not.
-func pepperedPasswordInput(password string, pepperKey []byte) string {
-	peppered := auth.Pepper([]byte(auth.Normalize(password)), pepperKey)
-	return base64.RawURLEncoding.EncodeToString(peppered)
+// hashPassword hashes password at DefaultParams(), applying the server's configured pepper (if
+// any) via auth.HashPeppered — HMAC-SHA256 over the argon2id OUTPUT, per PLAN.md §4 and
+// internal/auth/pepper.go's doc comment, not over the password beforehand. pepperVersion reports
+// what to persist alongside hash: 0 (never peppered) when this server has no pepper configured, or
+// s.pepperVersion when it does. Callers pass pepperVersion straight through to
+// store.UpdatePasswordAndPepper / store.CompletePasswordReset so the row's recorded generation
+// always agrees with what was actually mixed into the hash.
+func (s *AuthServer) hashPassword(password string) (hash string, pepperVersion int, err error) {
+	var key []byte
+	if s.pepperKeyConfigured() {
+		key = s.pepperKey
+		pepperVersion = s.pepperVersion
+	}
+	hash, err = auth.HashPeppered(password, auth.DefaultParams(), key)
+	return hash, pepperVersion, err
 }
 
-// pepperCandidate returns the string that should actually be compared
-// against a stored hash, given the pepper generation (rowPepperVersion,
-// from Admin.PepperVersion) that hash was written under. ok is false when
-// this server cannot reproduce that generation — no pepper configured at
-// all, or configured under a different version — in which case the caller
-// MUST fail the check rather than fall back to comparing unpeppered: a row
-// hashed under a pepper does not verify against the plain password, so
-// "can't reproduce the pepper" and "wrong password" both mean the same
-// thing here, and both must produce the same denial.
-func (s *AuthServer) pepperCandidate(password string, rowPepperVersion int) (candidate string, ok bool) {
-	if rowPepperVersion == 0 {
-		return password, true // never peppered — compare exactly as before pepper existed (PLAN.md §4)
+// verifyPassword checks password against hash, given the pepper generation (rowPepperVersion, from
+// Admin.PepperVersion) that hash was written under. It always runs auth.VerifyPasswordPeppered —
+// spending the real argon2id KDF cost — even when this server cannot reproduce rowPepperVersion, so
+// a pepper-generation mismatch costs the same wall-clock time as a wrong password and is not a
+// distinguishable timing side channel; ok is then forced false explicitly rather than relying on
+// the mismatch alone, since "can't reproduce the pepper" and "wrong password" must both mean the
+// same denial here (a row hashed under a pepper does not verify against any unpeppered candidate).
+func (s *AuthServer) verifyPassword(password, hash string, rowPepperVersion int) (ok bool, needsRehash bool, err error) {
+	var key []byte
+	reproducible := true
+	switch {
+	case rowPepperVersion == 0:
+		// never peppered — compare exactly as before pepper existed (PLAN.md §4)
+	case len(s.pepperKey) == 0 || rowPepperVersion != s.pepperVersion:
+		reproducible = false
+	default:
+		key = s.pepperKey
 	}
-	if len(s.pepperKey) == 0 || rowPepperVersion != s.pepperVersion {
-		return "", false
+	ok, needsRehash, err = auth.VerifyPasswordPeppered(password, hash, key)
+	if !reproducible {
+		ok = false
 	}
-	return pepperedPasswordInput(password, s.pepperKey), true
+	return ok, needsRehash, err
 }
 
 // --- Login -------------------------------------------------------------
@@ -256,21 +252,12 @@ func (s *AuthServer) Login(ctx context.Context, req *affv1.AuthServiceLoginReque
 		rowPepperVersion = admin.PepperVersion
 	}
 
-	// candidate is peppered to match rowPepperVersion (see pepperCandidate),
-	// never the server's current pepper alone — a row hashed under no pepper,
-	// or an older/different one, must not be compared against a peppered
-	// candidate. When pepperOK is false the KDF is still run (against the
-	// unpeppered password, which is guaranteed not to match a peppered
-	// hash) so a pepper-generation mismatch costs the same wall-clock time
-	// as a wrong password and is not a distinguishable timing side channel.
-	candidate, pepperOK := s.pepperCandidate(req.Password, rowPepperVersion)
-	if !pepperOK {
-		candidate = req.Password
-	}
-	pwOK, needsRehash, verr := auth.Verify(candidate, hash)
-	if !pepperOK {
-		pwOK = false
-	}
+	// verifyPassword applies the pepper matching rowPepperVersion (never the
+	// server's current pepper alone) — a row hashed under no pepper, or an
+	// older/different one, must not be compared against a peppered candidate.
+	// It still spends the real KDF cost even when that pepper can't be
+	// reproduced, so a pepper-generation mismatch is not a timing oracle.
+	pwOK, needsRehash, verr := s.verifyPassword(req.Password, hash, rowPepperVersion)
 
 	if adminErr != nil || verr != nil || !pwOK {
 		s.backoff.recordFailure(ip, now)
@@ -460,12 +447,7 @@ func (s *AuthServer) CompletePasswordReset(ctx context.Context, rawToken, newPas
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	toHash, pepperVersion := newPassword, 0
-	if s.pepperKeyConfigured() {
-		toHash = pepperedPasswordInput(newPassword, s.pepperKey)
-		pepperVersion = s.pepperVersion
-	}
-	newHash, err := auth.Hash(toHash, auth.DefaultParams())
+	newHash, pepperVersion, err := s.hashPassword(newPassword)
 	if err != nil {
 		return status.Error(codes.Internal, "password reset failed")
 	}
@@ -543,12 +525,7 @@ func (s *AuthServer) ChangePassword(ctx context.Context, req *affv1.AuthServiceC
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	toHash, newPepperVersion := req.NewPassword, 0
-	if s.pepperKeyConfigured() {
-		toHash = pepperedPasswordInput(req.NewPassword, s.pepperKey)
-		newPepperVersion = s.pepperVersion
-	}
-	newHash, err := auth.Hash(toHash, auth.DefaultParams())
+	newHash, newPepperVersion, err := s.hashPassword(req.NewPassword)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "change password failed")
 	}
@@ -679,14 +656,7 @@ func (s *AuthServer) ReenrollTOTP(ctx context.Context, req *affv1.AuthServiceRee
 		if err != nil {
 			return nil, status.Error(codes.Internal, "reenroll failed")
 		}
-		candidate, pepperOK := s.pepperCandidate(req.CurrentPassword, admin.PepperVersion)
-		if !pepperOK {
-			candidate = req.CurrentPassword // guaranteed not to match a peppered hash; still spends KDF time below
-		}
-		pwOK, _, verr := auth.Verify(candidate, admin.PasswordHash)
-		if !pepperOK {
-			pwOK = false
-		}
+		pwOK, _, verr := s.verifyPassword(req.CurrentPassword, admin.PasswordHash, admin.PepperVersion)
 		if verr != nil || !pwOK {
 			_ = s.store.RecordAuthEvent(ctx, "reenroll_totp", ip, false, "current password check failed")
 			return nil, errAuthFailed
@@ -765,14 +735,7 @@ func (s *AuthServer) verifyCurrentCredentials(ctx context.Context, password, tot
 	if err != nil {
 		return fmt.Errorf("rpc: loading admin: %w", err)
 	}
-	candidate, pepperOK := s.pepperCandidate(password, admin.PepperVersion)
-	if !pepperOK {
-		candidate = password // guaranteed not to match a peppered hash; still spends KDF time below
-	}
-	pwOK, _, verr := auth.Verify(candidate, admin.PasswordHash)
-	if !pepperOK {
-		pwOK = false
-	}
+	pwOK, _, verr := s.verifyPassword(password, admin.PasswordHash, admin.PepperVersion)
 	if verr != nil {
 		return fmt.Errorf("rpc: verifying password: %w", verr)
 	}
@@ -825,12 +788,7 @@ func (s *AuthServer) verifyTOTPCode(ctx context.Context, code string, now time.T
 // wrote into password_hash (0 if this server currently has no pepper
 // configured), never leaving the two disagreeing.
 func (s *AuthServer) rehashAdminPassword(ctx context.Context, password string) error {
-	toHash, pepperVersion := password, 0
-	if s.pepperKeyConfigured() {
-		toHash = pepperedPasswordInput(password, s.pepperKey)
-		pepperVersion = s.pepperVersion
-	}
-	newHash, err := auth.Hash(toHash, auth.DefaultParams())
+	newHash, pepperVersion, err := s.hashPassword(password)
 	if err != nil {
 		return err
 	}
