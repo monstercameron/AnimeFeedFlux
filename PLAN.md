@@ -154,21 +154,43 @@ Standard earlcameron shape, so the ops story is boring:
   primitive is `grpctunnel.BuildBridgeHandler`; `CheckOrigin` and `Authorize` are its pre-upgrade
   hooks.
 
-  **Known caveat, verified 2026-08-10: the keepalive/GOAWAY mitigation is currently INERT, and that
-  is a deliberate trade.** The library offers `ShouldUseNativeGRPCTransport`, which is what would
-  make grpc-go's own `EnforcementPolicy` actually apply — but in native mode `grpcServer.Serve`
-  drives the transport from a bare `net.Conn` with a listener-level base context, disconnected from
-  the `*http.Request` context the validated session is attached to. Session-in-context then never
-  reaches any RPC, which breaks §4's per-RPC authentication outright. Handler mode passes the
-  request context through, so the session survives.
-  
-  Authentication wins over an unproven flap mitigation. The keepalive parameters are configured but
-  do nothing, because grpc-go's enforcement lives in a transport that is not the one serving these
-  connections — and by the same token the flap cannot currently reproduce either. If it ever does,
-  native transport is the thing that must change, and session propagation has to be solved first.
+  **Known caveat, re-verified 2026-08-10 against the pinned `grpctunnel` v1.1.1: grpc-go's own
+  keepalive enforcement is INERT, but that is not the whole keepalive story.** The library offers
+  `ShouldUseNativeGRPCTransport`, which is what would make grpc-go's own `KeepaliveParams`/
+  `EnforcementPolicy` actually apply — but in native mode `grpcServer.Serve` drives the transport
+  from a bare `net.Conn` with a listener-level base context, disconnected from the `*http.Request`
+  context the validated session is attached to. Session-in-context then never reaches any RPC, which
+  breaks §4's per-RPC authentication outright. Handler mode passes the request context through, so
+  the session survives. Authentication wins over grpc-go's own flap mitigation: `KeepaliveParams`/
+  `EnforcementPolicy` are configured and paired correctly (`internal/bridge/server.go`) but do
+  nothing, because grpc-go's enforcement lives in a transport that is not the one serving these
+  connections. If that ever needs to be load-bearing, native transport is the thing that must
+  change, and session propagation has to be solved first.
+
+  **What actually protects against a vanished peer: `grpctunnel`'s own websocket-level ping/pong,
+  not grpc-go's.** `BridgeConfig.PingInterval`/`IdleTimeout` are a separate mechanism, applied
+  directly to the `*websocket.Conn` before either transport mode is reached, so they are NOT gated
+  by `ShouldUseNativeGRPCTransport`. Left unset (as `internal/bridge` does), they default to a 30s
+  server-initiated WebSocket ping and a 120s read deadline reset on each pong. So "a vanished peer
+  (laptop sleep, an expired NAT mapping) pins a connection slot forever" is **not** an open problem
+  here — it is already handled, just by `grpctunnel`'s ping/pong rather than by the
+  `KeepaliveParams`/`EnforcementPolicy` this section used to name as the (inert) mitigation. Those
+  two mechanisms answer different questions: grpc-go's `EnforcementPolicy` polices excessive client
+  pings on an idle *stream*, `grpctunnel`'s ping/pong detects a dead *socket* — only the first of
+  those is inert under handler mode.
 
   A second mismatch: `Authorize` can only produce `403`, so the session check runs in our own
   handler *before* the bridge is entered, which is what lets a missing session return `401`.
+
+  **Connection limits, added to `internal/bridge`.** `grpctunnel`'s own defaults for
+  `MaxActiveConnections`, `MaxConnectionsPerClient` and `MaxUpgradesPerClientPerMinute` are
+  **disabled** — an upgrade flood has no ceiling at all unless the caller sets them. `internal/bridge`
+  now sets explicit values: `MaxActiveConnections=16`, `MaxConnectionsPerClient=6`,
+  `MaxUpgradesPerClientPerMinute=30`. This is admin-only traffic with no uploads (a single admin, a
+  handful of tabs/devices at most), on a 2 GB box shared with three other services — so the ceiling
+  exists to bound goroutines/websocket buffers/gRPC transport state consumed by a flood of upgrade
+  attempts before the process notices anything is wrong, not to model legitimate concurrency, which
+  it comfortably exceeds.
 - **Backend:** Go, `net/http` for the publish listener, `grpc-go` behind the bridge for control.
 - **Store:** SQLite, single file, `WAL`, `busy_timeout=5000`, `foreign_keys=ON`,
   `synchronous=NORMAL`. FTS5 registered (it needs an explicit build tag / registration — a known
@@ -469,9 +491,32 @@ model produces it directly, so it reads as a summary rather than a severed first
 
 **Trivia gets a specific benefit from this split.** Slack has no spoiler mechanism, so the answer
 must never appear in `description` or every question is spoiled in the channel. Therefore:
-`description` = the question only; the answer lives in `content:encoded` behind a spoiler break and
-on the permalink page, with the link reading as "reveal the answer". The generation schema already
-separates `answer_html`, so the renderer enforces this — it is not left to the prompt.
+`description` = the question only; the answer is never put in `description` or `og:description`.
+The generation schema already separates `answer_html`, so the renderer enforces the
+question/answer split at the schema level — it is not left to the prompt.
+
+**Where the answer goes is an open decision, not settled.** The plan previously said the answer
+"lives in `content:encoded` behind a spoiler break," on the assumption that markup like
+`<details>`/`<summary>` would keep it hidden until the reader chose to reveal it. That assumption
+does not hold against a real full-content reader and was never verified against one before being
+written down here. Verified by reading source: ArticleFlux (`internal/store/ingest.go`,
+`internal/feed/feed_test.go`) maps `content:encoded` into `content_html` and renders it in
+`client/view/panes.go` through `html.RawHTML`, which sanitizes via
+`GoWebComponents/v5/sanitize`'s `DefaultPolicy`. That policy's `AllowedTags`
+(`GoWebComponents/sanitize/sanitize.go:34-54`) does not include `details` or `summary`; it strips
+the `style` attribute unconditionally regardless of policy (same file, `writeAttr`, ~line 187); and
+disallowed tags that aren't in the small `dropWithContents` set (`script, style, iframe, object,
+embed, form, svg, math, link, meta, base, template`) are **unwrapped, not dropped** (`walk`, ~line
+161) — their content survives, only the tag is lost. A `<details>` spoiler sent through this
+sanitizer renders as the answer text, inline, with no toggle. Slack masks this because it never
+renders `content:encoded` at all — only `description` and the permalink's OG tags — so the one
+consumer this plan tests against (below) cannot expose the defect; ArticleFlux, the second consumer
+this plan names (§1), does. See `docs/spoiler-design.md` for the full evidence trail and four
+candidate resolutions (whitespace/scroll distance, a separate later answer item, permalink-only
+answer, or accepting visibility in full-content readers and designing for it) with their actual
+behavior in Slack, ArticleFlux, and generic readers, and what each costs. No resolution has been
+adopted; implementation must not assume `<details>`-style markup hides anything until this is
+decided.
 
 **Link unfurling.** Slack unfurls the item's `link`, so the permalink page carries OpenGraph and
 `twitter:card` tags — `og:title`, `og:description` (the same plain-text summary), `og:image`
@@ -533,6 +578,13 @@ A recipe carries: slug, title, description, language, kind (`generative` | `grou
 `aggregate`, the last having members instead of a generator — §14.2), schedule,
 items per run, **feed window**, model params, system and user prompt templates, novelty settings,
 per-day token and run budgets, and — for grounded feeds — one or more source URLs.
+
+**Trivia recipe authors: the answer-hiding mechanism is unresolved.** §5.5 records that
+`<details>`-style spoiler markup does not survive a sanitizing full-content reader (verified
+against ArticleFlux) and is not currently guaranteed to hide the answer in anything but Slack,
+which never renders `content:encoded` at all. Do not build a recipe's `answer_html` template
+assuming a spoiler tag will hide it in every consumer — see `docs/spoiler-design.md` for the
+options under consideration and check §5.5 before relying on any specific hiding behavior.
 
 Three nearby concepts are deliberately *not* the same thing, and the plan uses one name for each:
 
@@ -837,8 +889,9 @@ surface is how one gets missed:
 XML fragment, the novelty verdict, the grounded-link verdicts, and measured cost — writing nothing
 except a `samples` row. That is the loop for iterating prompts and what keeps spend down. The CLI is
 a gRPC client against these same services — no privileged back door that bypasses auth or
-validation. `aff admin init` and `aff admin reset` are the only local-only commands, and they
-require filesystem access to the DB.
+validation. `aff admin init`, `aff admin reset`, and `aff admin reset-password` are the only
+local-only commands, and they require filesystem access to the DB. The third exists because
+password reset has no gRPC surface at all, ever — see §12.2 for why.
 
 ## 12. Admin UI (GWC)
 
@@ -898,6 +951,25 @@ dead end at the worst possible moment. Recovery is exactly two paths, and the pa
    justified there by there being no remaining code to protect: a partial reset would leave the
    operator still locked out by whichever factor it didn't touch. The page states this plainly so a
    locked-out future me knows the answer immediately.
+3. **Forgotten password only, on the box** — `aff admin reset-password`
+   (`cmd/aff/admin_cmd.go`'s `cmdAdminResetPassword`), the narrower sibling of path 2: for "password
+   forgotten, TOTP and recovery codes are fine," so it touches only the password rather than blowing
+   away TOTP enrollment and burning the whole recovery-code set for nothing.
+
+   **Password reset has no gRPC surface, and never will.** `internal/rpc/auth.go` implements
+   `IssuePasswordResetToken` and `CompletePasswordReset` as ordinary Go methods on `AuthServer`, not
+   as proto RPCs, and `cmdAdminResetPassword` is their only caller — it mints and consumes the token
+   in the same local process, before it is ever displayed, logged, or carried anywhere. This is a
+   security argument, not a missing feature: a caller invoking a reset is by definition one who
+   cannot authenticate, so an unauthenticated network RPC that mints a reset token is an
+   unauthenticated account-takeover RPC, and there is no way to gate it (rate limit, CAPTCHA,
+   anything) that does not defeat the RPC's own purpose of helping someone who is locked out. With
+   one admin and no email infrastructure (see the constraint stated above) there is also nowhere to
+   deliver a freshly minted token that has not already gone through the machine issuing it — the
+   same reasoning that rules out "email me a reset link." `internal/rpc/auth_test.go`'s
+   `TestPasswordResetNotOnGRPCSurface` inspects `affv1.AuthService_ServiceDesc.Methods` and fails if
+   either method is ever added to the proto, which is what keeps this decision from eroding under a
+   future "just add the endpoint" change.
 
 Same generic-error and backoff rules as login. Recovery attempts land in `auth_events` and are the
 one event worth alerting on if a notification channel is ever configured.
@@ -1026,6 +1098,19 @@ from "wrong password" reintroduces the oracle §12.1 exists to prevent.
 
 A lint gate enforces it, because a convention nobody can check is a convention that decays: a
 user-visible literal in `web/` fails the build. The ratchet starts at zero and may not rise.
+
+**All styling is authored in Go, in the WASM, with GWC v5's typed `css` package.** `index.html`
+carries the document shell only (`<base href>`, the noscript fallback, the `#app` mount point) —
+no hand-written `<style>` block. This is not a preference; it is what a real failure looked like: a
+screenshot of `/login` showed raw browser defaults, and the document turned out to have 13 CSS
+rules total, all from a hand-written stylesheet covering four classes, while the pages emit over a
+hundred `af-*`/`history-*` class names nothing defines, and `tokens.Emit()` had zero callers so
+every `var(--color-…)` in `web/ui` resolved to nothing. Two hand-written layers and a typed one
+nobody wired is a styling model where no single place decides what a colour is. One typed source
+lets the compiler and the token tests see every rule. Two traps this project has already hit:
+a `css.Rule` value passed as a JSX-like child renders as literal text instead of being applied
+(`web/shell/banner.go`); and a rule that reads a token custom property renders nothing unless
+`tokens.Emit()` has already run — call it exactly once, before first render.
 
 ## 13. Cost model and blast radius
 
@@ -1205,14 +1290,24 @@ cries wolf trains the reader to ignore it.
 
 **SchemaFlux already emits OTel spans**, so wiring a `TracerProvider` gets the whole LLM path —
 attempts, retries, token counts, latency — for free. Not wiring one throws that away and leaves the
-single most expensive, most failure-prone call in the system unobserved.
+single most expensive, most failure-prone call in the system unobserved. **Two things this requires
+of the host, verified against `schemaflux v1.1.0`'s `telemetry/otel` package:** the span SchemaFlux
+emits is named `schemaflux.<operation>` (the operation string is whatever the call site passes —
+`internal/llm`'s `Generating[T]` calls are the source of it, not a fixed literal), not `llm.generate`
+— the library only knows OpenTelemetry exists in this package, and it prefixes every span and
+attribute it emits with `schemaflux.` (`telemetry/otel/otel.go:74`, `tracing.go:186`). And it emits
+nothing at all until the host calls `schemaflux/telemetry/otel.Install(provider)` once at startup, passing the
+`TracerProvider` this section configures — `Install` does not call `otel.SetTracerProvider` itself
+(so it cannot be embedded twice fighting over the global) and does not fall back to the global
+provider on a nil argument, it returns an error instead. Without that call, SchemaFlux's spans
+simply never open, regardless of how the rest of this section's provider is wired.
 
 **Spans.** One root per unit of work, children only where they answer a question:
 
 ```
 generation.run                      feed_slug, trigger, outcome
 ├── sources.fetch                   per source: url, status, cached (304), items
-├── llm.generate                    (from SchemaFlux) model, tokens, attempt, finish_reason
+├── schemaflux.<op>                 (from SchemaFlux, via otel.Install) model, tokens, attempt, finish_reason
 ├── validate                        rejected count and reasons
 ├── novelty.check                   max_cosine, verdict
 ├── link.integrity                  candidates, accepted, rejected
@@ -1448,7 +1543,12 @@ Environment only — no config file, and no secrets on disk beyond the host `env
 | `OTEL_EXPORTER_OTLP_HEADERS` | no | standard; carries the backend's auth token — a secret |
 | `OTEL_SERVICE_NAME` | no | defaults to `animefeedflux` |
 | `AFF_BACKUP_DIR` | no | nightly snapshot destination |
+| `AFF_OFFSITE_DIR` | no | where the nightly job additionally writes an **encrypted** off-box copy of that night's backup (`internal/ops`, `internal/config`); empty means no off-box copy is attempted, and the nightly job alerts on that absence rather than only logging it |
 | `AFF_SLACK_WEBHOOK_URL` | no | staleness/failure alerts |
+| `AFF_ADMIN_STATIC_DIR` | no | directory the compiled admin WASM bundle is served from; defaults to `web/dist`, matching `web/build.sh`'s own default |
+| `AFF_PASSWORD_PEPPER` | no | optional second secret HMAC-mixed into the admin credential before hashing (§4); empty means no pepper configured, the default |
+| `AFF_PASSWORD_PEPPER_VERSION` | no | required (and validated) whenever `AFF_PASSWORD_PEPPER` is set, so a stolen database's `pepper_version` column can be told apart from "hashed under a different pepper generation" during rotation |
+| `AFF_BACKUP_ENCRYPTION_KEY` | no | AES-256 key (base64) for `aff encrypt`/`aff decrypt` (`internal/ops/cli.go`). **Read directly via `os.Getenv`, not through `internal/config`'s validator** — deliberately not a flag, since a flag value sits in `ps`/task-manager output and shell history for as long as the process runs, which is the exact leak this variable exists to avoid |
 | `AFF_LIVE_LLM` | no | test-only; enables paid provider tests |
 
 Container-side, these arrive via an `env_file` on the host at 0600 — never `ENV` lines in the
@@ -1460,6 +1560,24 @@ secret.
 Config is parsed and **validated at boot** — a missing or malformed required variable fails fast
 with a clear message rather than surfacing as a broken feed hours later. The base URL is validated
 as absolute with a scheme, since it is baked into every guid.
+
+**`AFF_PASSWORD_PEPPER` is not like the other variables here: it is the one whose *loss* is
+unrecoverable, not just its *leak*.** A lost API key is re-issued. A lost pepper means no stored
+credential can be verified against a freshly-typed password ever again — the admin is permanently
+locked out, with no recovery path, because the hash on disk was produced with a secret that no
+longer exists anywhere. It must therefore be backed up **separately from the database**. Backing it
+up alongside the database — the natural, easy-to-reach-for thing to do — defeats its entire purpose:
+the pepper's whole job is to make a stolen database file insufficient on its own, and a backup that
+puts both in the same place, or the same restore, recreates the single point of failure it exists to
+remove.
+
+**Flagged, not fixed — an infrastructure decision, not a prose one: `AFF_OFFSITE_DIR` currently has
+nowhere genuinely off-box to point.** Pointing it at another directory on the same droplet/volume
+reproduces exactly the incident §15.0a's backups paragraph warns about — fourteen verified
+ArticleFlux backups, their source database, and the key that decrypts them all living on one
+DigitalOcean volume, so the single event they insured against took all of them at once. Naming a
+real off-box destination (a second provider, object storage in a different account/region, etc.) is
+a deployment decision this plan does not make on its own.
 
 ## 17. Testing
 

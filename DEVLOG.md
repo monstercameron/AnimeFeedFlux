@@ -13,6 +13,293 @@ Newest entries at the top.
 
 ---
 
+## 2026-08-10 — The server ran for the first time, and nothing could log in
+
+First boot of `cmd/animefeedflux`, and both ways into the admin plane were dead — the CLI at the
+transport layer, the browser at the protocol layer. Two unrelated bugs that happened to produce the
+same symptom.
+
+**The CLI.** `cmd/aff` dials `AFF_ADMIN_ADDR` with a real `grpc.NewClient` (`cmd/aff/client.go`'s
+`realDial`), but the admin listener (`cmd/animefeedflux/wire.go`) served only `bridge.NewServer`'s
+`http.Server` — the WebSocket tunnel and, once built, the static UI. No `*grpc.Server` was bound to
+that address anywhere in the tree. Every CLI command therefore died at the transport, before any RPC
+was dispatched, and `aff login` printed `aff login: authentication failed` — byte-identical to
+`internal/rpc/auth.go`'s `errAuthFailed` ("authentication failed", `codes.Unauthenticated`), which is
+what a genuinely wrong password produces. `client.go`'s `isUnreachable` exists to tell these apart
+(`codes.Unavailable`/`codes.DeadlineExceeded` from a dead port versus everything else), but its own
+doc comment records the deliberate reason it can't always: PLAN.md §12.1 forbids distinguishing
+failure causes in the generic case, so a non-status transport error is *treated* as a credential
+rejection rather than reported as unreachable, on purpose, as the safe default. A dead port and a
+wrong password produced the same output for the same reason the account-existence oracle rule exists
+— and the one thing that would have proven the RPC never arrived, `auth_events` staying empty through
+every attempt, took reading the database directly to notice, because the CLI's own output gave no
+hint.
+
+**The browser.** No CLI bug at all — a protocol-level chicken-and-egg. `bridge.NewServer`'s
+`ServeHTTP` (internal/bridge/server.go) validates the session cookie *before* the WebSocket upgrade,
+with no exemption for `AuthService.Login`: no cookie, no upgrade, a bare 401 — confirmed against
+`internal/bridge/server_test.go`'s own `TestUpgradeWithoutCookie_Unauthorized`, which proves the exact
+behavior and does not special-case Login either. A session is required to open the socket, and the
+socket is the only place `AuthService.Login` — the one thing that can mint a session — lived. §4
+forbids the token ever reaching JS/WASM-readable memory (no JWT in a response body, no token field a
+WASM caller could read), which is exactly why Login answers with a header a real `*grpc.Server`
+attaches via `grpc.SetHeader`, not a message field a WebSocket frame could carry cleanly. The missing
+piece was a plain HTTP login endpoint outside the bridge entirely — designed in §4 (`__Host-` cookie,
+`HttpOnly`, `Secure`, `SameSite=Strict`, no `Domain`) and never implemented anywhere. `internal/e2e`'s
+own suite had already documented this exact gap rather than discovering it fresh: `internal/e2e/app.go`
+opens a second, plain (non-bridge) `*grpc.Server` just to call Login, with a comment naming it
+outright — *"a real production gap and not a shortcut this suite invented"* — and that comment sat
+there, correct and ignored, while the suite stayed green the entire time, because a workaround inside
+a test proves the workaround works, not that the gap it routes around has been closed.
+
+**The fix, in one shape twice.** `*grpc.Server` implements `http.Handler` (grpc-go's own doc comment
+on `Server.ServeHTTP`), so the admin listener now wraps its handler in `h2c.NewHandler` (cleartext
+HTTP/2, which `grpc.NewClient`'s insecure transport speaks with prior knowledge) and a new
+`adminRouter` in front of it: an HTTP/2 request whose `Content-Type` begins `application/grpc` goes to
+a real `*grpc.Server` registered with the same six services the bridge uses; everything else falls
+through unchanged. One listener, one port, §2's two-listener boundary untouched — `cmd/aff` gets a
+real transport without a second admin port to secure. For the browser, `internal/bridge/httpauth.go`
+adds `POST /auth/login` and `POST /auth/logout` as ordinary HTTP handlers, routed ahead of both the bridge
+and the SPA static fallback in the new `adminMux`, backed by the *same* `AuthServer` every gRPC path
+uses (via `bridgeAuthenticator`, which replays the call through `AuthServer.UnaryInterceptor()` with a
+fabricated transport stream so `grpc.SetHeader`'s token capture still works outside a real RPC
+dispatch) — never a second, independently-constructed auth path that could drift from the first.
+
+**Two routing bugs surfaced in the same pass, same root cause (no admin router existed before this).**
+Before `adminMux`, the admin listener's handler *was* the bridge with nothing in front of it, so there
+was no place for the static UI to be mounted at all — the SPA's own `<base href="/">` had nowhere to
+resolve, because nothing served `/` as anything but a WebSocket-upgrade attempt. And there was no
+SPA-route fallback: `adminMux.ServeHTTP` now serves the shell for any path `m.static.Has` doesn't
+recognize as a real asset, so a deep link or a refresh renders the client router's own not-found
+instead of a bare 404 with no way back in.
+
+The reusable shape, same as the "seven things" below but one layer further out: none of this is
+visible to `go test ./...`, because the CLI's tests supply fakes for the network and the e2e suite's
+workaround *is* the missing piece, faithfully exercised. All four gaps — the dead transport, the
+upgrade-before-Login deadlock, the routing collision on `/`, and the missing SPA fallback — appeared
+within ten minutes of running the actual binary for the first time. A green test suite proved every
+component in isolation; running the thing was what found the seams between them.
+
+## 2026-08-10 — A systematic sweep for "built, tested, reachable from nothing" found more of them
+
+The login gap above and the "seven things" below were each found one at a time, by tracing a
+specific suspicion back to a composition root. `docs/unreached-components.md` is what happens when
+that search is made systematic instead: every exported identifier in `internal/`, `web/`, and
+`gen/aff/v1` (2,233 declarations, 1,717 unique after dedup) checked for a real call site outside its
+own file, narrowed to 88 zero-caller candidates, each read by hand against `PLAN.md` to separate a
+real gap from a false positive (interface satisfaction, function-passed-by-reference, functional
+options with sane defaults).
+
+The count of things independently found "built, tested, and wired to nothing" was already close to
+ten before this sweep — the seven below plus `ops.Scheduler` and `obs.Setup` (both since fixed,
+`docs/unreached-components.md` notes) — and the sweep's own write-up refers to that running tally as
+"the original ten" while cataloguing what it added on top: 8 dead-on-arrival findings and 6
+recommended-for-deletion speculative ones in section A/B of the doc.
+
+The single largest is **the entire `web/ui` component library** — `Button`, `Modal`, `Confirm`,
+`Toast`, `Tabs`, `StatePanel`, `Kebab`, `Input`, `Select`, `Table`, `Toggle`: 1,724 non-test lines,
+162 lines of its own tests, and zero production importers. `grep -rl "AnimeFeedFlux/web/ui\""` across
+every page under `web/pages/{auth,generate,history,settings}`, including test files, returns nothing —
+every page instead imports `GoWebComponents/v5/ui` directly under the same local alias (`ui`), which
+is what made the gap easy to miss by name alone, and hand-rolls markup instead. Nothing is visibly
+broken — the pages work by reimplementing equivalent markup — but every centralized guarantee the kit
+exists to provide once (the shared `focusVisible()` a11y treatment, one reviewed implementation of
+destructive-action confirmation) never reaches a real page, because no real page runs that code.
+
+Other confirmed findings worth naming: `llm.Error.Scope` (`ScopeAccount`/`ScopeRecipe`) is set at
+every fatal-classification site and read nowhere, so the one-bad-key-trips-the-global-kill-switch
+design in §8 does not happen — each feed instead burns its own five-failure budget against the same
+dead credential before disabling itself; `obs.WithRunID`/`obs.WithRequestID` are never called, so
+every log line is missing the identifier that would let an operator filter logs down to one run
+during an incident, despite the log/trace correlation contract in §15.0a existing and working
+otherwise; and `store.ListAuthEvents`/`RecentFailures` — the read side of the audit trail
+`internal/rpc/auth.go` writes at ~19 call sites — had no RPC and no UI reaching it at all (closed in
+this same session by `SystemService.ListAuditEvents`, see `CHANGELOG.md`).
+
+## 2026-08-10 — A tick audit un-ticked tasks for the first time, not just added them
+
+Every previous audit pass in this project's history has *added* unticked tasks it found missing.
+This is the first time one went the other way: re-checking `A9-20`..`A9-24` (publish-plane tracing
+spans and metrics, §15.0a) and `B2-06` (verifying `SampleStream`/`RunService.Watch` actually stream
+through the bridge, §11) against the tree found no supporting code at all — `internal/publish` has no
+spans, and the streaming verification A9-checks depend on had never been written — despite all six
+being marked `[x]`. They are `[ ]` again now, with the re-audit's finding recorded inline rather than
+just the checkbox flipped.
+
+Worth writing down on its own, separate from whatever caused the individual mismarks: an over-marked
+task is worse than an unmarked one. An unticked box still gets looked at eventually, because it reads
+as unfinished. A ticked box against work that was never done reads as settled, and nobody re-examines
+a checked box — it takes an audit that starts from *reading the code* rather than *trusting the last
+tick* to ever catch it. `TODOS.md`'s stated failure mode is "silent under-marking"; this session found
+the opposite failure is real too, and arguably more expensive, because it hides rather than merely
+delays.
+
+## 2026-08-10 — The trivia spoiler does not survive a real reader; Slack only ever hid the bug, not the answer
+
+PLAN.md §5.5 specified a trivia item's answer goes into `content:encoded` "behind a spoiler break,"
+on the assumption that some `<details>`/`<summary>`-shaped disclosure widget would keep it hidden
+until a reader chose to reveal it. That assumption was never checked against an actual sanitizing
+reader until this session (`docs/spoiler-design.md`). It does not hold: `GoWebComponents/v5/sanitize`'s
+`DefaultPolicy` — the sanitizer ArticleFlux's reading pane runs `content:encoded` through before
+rendering it — does not allow `details` or `summary`, and disallowed tags are not dropped, they are
+*unwrapped*: sanitized children survive, the tag around them does not. `<details><summary>Reveal
+</summary>THE ANSWER</details>` comes out the other side as plain `THE ANSWER` text, inline, with no
+toggle and no way to re-hide it.
+
+The reason this shipped unnoticed: Slack was the only consumer this project ever actually tested
+against (§5.5's own "practical check"), and Slack never renders `content:encoded` at all — it only
+ever shows `description`, which was already question-only. The one channel the design was verified
+against structurally cannot exhibit the bug, because the spoiler mechanism was never on the path
+Slack reads. The failure only shows up in a full-content reader, which is ArticleFlux — the second
+consumer PLAN.md §1 names by name — and nothing in this repository had ever emitted or sanitized a
+`<details>` tag to find out. `docs/spoiler-design.md` records four options (whitespace/scroll
+distance, a separate later item linked to the question, permalink-only answer, or accepting the
+answer is visible and designing around that) with their real cost against all three consumer shapes;
+none is adopted, and PLAN.md §5.5 now points at the document instead of restating the original
+assumption as settled.
+
+## 2026-08-10 — `DOD-4` puts a hard floor under how soon this project can be called done
+
+Auditing `PLAN.md §19` against the tree (`docs/definition-of-done.md`) found the definition of done
+is not nine independent checks — seven of the nine are gated on one thing that has never happened
+(a production deployment), and two of those seven additionally require elapsed time *after* that
+deployment: `DOD-3` needs 7 consecutive days of Slack delivery, and `DOD-4` needs **30 consecutive
+days of production trivia generation with no near-duplicate pairs** — explicitly not provable by the
+existing canned-corpus novelty harness, because that only proves the dedup mechanism works, not that
+a live model run daily for a month won't repeat itself. The practical consequence is worth stating
+plainly rather than leaving implicit: whatever day the first production deploy happens, `DOD-4` cannot
+be satisfied before a month after it, no matter how fast everything else moves. It is a clock that has
+not started, not a task that can be finished by working faster.
+
+## 2026-08-10 — Seven things built, tested, and wired to nothing
+
+The single most reusable lesson of this project so far, because it recurred
+seven separate times across a single day of work rather than once:
+
+- The **pepper** (`internal/auth/pepper.go`) — implemented, unit-tested, zero
+  production callers.
+- **Reset tokens** — single-use logic implemented and tested against the
+  store; no proto RPC and no CLI command ever issued or consumed one.
+- The **off-box backup encryptor** — chunked AES-256-GCM, tested against
+  round-trip fixtures; `OffsiteDir` pointed at a local directory, so nothing
+  it produced ever left the box.
+- `item_revisions` — every `Update` wrote a row; nothing could read one back.
+  `ListRevisions` and `RevertRevision` did not exist.
+- The **novelty gate** — read `item_embeddings` for its dedup check; nothing
+  had ever written a row to that table, so every candidate was compared
+  against an empty corpus and always passed.
+- The **i18n `Provider`** — `UseI18n()` calls were already written on the
+  auth pages; nothing mounted the provider that fills it, so every call read
+  an empty bundle and silently rendered its fallback default.
+- The **entire admin UI** — four page packages, unit-tested, and
+  `web/main.go` never called `shell.RegisterPage` for any of them. Every
+  route rendered the shell's placeholder regardless of how complete the page
+  behind it was — about eighty `TODOS.md` tasks blocked on wiring, not work.
+
+Every one of these passed its own unit tests. That is not a coincidence or a
+run of bad luck — a unit test cannot see an absent caller, by construction.
+It exercises the function directly, which is exactly the thing a missing
+composition root does not affect. "Tested" was read as "working" seven
+times, and each time the gap was invisible until something existed that
+would actually have had to call the code: `cmd/animefeedflux`'s composition
+root, the adversarial `sectest` suite, `web/main.go`'s composition root, or
+just someone reading `TODOS.md` against the tree instead of against the
+last time it was ticked.
+
+The placeholder screens made the UI case worse than a compile error would
+have: a route that renders *something* looks like a legitimate, if unfinished,
+page. A test asserting "the router has five routes" would have passed the
+entire time it was broken. The fix in every case was the same shape —
+find the one place nothing calls the tested thing, and make that call
+unconditional rather than an opt-in step a future composition root can
+forget. `ServeHTTP` now sets `Session.Token` from the cookie it already
+validated with no wiring step to skip; `web/main.go`'s `Mount` takes a wire
+callback invoked before route registration, not after.
+
+The general rule this earns: a component is not "done" because its tests
+pass. It is done when something that runs in production actually reaches
+it, and that has to be checked by tracing the call graph outward from a
+real entry point, not by trusting the component's own green tests.
+
+## 2026-08-10 — `GoWebComponents@latest` is an abandoned v1
+
+The admin UI dependency was first added as `GoWebComponents@latest`. That
+resolves to an abandoned v1 proof-of-concept whose reconciler package is
+unexported — nothing outside the module can mount a tree with it. A whole
+shell got built on hand-rolled `syscall/js` before this was noticed and the
+real library was found at a different module path entirely:
+`GoWebComponents/v5` at `v5.0.1`, with the router, state, ui, css, a11y and
+i18n packages the plan actually needed. `@latest` picking the wrong major
+version silently, with no error to catch it, is the trap worth remembering —
+checking the module path against the source, not the tag, is now the first
+step before building on any dependency here.
+
+A smaller version of the same trap: the docs describe a `Class(...)` helper
+that does not exist in v5.0.1, only `ClassStr`. Three separate agents hit
+that independently before anyone read the source instead of the manual.
+
+## 2026-08-10 — A selector that can never match, caught only by rendering it
+
+`css.DataTheme` composed with `Global(":root")` emitted
+`[data-theme="dark"] :root` — a selector asking `:root` to be its own
+descendant, which no document can ever satisfy. Dark mode would have shipped
+looking correct in every code review and failed silently in every browser.
+It was caught only because a test ran a real `css.Harvest()` over the
+composed rule and read the emitted selector, rather than asserting that the
+two pieces were present. Composing two style helpers that are each correct
+in isolation is not evidence the composition is; the only check that works
+is rendering the actual output.
+
+## 2026-08-10 — The pepper was applied to the wrong thing, and said so
+
+`pepper.go` documented `HMAC-SHA256(pepper, argon2idOutput)` — the pepper
+applied *after* the memory-hard hash. The code that got wired up applied it
+to the *password string*, *before* hashing instead. The agent that wired it
+recorded the deviation honestly in a comment, and the constraint behind it
+was real: `auth.Hash`/`Verify` only accept and return a PHC string, with no
+exported access to the raw argon2id output, and `internal/auth` was
+off-limits to that agent.
+
+Neither order is cryptographically weaker — feeding the pepper through a
+memory-hard KDF either way is fine. The actual defect was narrower and more
+dangerous: the codebase held two mechanisms, `VerifyPeppered` implementing
+the documented order with zero callers, and the wired one implementing a
+different order the docs did not describe. The next person to read
+`pepper.go` would believe the output was peppered and reason from something
+untrue. A documented deviation that never gets reconciled decays into a lie
+the moment someone reads the doc instead of the diff.
+
+Fixed by implementing the documented order rather than editing the document
+down to match the code — `HashPeppered`/`VerifyPasswordPeppered` now derive
+the argon2id output exactly as `Hash`/`Verify` do, then apply
+`Pepper`/`VerifyPeppered` to that. `Hash` and `Verify` themselves are
+byte-for-byte untouched, so the no-pepper deployment path (the common case)
+is unchanged by construction, not by testing.
+
+## 2026-08-10 — Reverting `go.mod` is exactly as destructive as editing it
+
+Three build breakages this session, previously assumed to be `go mod tidy`
+running mid-build. The real cause was different and more instructive: agents
+following "do not touch `go.mod`" ran `git checkout -- go.mod go.sum` to
+undo what looked like their own accidental edit, and in doing so reverted
+dependencies a *sibling* agent had legitimately added in a different task.
+Each revert was locally correct — the file agents saw did look wrong to
+them, in isolation — and globally destructive, because the build graph is
+shared across everyone working at once. That is the same failure shape as
+the earlier `go mod tidy` incident, just from the opposite direction: adding
+and reverting are both writes, and both are prohibited for the same reason.
+
+The rule is now explicit rather than implied: do not edit `go.mod`/`go.sum`
+**and** do not revert them either — leave them alone entirely and report
+what looks wrong. A locally correct action is not safe by default when the
+thing it acts on is shared.
+
+Worth keeping for the opposite reason too: one agent refused to act on an
+unverifiable coordinator claim about a dependency, checked it against the
+actual module cache itself, and solved the problem with what was already
+present rather than trusting the claim. That scepticism is the behaviour
+the corrected rule is trying to produce generally.
+
 ## 2026-08-10 — i18n was ruled out for the wrong reason
 
 `D0-20` said: no i18n, single user, English, out of scope. Cam reversed it. The

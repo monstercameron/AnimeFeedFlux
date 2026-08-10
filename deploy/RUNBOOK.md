@@ -9,6 +9,17 @@ Related design docs, in case something here doesn't match reality:
 (definition of done). This file describes *how to operate what §15
 describes*; it doesn't repeat the reasoning, only the commands.
 
+Looking for the very first setup instead — fresh clone to a working feed, no droplet or DNS
+required? That's `docs/first-run.md`, not this file. This runbook picks up from "there is a deployed
+host"; first-run.md covers getting the admin account, first feed, and first published item to exist
+at all, including on a laptop.
+
+Looking for what has to exist *before* any command below can run at all — a DigitalOcean token, DNS
+records, the decisions (droplet size, region, admin allowlist CIDR) an operator has to make, and
+which of TODOS.md's C2/C5 tasks each command actually satisfies? That's `docs/deploy-readiness.md`.
+Nothing in this repo is deployed as of this writing; that doc is the ordered path from nothing to a
+live feed, this file is the reference for operating what's already live.
+
 ## The shape of the system, in one paragraph
 
 One container (`animefeedflux`), image `ghcr.io/monstercameron/animefeedflux`,
@@ -58,6 +69,13 @@ After bootstrap reports clean:
    `SCHEMAFLUX_API_KEY`. See `deploy/animefeedflux.env.example` for the full
    list and what each does.
 
+   If you also set `AFF_PASSWORD_PEPPER` (optional, PLAN.md §4): copy it
+   somewhere that is **not** the database backup, and not the same place as
+   `AFF_BACKUP_ENCRYPTION_KEY` if you use one of those too. Losing the pepper
+   with no other copy locks out the one admin account permanently — there is
+   no recovery path that doesn't involve this exact string. See the warning
+   in `deploy/animefeedflux.env.example` before setting it.
+
 2. Deploy an actual image. If CI has already built one, grab its tag from the
    GHCR package page or a recent `sha-<commit>`; otherwise push to `main` and
    let CI build it, then:
@@ -87,6 +105,33 @@ After bootstrap reports clean:
 5. Confirm the admin plane is actually unreachable from off the allowlist
    (try from a phone on cellular data, not wifi that might share the home
    IP) and reachable from the allowlisted IP with password + TOTP.
+
+---
+
+## Staging (C2)
+
+Staging exists for one reason: Slack polls over public TLS, so proving the Slack integration (C3)
+needs a real reachable HTTPS host before production is on the line. It is publish-plane only — no
+admin vhost, no allowlist to configure — and it should be a **separate droplet from production**:
+`deploy-bootstrap.sh` does not parameterise `/opt/animefeedflux`, `/etc/animefeedflux`, or the
+`animefeedflux-data` volume name, so running staging mode and production mode against the same box
+would collide on all three.
+
+```sh
+# on a staging droplet, DNS for staging.anime.earlcameron.com already pointing at it
+sudo AFF_DEPLOY_MODE=staging sh scripts/deploy-bootstrap.sh
+```
+
+This generates a publish-only nginx vhost for `staging.anime.earlcameron.com` (the production
+publish vhost as committed, re-hostnamed on the deployed box — there is no separate
+`deploy/nginx/staging.*.conf` in the repo) and obtains its certificate. Override the hostname with
+`AFF_PUBLIC_DOMAIN` if staging should live somewhere else. Everything after that is identical to
+[First deploy]: fill in `/etc/animefeedflux/animefeedflux.env`, run `deploy-release.sh` with an
+image tag, then verify:
+
+```sh
+AFF_VERIFY_BASE_URL=https://staging.anime.earlcameron.com sh scripts/deploy-verify.sh
+```
 
 ---
 
@@ -162,6 +207,16 @@ broken rollback.
 ---
 
 ## Restoring a backup
+
+**Restoring the database is not restoring the deployment.** The DB backup
+contains no secrets — `AFF_SECRET_KEY`, `SCHEMAFLUX_API_KEY`,
+`AFF_PASSWORD_PEPPER` (if set), and `AFF_BACKUP_ENCRYPTION_KEY` (if set) all
+live only in `/etc/animefeedflux/animefeedflux.env` on the host, deliberately
+never in SQLite. A restored DB with a lost or mismatched pepper does not
+verify the admin password even though the hash is correct — that is the
+pepper working as designed, not a restore bug. Confirm the env file's
+secrets are the ones the backup was taken under before assuming a restore
+that "completed" actually leaves the admin account usable.
 
 Backups are nightly `VACUUM INTO` snapshots (in-process, not a host cron —
 see PLAN.md §15.4) written to `AFF_BACKUP_DIR`
@@ -353,7 +408,8 @@ curl -m 5 http://<droplet-public-ip>:9311/     # from OUTSIDE the box — must t
 
 | Task | Command |
 |---|---|
-| First-time host setup | `sudo sh scripts/deploy-bootstrap.sh <home-ip>/32` |
+| First-time host setup (production) | `sudo sh scripts/deploy-bootstrap.sh <home-ip>/32` |
+| First-time host setup (staging) | `sudo AFF_DEPLOY_MODE=staging sh scripts/deploy-bootstrap.sh` |
 | Deploy/update a tag | `sh scripts/deploy-release.sh <tag>` (on the droplet) |
 | Verify a deploy | `sh scripts/deploy-verify.sh` |
 | Rollback | `sh scripts/rollback.sh [tag \| --list]` |

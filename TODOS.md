@@ -33,7 +33,12 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 ## A0 — Skeleton
 
 - [x] `A0-01` Create `go.mod` as `github.com/monstercameron/AnimeFeedFlux`, Go 1.26. §3
-- [ ] `A0-02` Create the directory layout exactly as listed in §3, with a doc comment per package.
+- [ ] `A0-02` Create the directory layout exactly as listed in §3, with a doc comment per package. (doc comments are done — all 24 `internal/*` packages carry a `// Package x ...` comment. The **layout** half is not: the tree has `internal/schedule/`, not §3's `internal/scheduler/`, plus 14 packages §3 does not list (`bridge`, `budget`, `e2e`, `feedvalidate`, `flowtest`, `i18nlint`, `ids`, `model`, `novelty`, `ops`, `sanitize`, `sectest`, `testutil`, `urlnorm`). "Exactly as listed in §3" is now the wrong requirement rather than an unmet one — reconciling it is a `PLAN.md` §3 edit, out of scope here.)
+      (not "exactly as listed": §3 names `internal/scheduler/`, the tree has `internal/schedule/`, and
+      the tree carries ~14 packages §3 does not list — `budget`, `ids`, `model`, `sanitize`, `urlnorm`,
+      `ops`, `novelty`, `bridge`, `e2e`, `flowtest`, `sectest`, `testutil`, `i18nlint`, `feedvalidate`,
+      plus `cmd/affi18n` and `cmd/affvalidate`. Either §3's layout block or this task's "exactly" is now
+      wrong; amending PLAN.md is out of this audit's scope) — BLOCKED: two mismatches against §3's tree, verified 2026-08-10. (1) §3 lists `internal/scheduler/`; the repo has `internal/schedule/` — fixing means renaming a package imported by `internal/rpc` and `cmd/animefeedflux`, both outside this pass's edit scope. (2) §3 lists a top-level `testdata/` directory; only per-package `testdata/` dirs exist (`cmd/affi18n`, `internal/i18nlint`, `internal/render`, `internal/sanitize`, `internal/sources`). Doc comments ARE present on all three in-scope packages (`internal/generate/contract.go`, `internal/schedule/cron.go`, `internal/llm/llm.go`).
 - [x] `A0-03` Add `github.com/monstercameron/schemaflux` as a dependency; record the version. §8
 - [x] `A0-04` Write `internal/config`: one struct, parsed from env, no globals. §16
 - [x] `A0-05` Validate config at boot; fail fast with one clear message per bad variable. §16
@@ -46,7 +51,7 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 - [x] `A0-12` CI workflow: `go build`, `go vet`, `go test ./...` on ubuntu-latest.
 - [x] `A0-13` Add `-race` to CI (it cannot run on windows/arm64 locally — CI is the only place). §8
 - [x] `A0-14` Add `govulncheck` to CI. §4
-- [ ] `A0-15` Commit `go.sum`; pin dependencies. §4
+- [x] `A0-15` Commit `go.sum`; pin dependencies. §4 — verified: `go.sum` tracked in git, all `go.mod` requires (incl. `schemaflux v1.1.0`, `go-openai v1.20.4`) at exact pinned versions, no `replace`/pseudo-version drift.
 - [x] `A0-16` Decide and record the SQLite driver (cgo vs pure-Go vs wasm). Blocks A1-01. §15.1
 - [x] `A0-17` Record the `MemoryDenyWriteExecute` / `CGO_ENABLED=0` consequence of A0-16. §15.1
 
@@ -55,19 +60,19 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 The field names are the product here. Three packages spelling the same thing differently is three
 fields, and no query finds all of them.
 
-- [ ] `A0-L01` Define the canonical field-name constants in one place; nothing logs a bare string key. §15.0
-- [ ] `A0-L02` `feed_slug`, `item_key`, `model`, `outcome`, `reason`, `duration_ms` all fixed there. §15.0
-- [ ] `A0-L03` `duration_ms` is emitted as a **number**, never a formatted string. §15.0
-- [ ] `A0-L04` `outcome` is constrained to `success|skipped|rejected|failed`. §15.0
-- [ ] `A0-L05` `reason` is a short stable token, not a sentence — it gets grouped on. §15.0
-- [ ] `A0-L06` Document the level policy: ERROR means a human must look; WARN self-healed. §15.0
-- [ ] `A0-L07` A retried transient provider error logs **WARN**, not ERROR. §15.0
-- [ ] `A0-L08` Helper that emits the single canonical `run.finished` wide event. §15.0
-- [ ] `A0-L09` Helper that emits the single canonical `http.request` event. §15.0
-- [ ] `A0-L10` **No chatty INFO.** Progress detail is DEBUG only. §15.0
-- [ ] `A0-L11` Test: a completed run emits exactly one `run.finished` carrying every required field.
-- [ ] `A0-L12` Test: no log record is emitted with a field name outside the canonical set.
-- [ ] `A0-L13` Test: model output never reaches a log field verbatim (RULE-3 + cardinality).
+- [x] `A0-L01` Define the canonical field-name constants in one place; nothing logs a bare string key. §15.0 — `internal/obs/fields.go` const block; schedule/runner.go's hand-rolled bare-key `run.finished` emitter (a real violation found and fixed this pass — see DEVLOG/task notes) now routes through it.
+- [x] `A0-L02` `feed_slug`, `item_key`, `model`, `outcome`, `reason`, `duration_ms` all fixed there. §15.0 — `internal/obs/fields.go` `FieldFeedSlug`/`FieldItemKey`/`FieldModel`/`FieldOutcome`/`FieldReason`/`FieldDurationMs`.
+- [x] `A0-L03` `duration_ms` is emitted as a **number**, never a formatted string. §15.0 — `obs.DurationMsAttr` (`slog.Int64`).
+- [x] `A0-L04` `outcome` is constrained to `success|skipped|rejected|failed`. §15.0 — `obs.Outcome` + `obs.ValidOutcome`.
+- [x] `A0-L05` `reason` is a short stable token, not a sentence — it gets grouped on. §15.0 — `obs.SanitizeReason` + `reasonTokenPattern`.
+- [x] `A0-L06` Document the level policy: ERROR means a human must look; WARN self-healed. §15.0 — doc comment on `internal/obs/fields.go`.
+- [ ] `A0-L07` A retried transient provider error logs **WARN**, not ERROR. §15.0 — BLOCKED/not implemented: SchemaFlux retries transient errors internally (see `internal/llm/errors.go`'s `Transient` doc comment); no per-attempt hook is exposed to our logger, so nothing in `internal/llm` or `internal/generate` can log a retry event at all, let alone at WARN. Only the terminal outcome is observable.
+- [x] `A0-L08` Helper that emits the single canonical `run.finished` wide event. §15.0 — `obs.RunFinished`.
+- [x] `A0-L09` Helper that emits the single canonical `http.request` event. §15.0 — `obs.HTTPRequest`.
+- [x] `A0-L10` **No chatty INFO.** Progress detail is DEBUG only. §15.0 — verified no `.Info(`/`LevelInfo` call sites in `internal/generate`/`internal/schedule`/`internal/llm` outside the two canonical helpers; fixed `internal/schedule/runner.go`'s `logOutcomeLocked` which was double-emitting a second, non-canonical `run.finished` per completed run.
+- [x] `A0-L11` Test: a completed run emits exactly one `run.finished` carrying every required field. — `TestRunFinishedEmitsExactlyOneRecordWithEveryField` (`internal/obs/fields_test.go`).
+- [x] `A0-L12` Test: no log record is emitted with a field name outside the canonical set. — `TestNoFieldOutsideCanonicalSet` (`internal/obs/fields_test.go`).
+- [x] `A0-L13` Test: model output never reaches a log field verbatim (RULE-3 + cardinality). — `TestRunFinishedSanitizesReason` (`internal/obs/fields_test.go`).
 
 ### A0-O — OpenTelemetry (§15.0a)
 
@@ -99,10 +104,18 @@ an incident — which is exactly when it is switched on.
 - [x] `A0-T01` Golden-file helper with an `-update` flag; a format change is one flag + a diff. §17.1
 - [x] `A0-T02` Seeded store builder producing a deterministic feed with known items. §17.1
 - [x] `A0-T03` Injected `http.Client` serving `testdata/` for every upstream fetch. §17.1
-- [ ] `A0-T04` Injected clock; no test ever sleeps. §17.1
+- [ ] `A0-T04` Injected clock; no test ever sleeps. §17.1 — RE-VERIFIED 2026-08-10: the previously-cited `internal/schedule` sleeps are gone (`grep -rn "time.Sleep" internal/schedule/` and `internal/generate/` are both now empty — another agent's cleanup landed since this note was written). Still BLOCKED overall: `grep -rn "time.Sleep"` repo-wide still hits `internal/ops`, `internal/flowtest`, `internal/e2e`, `internal/rpc`, `internal/obs`, `internal/bridge`, `internal/sectest`, `internal/store`, and `internal/publish/invalidate_test.go` — none of those are in this pass's editable set (only `internal/publish/server.go`, `internal/sources/`, `internal/llm/`), so "no test ever sleeps" still does not hold repo-wide.
 - [x] `A0-T05` Deterministic ULID source so goldens containing guids are stable. §17.1
 - [x] `A0-T06` `testdata/` layout convention documented in-repo. §17.1
-- [ ] `A0-T07` Assert the default `go test ./...` needs no network and no API key. RULE-1
+- [ ] `A0-T07` Assert the default `go test ./...` needs no network and no API key. RULE-1 — PARTIAL, re-audited 2026-08-10 (was ticked with no evidence): `internal/testutil.InstallNetworkGuard` is a real structural tripwire (blocks any non-loopback dial via `http.DefaultTransport` unless `AFF_LIVE_LLM` is set) and IS wired into `TestMain` in `internal/generate`, `internal/llm`, `internal/novelty`, `internal/sources` — the packages that make provider/upstream calls. But it is NOT installed in `internal/ops` (`alert.go`'s `http.DefaultClient.Do` for the Slack webhook) or `internal/e2e` (`app.go`'s `http.Get`), so "the default `go test ./...`" is not yet structurally guaranteed repo-wide — only in the four packages that had it added.
+      (`internal/testutil/network_guard.go`'s `InstallNetworkGuard` replaces `http.DefaultTransport`'s
+      dialer, blocking any non-loopback dial unless `AFF_LIVE_LLM` is set; wired via `TestMain` in
+      `internal/generate`, `internal/llm`, `internal/novelty`, `internal/sources` — the packages that
+      touch a provider or upstream fetch — and has its own test in `network_guard_test.go`.
+      Second audit 2026-08-10 confirms the gap and leaves this OPEN: neither `internal/ops` nor
+      `internal/e2e` has a `main_test.go`, so nothing installs the guard there while
+      `internal/ops/alert.go:51` calls `http.DefaultClient.Do` and `internal/e2e/app.go:890` calls
+      `http.Get`. RULE-1 is asserted in four packages, not by the default run.)
 - [x] `A0-T08` CI runs `go test -race` on ubuntu — the only place `-race` can run. §17.2
 - [x] `A0-T09` `-shuffle=on` for local runs, knowing it is weaker than `-race`. §17.2
 - [x] `A0-T10` Per-package coverage measured and reported. §17.2
@@ -186,7 +199,11 @@ an incident — which is exactly when it is switched on.
 - [x] `A4-09` `Fatal` **recipe-scoped** (bad model id) disables only that feed. §8
 - [x] `A4-10` Context-length overflow: shrink candidates/recent titles, retry once. §8
 - [x] `A4-11` Wrap every provider call in a context timeout. §8
-- [ ] `A4-12` **Decide cassettes vs a hand-built `FakeProvider`; record the choice.** §8, RULE-1
+- [x] `A4-12` **Decide cassettes vs a hand-built `FakeProvider`; record the choice.** §8, RULE-1
+      (`internal/llm/fake.go`'s doc comment on `FakeProvider` records the decision and reasoning
+      in-repo: a hand-built Fake over SchemaFlux cassettes, because §9.5's novelty embeddings bypass
+      SchemaFlux entirely via a direct `go-openai` call, so cassettes would need two replay
+      mechanisms where one `Provider` fake covers both.)
 - [x] `A4-12a` Use `client.Context(ctx)` on every call — a per-call Client alone does NOT isolate; `With*` mutates process-wide state (§8.1)
 - [x] `A4-12b` **Do not add retry, backoff or a call timeout.** SchemaFlux owns them; two budgets on one call means the shorter silently wins (§8)
 - [x] `A4-12c` Cost is ESTIMATED, not reported: `Generating[T]` returns zero usage. Label it an estimate everywhere it is shown (§8.1, §13)
@@ -208,11 +225,11 @@ an incident — which is exactly when it is switched on.
 - [x] `A4-27` Test: malformed model output rejects the run rather than publishing.
 - [x] `A4-28` Test: two items in one run cannot share a timestamp.
 - [x] `A4-29` Test: a backdated `published_at` is rejected.
-- [ ] `A4-30` One real generation run against OpenAI, manually reviewed for quality. `AFF_LIVE_LLM=1`
-- [ ] `A4-31` Span `llm.generate` comes from SchemaFlux — wire the provider, do not re-instrument. §15.0a
-- [ ] `A4-32` Span `validate` records rejected count and reasons as attributes. §15.0a
-- [ ] `A4-33` Emit `aff_tokens_total` and `aff_cost_usd_total` from the recorded usage. §15.0a
-- [ ] `A4-34` Emit the canonical `run.finished` wide event with every §15.0 field. §15.0
+- [ ] `A4-30` One real generation run against OpenAI, manually reviewed for quality. `AFF_LIVE_LLM=1` — BLOCKED per RULE-1: requires `AFF_LIVE_LLM=1` and a real OpenAI key, and this is an automated verification pass — a paid live call must never happen here. Left open deliberately; run manually.
+- [x] `A4-31` Span `llm.generate` comes from SchemaFlux — wire the provider, do not re-instrument. §15.0a
+- [x] `A4-32` Span `validate` records rejected count and reasons as attributes. §15.0a
+- [x] `A4-33` Emit `aff_tokens_total` and `aff_cost_usd_total` from the recorded usage. §15.0a
+- [x] `A4-34` Emit the canonical `run.finished` wide event with every §15.0 field. §15.0
 
 ## A5 — Novelty
 
@@ -226,8 +243,8 @@ an incident — which is exactly when it is switched on.
 - [x] `A5-08` Seed a corpus of known near-duplicates and assert every one is caught. §18 A5
 - [x] `A5-09` Assert genuinely distinct items are **not** rejected (false-positive guard).
 - [x] `A5-10` Record the chosen threshold and the evidence for it, in-repo.
-- [ ] `A5-11` Span `novelty.check` with `max_cosine` and the verdict as attributes. §15.0a
-- [ ] `A5-12` `aff_items_rejected_total{reason="novelty"}` incremented on a rejection. §15.0a
+- [x] `A5-11` Span `novelty.check` with `max_cosine` and the verdict as attributes. §15.0a — implemented in `filterNovel` (`internal/generate/runner.go`): per-item `obs.Start(ctx, "novelty.check", ...)` with `max_cosine` (the score `CheckVector`/`Check` return) and `verdict` (`novel`|`duplicate`|`error`) attributes.
+- [x] `A5-12` `aff_items_rejected_total{reason="novelty"}` incremented on a rejection. §15.0a — implemented: `filterNovel` now calls the new `recordItemRejected` helper, which wraps `obs.Metrics.RecordItemRejected(ctx, feedSlug, reason)` (reason is `novelty_duplicate` or `novelty_check_failed`, obs/fields.go's existing tokens) on every novelty rejection; previously `RecordItemRejected`/`RecordItemsPublished` were never called from production code at all.
 
 ## A6 — Grounded news
 
@@ -247,9 +264,9 @@ an incident — which is exactly when it is switched on.
 - [x] `A6-14` A dead or reformatted source degrades the feed, never breaks the run. §19
 - [x] `A6-15` Evaluate SchemaFlux `Deduplicate` on the ~40-candidate set; record the decision. §8
 - [x] `A6-16` Summarize-and-link only; never store full upstream article text. §19
-- [ ] `A6-17` Span `sources.fetch` per source: url, status, whether it 304'd, item count. §15.0a
-- [ ] `A6-18` Span `link.integrity` with candidates, accepted, rejected. §15.0a
-- [ ] `A6-19` A rejected link is logged with `reason`, never with the model's raw output. RULE-3
+- [ ] `A6-17` Span `sources.fetch` per source: url, status, whether it 304'd, item count. §15.0a — PARTIAL, re-verified 2026-08-10 (prior note was stale — `internal/sources` IS in scope, and the span now exists): `internal/sources/fetch.go`'s `Fetch` starts `obs.Start(ctx, "sources.fetch", obs.KindRun)` and records `host` (a deliberately bounded stand-in for `url` — see the function's doc comment on why the full URL is never a span attribute) and the HTTP status code, with a 304 response distinguishable from the status code alone (no separate boolean). But `Fetch` returns before parsing; `FetchCandidates` (same file) calls `Fetch` then `Parse` afterward, outside the span's lifetime, so `item count` is never attached to `sources.fetch` at all. Not tickable as literally specified.
+- [x] `A6-18` Span `link.integrity` with candidates, accepted, rejected. §15.0a — implemented in `runAttempt` (`internal/generate/runner.go`): for grounded feeds, `obs.Start(ctx, "link.integrity", ...)` with `candidates` (`len(opts.CandidateURLs)`), `accepted`, `rejected` attributes, counted per-attempt from `Validate`'s `Rejection.Field == "link"`.
+- [x] `A6-19` A rejected link is logged with `reason`, never with the model's raw output. RULE-3 — verified: `CheckLink`'s only call site (`contract.go:247`) discards the raw `error` (which embeds the offending URL) after mapping it through `linkErrorReason`, so only the stable reason token (`link_not_candidate`/`link_invalid`/`link_required_grounded`) ever reaches `Rejection`/`RunRecord.RejectReasons`; no other call site or log statement touches `CheckLink`'s raw error text.
 
 ## A7 — Scheduler
 
@@ -257,7 +274,11 @@ an incident — which is exactly when it is switched on.
 - [x] `A7-02` DST: a run in the skipped hour fires at the next valid instant. §7
 - [x] `A7-03` DST: a run in the repeated hour fires **once**, tracked by `last_fired_slot`. §7
 - [x] `A7-04` Deterministic jitter from `hash(slug)` across the configured window. §14.3
-- [ ] `A7-05` Persist `jitter_offset` so the UI readback matches reality. §14.3
+- [x] `A7-05` Persist `jitter_offset` so the UI readback matches reality. §14.3
+      (`internal/rpc/feed.go`'s `FeedServer.Create` computes the offset with `schedule.Offset(slug, ...)`
+      once and persists it into `feeds.jitter_offset` in the same INSERT — the real RPC path the CLI/UI
+      use. A stale comment in `internal/flowtest/j2_createfeed_test.go` describes an older, lower-level
+      `store.CreateFeed` stand-in that predates this RPC-level fix; it does not describe current behavior.)
 - [x] `A7-06` Worker pool capped by `AFF_MAX_CONCURRENT_RUNS`. §14.3
 - [x] `A7-07` Global provider semaphore **shared with sampling**. §13
 - [x] `A7-08` Per-feed single-flight via a DB run lock with heartbeat. §13
@@ -271,9 +292,9 @@ an incident — which is exactly when it is switched on.
 - [x] `A7-16` Injectable clock; no sleeping in tests. §17
 - [x] `A7-17` Test: both DST cases fire exactly once.
 - [x] `A7-18` Test: 20 feeds on an identical cron spread across the jitter window. §17
-- [ ] `A7-19` Root span `generation.run` with `feed_slug`, `trigger`, `outcome`. §15.0a
-- [ ] `A7-20` `aff_runs_total` and `aff_run_duration_seconds` on every terminal state. §15.0a
-- [ ] `A7-21` Budget refusals increment `aff_runs_total{outcome="skipped"}`, not an error. §13
+- [x] `A7-19` Root span `generation.run` with `feed_slug`, `trigger`, `outcome`. §15.0a
+- [x] `A7-20` `aff_runs_total` and `aff_run_duration_seconds` on every terminal state. §15.0a
+- [x] `A7-21` Budget refusals increment `aff_runs_total{outcome="skipped"}`, not an error. §13
 
 ## A8 — Sampling
 
@@ -308,11 +329,31 @@ an incident — which is exactly when it is switched on.
 - [x] `A9-17` `robots.txt`. §6
 - [x] `A9-18` Test: 304 on both validators; 405; 410; gzip correctness; `Vary` present. §17
 - [x] `A9-19` End-to-end: generate → fetch → validator passes → item appears once over two polls. §17
-- [x] `A9-20` Span `http.request` with route, status, and cache result (hit|miss|304). §15.0a
-- [x] `A9-21` Child span `render.feed` on a cache miss only — a hit must stay cheap. §15.0a
-- [x] `A9-22` `aff_http_requests_total` and `aff_cache_hits_total`; the 304 ratio is the number that matters. §15.0a
-- [x] `A9-23` Publish-plane requests are ratio-sampled; errors always sampled. §15.0a
-- [x] `A9-24` Emit the canonical `http.request` event once per request, not per stage. §15.0
+- [ ] `A9-20` Span `http.request` with route, status, and cache result (hit|miss|304). §15.0a
+      (RE-VERIFIED 2026-08-10, code changed under this audit: `internal/publish/server.go` now has a
+      single `(*server).observe` deferred once per handler — real progress since this was first
+      un-ticked — but it only calls `obs.HTTPRequest` (a log event) and
+      `Metrics.RecordHTTPRequest`/`RecordCacheResult`. No `obs.Start`/span of any kind exists in
+      `internal/publish` — `grep -n "obs.Start" internal/publish/*.go` is empty. No trace is ever
+      started for a publish-plane request.)
+- [ ] `A9-21` Child span `render.feed` on a cache miss only — a hit must stay cheap. §15.0a
+      (still not implemented — no spans at all in `internal/publish`, see A9-20.)
+- [ ] `A9-22` `aff_http_requests_total` and `aff_cache_hits_total`; the 304 ratio is the number that matters. §15.0a
+      (RE-VERIFIED 2026-08-10: `observe`'s calls to `RecordHTTPRequest`/`RecordCacheResult` are guarded
+      by `if m := s.deps.Metrics; m != nil`, and `cmd/animefeedflux/wire.go`'s `buildPublishPlane`
+      constructs `publish.Deps{...}` WITHOUT ever setting `Metrics` — it stays nil in the real
+      composition root, so these two counters never increment in production despite the call site
+      now existing. Caller exists; the composition root forgot to wire it, same pattern as C4-08/C4-15.)
+- [ ] `A9-23` Publish-plane requests are ratio-sampled; errors always sampled. §15.0a
+      (still not implemented — no span is ever started for a publish-plane request, so there is no
+      sampling decision to make; see A9-20.)
+- [ ] `A9-24` Emit the canonical `http.request` event once per request, not per stage. §15.0
+      (RE-VERIFIED 2026-08-10: `obs.HTTPRequest` IS now called exactly once per request via
+      `observe`'s single deferred call — but `buildPublishPlane`'s `publish.Deps{...}` also never sets
+      `Logger`, so `Deps.logger()` falls back to `slog.Default()` (Go's stock stderr text logger) —
+      nothing in `cmd/animefeedflux` ever calls `slog.SetDefault` to point it at the app's canonical
+      structured/stdout logger built for A0-07. The event fires, but not through the canonical
+      pipeline the rest of the app uses; same missing-wiring pattern as A9-22.)
 
 ## AF — Fuzz, soak, and load (cross-cutting; land as the pieces they target land)
 
@@ -360,14 +401,18 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 
 **Pepper (optional, defence in depth)**
 
-- [ ] `SEC-07` `HMAC-SHA256(pepper, argon2idOutput)` before storage; pepper from env, never in the DB. §4
-      (wired, but in the wrong order — `internal/rpc/auth.go`'s Login/ChangePassword/CompletePasswordReset/
-      rehashAdminPassword now pepper the PASSWORD STRING before argon2id via `pepperCandidate`, not the argon2id
-      OUTPUT as this task and `pepper.go`'s own doc comment specify; `VerifyPeppered` — the post-hash function
-      matching the stated construction — has no production caller. A pepper is applied now, just not this one.)
+- [x] `SEC-07` `HMAC-SHA256(pepper, argon2idOutput)` before storage; pepper from env, never in the DB. §4
+      (fixed order — `internal/auth/password.go`'s `HashPeppered`/`VerifyPasswordPeppered` now apply
+      `Pepper` to the argon2id OUTPUT, not the password string, and `internal/rpc/auth.go`'s
+      Login/ChangePassword/CompletePasswordReset/rehashAdminPassword all call through those two
+      functions — `pepperCandidate`'s pre-hash ordering is gone. `pepper.go`'s `VerifyPeppered` now
+      has its real caller via `VerifyPasswordPeppered`.)
 - [x] `SEC-08` `pepper_version` column from day one — without it rotation is impossible, not merely hard. §4
 - [x] `SEC-09` Migration adding `password_version` and `pepper_version`. §10
-- [ ] `SEC-10` Test: a database dump alone (salt + params + hash, no pepper) does not permit verification.
+- [x] `SEC-10` Test: a database dump alone (salt + params + hash, no pepper) does not permit verification.
+      (`internal/sectest/sec10_pepper_dump_test.go`'s `TestPepper_DatabaseDumpAloneDoesNotVerify`
+      proves the negative — unpeppered `Verify` and `VerifyPasswordPeppered` with nil/wrong pepper
+      both fail against a `HashPeppered` row — and the complement with the correct pepper; passes.)
 
 **Password policy — NIST SP 800-63B, which looks unfamiliar on purpose**
 
@@ -389,7 +434,11 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 - [x] `SEC-18` Store **only** `SHA-256(token)` — the sessions table must hold no usable credential. §4
 - [x] `SEC-19` SHA-256 not argon2id here, and a comment saying why: there is no brute-forceable
       space in 256 random bits, so a memory-hard KDF buys nothing and costs latency. §4
-- [ ] `SEC-20` Test: the stored value cannot be replayed as a cookie.
+- [x] `SEC-20` Test: the stored value cannot be replayed as a cookie.
+      (`internal/sectest/sec20_stored_hash_replay_test.go`'s
+      `TestSessionHash_StoredValueCannotBeReplayedAsCookie` drives the real production path —
+      `rpc.AuthServer`'s interceptor via a live `Session` call — presents the DB-stored SHA-256 as
+      the cookie and gets `Unauthenticated`, then proves the real raw token still authenticates; passes.)
 
 **Cookie**
 
@@ -397,7 +446,9 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 - [x] `SEC-22` **Never set `Domain`** — `__Host-` is only honoured without it. §4
 - [x] `SEC-23` Test asserting every flag, and asserting `Domain` is absent.
 - [x] `SEC-24` Never place the token in localStorage, sessionStorage, IndexedDB or WASM memory. §4
-- [ ] `SEC-25` D-phase check: grep the built WASM bundle for the cookie name and fail if present.
+- [x] `SEC-25` D-phase check: grep the built WASM bundle for the cookie name and fail if present.
+      (`scripts/check-wasm-secrets.sh` exists and was run against a real built `web/dist/app.wasm` —
+      not skipped, exit 0/PASS: cookie name absent, no storage-sink-near-token-identifier hit.)
 
 **WebSocket upgrade**
 
@@ -412,16 +463,23 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 
 **Reset and single-use tokens**
 
-- [ ] `SEC-31` Reset tokens are 256-bit opaque, SHA-256 in the DB, single-use, expiring — never a JWT. §4
-      (primitive only — `internal/auth/reset.go`'s `NewResetToken`/`VerifyResetToken` are implemented and tested
-      as 256-bit/SHA-256/TTL-bound, but no RPC handler anywhere issues or consumes one — grep of `internal/rpc`
-      and `cmd` finds zero references — so "single-use" is only representable in the schema, not enforced)
+- [x] `SEC-31` Reset tokens are 256-bit opaque, SHA-256 in the DB, single-use, expiring — never a JWT.
+      **Deliberately not a proto RPC, ever** — see §12.2's reachability decision: an unauthenticated
+      caller minting its own reset token is an unauthenticated account-takeover primitive, and there
+      is no channel to deliver a token anywhere the issuing machine hasn't already touched. §4
+      (`internal/auth/reset.go`'s `NewResetToken`/`VerifyResetToken` are 256-bit/SHA-256/TTL-bound;
+      `internal/rpc/auth.go`'s `IssuePasswordResetToken`/`CompletePasswordReset` are ordinary Go
+      methods with no proto route, called only by `cmd/aff/admin_cmd.go`'s `cmdAdminResetPassword` in
+      the same process, which mints and consumes the token in one call before it is ever displayed,
+      logged, or carried anywhere. `internal/rpc/auth_test.go`'s `TestPasswordResetNotOnGRPCSurface`
+      fails if either method is ever added to `AuthService_ServiceDesc.Methods`.)
 - [x] `SEC-32` Migration for `password_reset_tokens(token_hash, expires_at, used_at)`. §10
-- [ ] `SEC-33` **Using a reset revokes every existing session** — a reset that leaves old sessions
-      alive has not locked anyone out. §4 (implemented and tested — `internal/rpc/auth.go`'s
-      `CompletePasswordReset` revokes all sessions in the same transaction, proven by
-      `TestPasswordResetRevokesAllSessionsIncludingPreExisting` — but `CompletePasswordReset` itself has zero
-      callers: no proto RPC route, no CLI command. Correct code, unreachable.)
+- [x] `SEC-33` **Using a reset revokes every existing session** — a reset that leaves old sessions
+      alive has not locked anyone out. §4 (`internal/rpc/auth.go`'s `CompletePasswordReset` revokes
+      all sessions in the same transaction, proven by
+      `TestPasswordResetRevokesAllSessionsIncludingPreExisting`, and is reachable via
+      `cmd/aff/admin_cmd.go`'s `cmdAdminResetPassword` — the local-only CLI caller, deliberately the
+      only one; see SEC-31 and §12.2.)
 - [x] `SEC-34` Test: a used token is refused; an expired token is refused; sessions are gone after use.
       (now real function-level tests, not schema-only — `internal/rpc/auth_test.go`'s
       `TestPasswordResetIsSingleUse`, `TestPasswordResetSingleUseUnderConcurrency`,
@@ -503,7 +561,14 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 - [x] `B2-03` Check `Origin` against `AFF_ALLOWED_ORIGINS` at upgrade. §4
 - [x] `B2-04` Pair client keepalive with server `EnforcementPolicy` — the known GOAWAY flap. §3
 - [x] `B2-05` Session revocation terminates in-flight streams. §4
-- [x] `B2-06` Verify `SampleStream` and `RunService.Watch` actually stream through the bridge. §11
+- [ ] `B2-06` Verify `SampleStream` and `RunService.Watch` actually stream through the bridge. §11
+      (UNTICKED 2026-08-10 — was marked done against unit-level coverage only. `internal/rpc/sample_test.go`
+      exercises `SampleStream` with a `fakeStream` explicitly documented as "without a network
+      connection"; `RunService.Watch` has no bridge test at all — `internal/flowtest/j9_watch_test.go`
+      `t.Skip`s both BF-40/BF-41 for exactly this reason. `internal/e2e/lifecycle_test.go`'s
+      `TestLifecycle` now passes end-to-end over the real bridge, but only exercises the unary
+      `SampleService.Sample`, never `SampleStream` or `RunService.Watch`. Neither streaming RPC has
+      ever been driven through a real WebSocket bridge connection.)
 - [x] `B2-07` Test: an upgrade from a disallowed `Origin` is rejected. §17
 
 ## B3 — CLI
@@ -518,7 +583,7 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 - [x] `B3-08` `aff runs [--feed] [--status]` history. §11
 - [x] `B3-09` `aff item list|get|create|update|delete|restore|correct`. §12.4
 - [x] `B3-10` `aff system stats|kill-switch|backup|version`. §11
-- [ ] `B3-11` **Drive the full lifecycle of one feed end to end with only the CLI.** §18 B3
+- [ ] `B3-11` **Drive the full lifecycle of one feed end to end with only the CLI.** §18 B3 — BLOCKED (out of scope): this is a `cmd/aff` integration test, outside this pass's editable set. No such test found; not implemented.
 
 ## BF — Flow sanity tests, headless (§22, §17.5)
 
@@ -546,7 +611,7 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [x] `BF-16` **J4** promote: exactly one new item, `origin = sampled`. §22
 - [x] `BF-17` J4: `published_at` strictly greater than the previously newest item. §22
 - [x] `BF-18` J4: fresh ULID, and the guid contains it. §22
-- [ ] `BF-19` J4: render cache invalidated and `lastBuildDate` bumped. §22
+- [x] `BF-19` J4: render cache invalidated and `lastBuildDate` bumped. §22 — `internal/flowtest/j4_promote_test.go`'s `TestJ4_LastBuildDateReflectsThePromotedItem` and `TestJ4_PromoteInvalidatesRenderCache` both pass.
 - [x] `BF-20` J4: item appears exactly once in all three formats. §22
 - [x] `BF-21` J4: a timestamp collision retries at +1s, no constraint error escapes. §22
 - [x] `BF-22` **J5** diagnose: every run reaches a terminal status; none left `running`. §22
@@ -559,7 +624,7 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [x] `BF-29` J6: the original is still resolvable at its permalink. §22
 - [x] `BF-30` J6: a plain edit produces no new guid and therefore no redelivery. §22
 - [x] `BF-31` **J7** recover: the consumed code is marked used and refused on reuse. §22
-- [ ] `BF-32` J7: the elevated session reaches **only** password change and TOTP re-enrollment. §22
+- [ ] `BF-32` J7: the elevated session reaches **only** password change and TOTP re-enrollment. §22 (`internal/flowtest/j7_recovery_test.go`'s `TestJ7_ElevatedSessionScope_Skip` is a `t.Skip` stub — its own comment claims the scope concept doesn't exist yet, but that's now STALE: `migrations/0005_session_scope.sql` adds `sessions.scope CHECK IN ('full','elevated')` and `internal/rpc/interceptor.go` enforces it. The stub has not been rewritten into a real assertion since.)
 - [x] `BF-33` J7: all other sessions were revoked. §22
 - [x] `BF-34` J7: remaining-code count decremented by exactly one. §22
 - [x] `BF-35` J7: the recovery attempt appears in `auth_events`. §22
@@ -567,10 +632,10 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [x] `BF-37` J8: editing the price table does **not** rewrite historical run costs. §22
 - [x] `BF-38` J8: a feed at its cap logs a skipped run with a distinct status. §22
 - [x] `BF-39` J8: sampling spend appears in the same totals as scheduled spend. §22
-- [ ] `BF-40` **J9** watch: the stream terminates when the run does, in every branch. §22
-- [ ] `BF-41` J9: a dropped socket does **not** abort the run. §22
+- [ ] `BF-40` **J9** watch: the stream terminates when the run does, in every branch. §22 (`internal/flowtest/j9_watch_test.go`'s `TestJ9_StreamTerminatesWithRun_Skip` is a `t.Skip` stub whose reasoning is stale — see `B2-06`'s note: `RunService.Watch` exists (`internal/rpc/run.go:675`) but has never been driven through a real bridge connection, which is what this stub is actually waiting on)
+- [ ] `BF-41` J9: a dropped socket does **not** abort the run. §22 (same stale-stub situation as `BF-40` — `TestJ9_DroppedSocketDoesNotAbortRun_Skip`)
 - [x] `BF-42` J9: reconnecting shows true current state, not a stale snapshot. §22
-- [ ] `BF-43` J9: progress events never claim items that were not committed. §22
+- [ ] `BF-43` J9: progress events never claim items that were not committed. §22 (same stale-stub situation — `TestJ9_ProgressEventsNeverClaimUncommittedItems_Skip`; its comment claims no progress-event type exists, worth re-checking against the current `RunServiceWatchResponse` shape rather than trusting the comment)
 - [x] `BF-44` **J10** subscriber: feed validates with zero warnings in all three formats. §22
 - [x] `BF-45` J10: every item has a unique, strictly decreasing `pubDate`. §22
 - [x] `BF-46` J10: **each item delivered exactly once across many polls** — real HTTP, ≥2 cycles. §17.5
@@ -579,7 +644,7 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [x] `BF-49` J10: no trivia answer in `description` or `og:description`. §22
 - [x] `BF-50` J10: an edited item is not redelivered; a correction **is**. §22
 - [x] `BF-51` J10: a backdated item is delivered to nobody. RULE-7
-- [ ] `BF-52` Wire the whole `BF` suite into CI as a required gate. §17.2
+- [x] `BF-52` Wire the whole `BF` suite into CI as a required gate. §17.2 — `.github/workflows/ci.yml`'s "go test -race (full suite, no -short...)" step runs plain `go test -race ./...` (no `continue-on-error`), which includes `internal/flowtest` unconditionally; a `BF` failure fails that required job.
 
 ---
 
@@ -609,32 +674,43 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 
 ## C1 — Pipeline
 
-- [ ] `C1-01` GitHub repo created and the local repo pushed. **Ask before creating.**
-- [ ] `C1-02` Actions workflow: checkout, test, `make validate`, then build.
-- [ ] `C1-03` **A failing test must fail the job before any push.** §15.3
-- [ ] `C1-04` Push to GHCR authenticated with `GITHUB_TOKEN`. §15.2
-- [ ] `C1-05` Tag with `sha-<short-commit>` on every build — the immutable one. §15.2
-- [ ] `C1-06` Tag `v<semver>` on release tags only. §15.2
-- [ ] `C1-07` Tag `latest` on `main`, and **never deploy it**. §15.2
-- [ ] `C1-08` Layer caching between runs.
-- [ ] `C1-09` **Deploy job in the same workflow run** — `GITHUB_TOKEN` pushes trigger nothing. §15.3
-- [ ] `C1-10` Deploy over SSH with a scoped deploy user and a known host key. §16
-- [ ] `C1-11` Deploy writes the new tag, then `docker compose pull && up -d`. §15.3
-- [ ] `C1-12` **Deploy waits on the healthcheck and fails the job if it never goes healthy.** §15.3
-- [ ] `C1-13` Scheduled `docker image prune` so a 60 GB disk does not fill quietly. §15.3
-- [ ] `C1-14` Install Docker and the compose plugin on the droplet.
-- [ ] `C1-15` Confirm Docker's DNAT rules do not expose anything past `ufw`. §19
+- [x] `C1-01` GitHub repo created and the local repo pushed. **Ask before creating.**
+- [x] `C1-02` Actions workflow: checkout, test, `make validate`, then build.
+- [x] `C1-03` **A failing test must fail the job before any push.** §15.3
+- [x] `C1-04` Push to GHCR authenticated with `GITHUB_TOKEN`. §15.2
+- [x] `C1-05` Tag with `sha-<short-commit>` on every build — the immutable one. §15.2
+- [x] `C1-06` Tag `v<semver>` on release tags only. §15.2
+- [x] `C1-07` Tag `latest` on `main`, and **never deploy it**. §15.2
+- [x] `C1-08` Layer caching between runs.
+- [x] `C1-09` **Deploy job in the same workflow run** — `GITHUB_TOKEN` pushes trigger nothing. §15.3
+- [ ] `C1-10` Deploy over SSH with a scoped deploy user and a known host key. §16 — host key pinning is done (`DEPLOY_KNOWN_HOSTS`, release.yml); the "scoped deploy user" half is droplet state (a non-root user in the `docker` group only) that no file in this repo creates or asserts, so it can't be closed by reading. Verify on the droplet: `id <deploy-user>` (not root, no unneeded sudo) and that it can run `docker compose` without `sudo`.
+- [x] `C1-11` Deploy writes the new tag, then `docker compose pull && up -d`. §15.3
+- [x] `C1-12` **Deploy waits on the healthcheck and fails the job if it never goes healthy.** §15.3
+- [ ] `C1-13` Scheduled `docker image prune` so a 60 GB disk does not fill quietly. §15.3 — release.yml only prunes as the last step of a deploy (deploy-triggered, not calendar-scheduled), so disk can still grow between releases. Needs either an `on: schedule` cron workflow (out of my edit scope: `.github/workflows/`) or a systemd timer added in `scripts/deploy-bootstrap.sh` (out of my edit scope: only `scripts/check-container.sh` is mine to touch this round) running `docker image prune -af --filter "until=720h"` on a cadence independent of deploys.
+- [ ] `C1-14` Install Docker and the compose plugin on the droplet. — `scripts/deploy-bootstrap.sh` §1 does this correctly (idempotent, checks `docker compose version` first, installs from Docker's own apt repo). Not tickable by reading alone — the task is the droplet's actual state. Complete it by running `sudo sh scripts/deploy-bootstrap.sh <home-ip>/32` on the droplet.
+- [ ] `C1-15` Confirm Docker's DNAT rules do not expose anything past `ufw`. §19 — compose already binds `127.0.0.1` only (mitigation in place) and `deploy/RUNBOOK.md` ("publishing past `ufw`") already has the exact reproduction command. Needs a live droplet to run: `sudo iptables -t nat -L DOCKER -n | grep 931` (expect `127.0.0.1:9310`/`9311` as the destination, not `0.0.0.0`) and `curl -m 5 http://<droplet-public-ip>:9311/` from outside the box (must time out/refuse).
 
 ## C2 — Staging
 
-- [ ] `C2-01` DNS for `staging.anime.earlcameron.com`. §18 C2
-- [ ] `C2-02` nginx vhost proxying to the container's loopback port. §15
-- [ ] `C2-03` TLS certificate issued and renewing.
+- [ ] `C2-01` DNS for `staging.anime.earlcameron.com`. §18 C2 (external prerequisite — no droplet or
+      registrar access from this repo; see `docs/deploy-readiness.md`)
+- [ ] `C2-02` nginx vhost proxying to the container's loopback port. §15 (no `deploy/nginx/staging.*`
+      existed at all before this pass — `scripts/deploy-bootstrap.sh AFF_DEPLOY_MODE=staging` now
+      generates a publish-only staging vhost on the deployed box; unticked because it has not run
+      against a real droplet — see `docs/deploy-readiness.md`)
+- [ ] `C2-03` TLS certificate issued and renewing. (`deploy-bootstrap.sh` now checks DNS resolves
+      before calling certbot, so a not-yet-live DNS record fails with an explicit message instead of
+      certbot's generic connect error; renewal itself relies on certbot's own systemd timer, unverified
+      since nothing is deployed — see `docs/deploy-readiness.md`)
 - [x] `C2-04` `proxy_http_version 1.1` with `Upgrade`/`Connection` headers. §20
 - [x] `C2-05` `proxy_read_timeout` long enough to outlive an idle admin session. §20
 - [x] `C2-06` **`proxy_buffering off`** or streaming RPCs arrive in one lump. §20
 - [ ] `C2-07` Deploy the current image to staging and confirm feeds are publicly fetchable.
+      (`scripts/deploy-release.sh` + `scripts/deploy-verify.sh` already cover this end to end; needs a
+      real staging host to run against)
 - [ ] `C2-08` Run the external feed validator against the **live** staging URL. §5.6
+      (`scripts/deploy-verify.sh AFF_VERIFY_BASE_URL=https://staging...` already covers this; needs a
+      real staging host)
 
 ## C3 — Slack proof
 
@@ -665,8 +741,15 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
       backup-absence check (`Check`, reused from the staleness watchdog) finds no successful backup within the
       grace window — carrying the last successful timestamp either way. Every alert failure itself degrades to a
       log line rather than compounding.)
-- [ ] `C4-06` **Restore into a scratch instance and confirm identical feeds.** §19 (requires a real deployment —
-      nothing is deployed anywhere; `ops.Restore` is unit-tested but the drill itself has not been performed)
+- [x] `C4-06` **Restore into a scratch instance and confirm identical feeds.** §19 — performed locally against
+      the dev database (`.devrun/aff.db`, 3 seeded feeds): `aff backup --db .devrun/aff.db` → `aff restore --from
+      <snapshot> --to <scratch path>` → served the restored copy with `animefeedflux.exe` on a separate port
+      (`AFF_GENERATION_ENABLED=false`, admin listener untouched). Fetched all 9 endpoints (xml/atom/json ×3 feeds)
+      from both the live dev server and the scratch instance: JSON feeds byte-identical; RSS/Atom differed only
+      in `lastBuildDate`/`updated`, which are computed at render time from the request clock, not stored data —
+      every item, guid, title, and body matched. Scratch process killed after (PID confirmed via
+      `Get-Process animefeedflux`, distinct from the live dev server's PID); live dev server on :8081 undisturbed
+      throughout and confirmed healthy after.
 - [x] `C4-07` Staleness watchdog comparing last success against schedule plus grace. §15
 - [ ] `C4-08` Surface stale feeds on `/healthz` and via the Slack webhook. §15 (webhook half exists —
       `ops.Notify` — but nothing wires `ops.Check`'s stale list into the `/healthz` handler; not surfaced there)
@@ -675,25 +758,45 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [x] `C4-11` Boot watchdog releases stale run locks. §15
 - [x] `C4-12` A stale run found **with** committed items is `completed_unconfirmed`, not a failure. §15
 - [x] `C4-13` Nightly prune: expired samples, old embeddings, `runs` past 180 days except failures. §15
-- [ ] `C4-14` Test: kill after the model returns but before commit → interrupted, zero items. §17
-- [ ] `C4-15` Expose per-feed last-success age and error counts on `/healthz`. §15
-- [ ] `C4-16` Export `aff_feed_staleness_seconds` so the watchdog's number is graphable. §15.0a
-- [ ] `C4-17` Point `OTEL_EXPORTER_OTLP_ENDPOINT` at a hosted backend; **no local collector** on a 2GB box. §15.0a
-- [ ] `C4-18` Verify a failing exporter degrades silently and does not stall a run. §15.0a
-- [ ] `C4-19` Confirm providers flush on SIGTERM before the container exits. §15
+- [x] `C4-14` Test: kill after the model returns but before commit → interrupted, zero items. §17 — `internal/store/crash_test.go`'s `TestCrashBeforeCommitLeavesRunInterruptedWithZeroItems` fires a simulated pre-commit crash inside `CommitRun`'s transaction and asserts the run lands `interrupted` with zero items.
+- [ ] `C4-15` Expose per-feed last-success age and error counts on `/healthz`. §15 (the shape exists — `internal/publish/health.go`'s `BuildHealthReport`/`FeedHealth` carry `AgeSeconds`/`ErrorCount` — but `Deps.HealthFeeds` is never populated anywhere in `cmd/animefeedflux`, so it stays `nil` at runtime and `/healthz` never actually includes it; caller does not exist)
+- [x] `C4-16` Export `aff_feed_staleness_seconds` so the watchdog's number is graphable. §15.0a — `internal/ops/schedule.go`'s `recordStalenessMetric` calls `Metrics.RecordFeedStaleness`, and `cmd/animefeedflux/wire.go:1255` wires the real `metrics` (backed by `obs.Setup`'s `MeterProvider`) into `ops.NewScheduler`'s `SchedulerConfig.Metrics` — reachable end to end, not just unit-tested.
+- [ ] `C4-17` Point `OTEL_EXPORTER_OTLP_ENDPOINT` at a hosted backend; **no local collector** on a 2GB box. §15.0a (a deploy/config action against a live backend; nothing is deployed)
+- [x] `C4-18` Verify a failing exporter degrades silently and does not stall a run. §15.0a — `internal/obs/otel_test.go`'s `TestOtlpExporterHangingEndpointDoesNotStallShutdown` proves `Setup` against a hanging OTLP endpoint doesn't fail construction and `shutdown` returns bounded near the internal 5s timeout rather than hanging.
+- [x] `C4-19` Confirm providers flush on SIGTERM before the container exits. §15 — `cmd/animefeedflux/wire_test.go`'s `TestRunAllWiresObsSetupAndFlushesOnShutdown` drives `runAll` end to end (the real SIGTERM-triggered shutdown path via ctx cancellation), records a metric, and asserts it reached the stdout exporter only after `runAll` returned — proving the composition root's deferred `obsShutdown` actually runs and flushes.
 
 ## C5 — Production deploy
 
-- [ ] `C5-01` DNS for `anime.earlcameron.com` and `admin.anime.earlcameron.com`. §2
-- [ ] `C5-02` nginx vhosts for both, TLS on both. §15
-- [ ] `C5-03` **IP allowlist on the admin host** (home IP). §4
-- [ ] `C5-04` Confirm the admin host is unreachable from off-allowlist.
-- [ ] `C5-05` Production compose pins a `sha-` tag, never `latest`. §15.2
-- [ ] `C5-06` Production `env_file` with real secrets at 0600. §15.4
-- [ ] `C5-07` First production deploy; feeds live and validating.
+- [ ] `C5-01` DNS for `anime.earlcameron.com` and `admin.anime.earlcameron.com`. §2 (external
+      prerequisite — no droplet or registrar access from this repo; see `docs/deploy-readiness.md`)
+- [ ] `C5-02` nginx vhosts for both, TLS on both. §15 (`scripts/deploy-bootstrap.sh` already covers
+      both vhosts and both certs end to end, now with a DNS-resolves pre-check before calling
+      certbot; needs a real production droplet to run against)
+- [ ] `C5-03` **IP allowlist on the admin host** (home IP). §4 (`deploy-bootstrap.sh` already refuses
+      to install/enable the admin vhost while the checked-in placeholder CIDR is in effect on the
+      deployed box, and refuses `0.0.0.0/0`/`::/0` outright — verified still true this pass; needs a
+      real CIDR and a real host)
+- [ ] `C5-04` Confirm the admin host is unreachable from off-allowlist. (not scriptable — needs a
+      vantage point off the allowlist, e.g. a phone on cellular data; commands documented in
+      `docs/deploy-readiness.md` and `deploy/RUNBOOK.md`)
+- [ ] `C5-05` Production compose pins a `sha-` tag, never `latest`. §15.2 (`deploy-release.sh`
+      already refuses to deploy a `latest` tag outright — enforced, not just documented)
+- [ ] `C5-06` Production `env_file` with real secrets at 0600. §15.4 (`deploy-bootstrap.sh` already
+      seeds the file at 0600 from the example and re-asserts the mode every run; filling in real
+      values is a manual `sudo -e` step by design — see the file's own header comment)
+- [ ] `C5-07` First production deploy; feeds live and validating. (`deploy-release.sh` +
+      `deploy-verify.sh` already cover this end to end, including the health gate; needs a real
+      production host and an image tag to run against)
 - [ ] `C5-08` **Perform an actual rollback to the previous tag and confirm service.** §18
+      (`scripts/rollback.sh`, unmodified, plus `deploy-release.sh`'s `.previous-tag` recording already
+      give this a mechanism; the drill itself cannot be performed until something is actually deployed)
 - [ ] `C5-09` Confirm a push to `main` reaches the running service with no manual step. §19
-- [ ] `C5-10` Point Slack at production and confirm continuity. §5.5
+      (`.github/workflows/release.yml`, unmodified, already checks for `DEPLOY_HOST` and skips
+      gracefully rather than failing when it's unset; blocked on the `DEPLOY_HOST`/`DEPLOY_USER`/
+      `DEPLOY_SSH_KEY`/`DEPLOY_KNOWN_HOSTS` GitHub repo secrets being configured, which is external to
+      this repo)
+- [ ] `C5-10` Point Slack at production and confirm continuity. §5.5 (manual, depends on `C3`'s Slack
+      workspace existing first)
 
 ---
 
@@ -752,127 +855,268 @@ one owner, not because a second language is planned.
 
 ## D0 — Shell
 
-- [ ] `D0-01` GWC (v5 pin) project set up under `web/`, building to WASM. §3
-- [ ] `D0-02` WASM build in an isolated scratch directory — the known concurrent-build race. §15
-- [ ] `D0-03` Emit `.wasm.gz` and serve with correct `Content-Encoding`. §12
+- [x] `D0-01` GWC (v5 pin) project set up under `web/`, building to WASM. §3
+      (`go.mod` pins `github.com/monstercameron/GoWebComponents/v5 v5.0.1`; `web/main.go` +
+      `web/build.sh` build it to WASM, per D0-02/D0-03.)
+- [x] `D0-02` WASM build in an isolated scratch directory — the known concurrent-build race. §15
+- [x] `D0-03` Emit `.wasm.gz` and serve with correct `Content-Encoding`. §12
 - [x] `D0-04` HTML shell with a correct **`<base href>`** or deep links and refreshes break. §12
-- [ ] `D0-05` Client-side router for the five routes. §12
+- [x] `D0-05` Client-side router for the five routes. §12
 - [x] `D0-06` gRPC-over-WS client wired to the bridge. §3
 - [x] `D0-07` Auth guard: `ANON` reaching an authed route redirects to `/login`. D-FLOW
-- [ ] `D0-08` Session expiry mid-session drops to `ANON` without losing unsaved work silently. D-FLOW
+- [x] `D0-08` Session expiry mid-session drops to `ANON` without losing unsaved work silently. D-FLOW
 - [x] `D0-09` **`DISCONNECTED` banner with automatic reconnect and backoff.** D-FLOW
-- [ ] `D0-10` Queue or refuse mutations while `DISCONNECTED` — never fail silently. D-FLOW
-- [x] `D0-11` Design tokens: colour, type scale, spacing. Load the frontend-design skill first.
-- [x] `D0-12` Light and dark handling decided once, at the token layer.
+- [x] `D0-10` Queue or refuse mutations while `DISCONNECTED` — never fail silently. D-FLOW
+- [ ] `D0-11` Design tokens: colour, type scale, spacing. Load the frontend-design skill first.
+      — UNTICKED 2026-08-10, was ticked in error: the tokens exist in `web/tokens`, but the visible
+      product mostly doesn't source from them — `web/static/index.html`'s hand-written `<style>`
+      block hardcodes colour directly (e.g. `.af-banner { background: #7a1f1f; }`) instead of a
+      token, and of the 103 unique `af-*`/`history-*` classes the pages emit, only the ~38 shared
+      primitives in `web/ui` read a token via `css.Var`/`tokens.*` — the rest have no rule at all.
+      A token layer that exists but that the shipped screens mostly bypass is not "decided," it's
+      unused. See `D0-24`..`D0-27`.
+- [ ] `D0-12` Light and dark handling decided once, at the token layer.
+      — UNTICKED 2026-08-10, was ticked in error, same evidence as `D0-11`: `web/tokens/theme.go`'s
+      `Emit()` had zero callers until this pass wired it into `web/shell/app.go:152` (see that
+      file's comment: "Nothing caught it... It took a screenshot"), so the light/dark decision
+      never reached a rendered element. `Emit()` now runs, but it only populates `:root`'s custom
+      properties — it does not retroactively give the 103 unmapped `af-*`/`history-*` classes a
+      rule that reads them, so most of the admin UI still has no theme-aware styling at all.
 - [x] `D0-13` Shared primitives: button, input, select, toggle, table, tabs, modal, toast, kebab menu.
-- [ ] `D0-14` Shared `loading` / `empty` / `error` components used by every list. D-FLOW
+- [ ] `D0-14` Shared `loading` / `empty` / `error` components used by every list. D-FLOW (the shared components exist — `web/ui/state.go`'s `StatePanel`/`SelectListState` — and generate and settings use them, but **not every list does**: `web/pages/history/screenstate.go` is a second, parallel six-state implementation with no `ui.` dependency, so runs and items resolve their states through different code than the rest of the app. Two implementations is the thing this task exists to prevent.)
 - [x] `D0-15` Destructive actions live behind a `⋯` kebab, never a primary button. §12.6
 - [x] `D0-16` Typed-confirmation modal for irreversible actions. §12.6
-- [ ] `D0-17` GWC discipline: hooks unconditional and positional. §12.6
-- [ ] `D0-18` No `UseAtom` in render-only paths. §12.6
-- [ ] `D0-19` Declared effect deps; no browser-state reads in the render body. §12.6
+- [x] `D0-17` GWC discipline: hooks unconditional and positional. §12.6 — no conditional `UseState`/`UseEffect`/`UseReducer` in any render path across `web/`; the trap is called out explicitly in `web/shell/banner.go` and `web/pages/generate/render_editor.go`, and `render_sampler.go` keeps a fiber's hook count fixed by registering `OnCancel` unconditionally under `h.If(true, ...)`.
+- [x] `D0-18` No `UseAtom` in render-only paths. §12.6 — the hook form `state.UseAtomKey` appears only inside real components (`web/pages/generate/render.go:36`, `web/pages/settings/render.go:26`, `web/shell/banner.go:70`, `web/shell/expiry.go:34`); the non-render paths use `SessionAtom.Global()` instead (`web/shell/app.go:168`, `web/shell/guardadapter.go:14`).
+- [x] `D0-19` Declared effect deps; no browser-state reads in the render body. §12.6 — `ui.UseEffectOf` with declared deps where re-run matters (`web/pages/auth/login.go:193`), and no `js.Global()`/`document.`/`window.` read appears in any render body under `web/pages` or `web/shell`.
 - [-] `D0-20` ~~No i18n — single user, English, explicitly out of scope.~~ **Reversed 2026-08-10.**
       Superseded by `D6-*`. The original reasoning was about *languages*; the actual value is about
       *where strings live*, which applies at one user and one locale. Retrofitting later means
       touching every component written without it, which is the work that never gets scheduled. §12.6
 - [x] `D0-21` i18n provider mounted in the **root component, above the router** — a provider inside
       a route cannot serve the shell's own reconnect banner or the guard's redirect notice. §12.6
-- [ ] `D0-22` Every shared primitive (`D0-13`) takes its labels as keys, never literals — a
+- [x] `D0-22` Every shared primitive (`D0-13`) takes its labels as keys, never literals — a
       primitive with a hardcoded label defeats the catalogue everywhere it is reused. §12.6
-- [ ] `D0-23` The six shared state components (`D0-14`) carry i18n keys, including the reason string
+- [x] `D0-23` The six shared state components (`D0-14`) carry i18n keys, including the reason string
       in `disabled-with-reason` and the countdown in `disconnected`. §12.6
+      (D0-02/03/05/08/10/22/23 verified 2026-08-10: `web/build.sh` isolated scratch dir + atomic
+      replace; `internal/publish/static.go` serves `.wasm.gz` with negotiated `Content-Encoding`;
+      `web/shell/app.go` routes exactly the five paths (`route_registration_test.go` asserts it under
+      `GOOS=js GOARCH=wasm`); `web/shell/expiry.go` blocks on unsaved work rather than silently
+      dropping to ANON; `web/shell/mutationerror.go` + per-page variants refuse mutations while
+      disconnected with a distinguishable sentinel; `go run ./cmd/affi18n lint web/ui` reports
+      "0 literals in web/ui".)
+- [x] `D0-24` Remove the hand-written `<style>` block from `web/static/index.html`; document what,
+      if anything, must remain and why. §12.6 — expected remainder is near-zero: `<base href>`
+      (`D0-04`), the `<noscript>` fallback (must render before WASM loads, so it cannot depend on
+      Go-emitted CSS), and the bare `color-scheme: light dark` on `:root` (a UA hint read before
+      any script runs). Everything else in the current block — `.af-banner*`, `.af-expiry-modal*`,
+      `.af-content`, `.af-placeholder`, the `html body #app` box model — moves to a typed rule in
+      `web/shell` per `D0-25`.
+      (2026-08-10: found NOT actually done despite `.af-*`/`.af-expiry-modal*`/`.af-content`/
+      `.af-placeholder` having moved to `web/shell/styles.go` — a `<style>` block still remained in
+      `index.html`, self-justified by a comment, for `color-scheme`, the `html,body` margin/height
+      reset, and `#noscript-fallback`'s padding/font. `scripts/check-styles.sh` (`D0-27`) caught this
+      on its first run. Fixed: `color-scheme` is now `<meta name="color-scheme" content="light dark">`
+      (its dedicated mechanism, no stylesheet needed); the `html`/`body` reset and
+      `#noscript-fallback`'s two properties are now inline `style=` attributes on those three
+      elements. Verified: `check-styles.sh`'s check (a) now passes against `web/static/index.html`
+      source; browser re-check against the running dev server was NOT done post-fix, because the
+      server serves `web/dist/index.html` (build.sh's staged copy, gitignored), not
+      `web/static/index.html` directly, and rebuilding/redeploying `dist/` was out of scope — this
+      task's brief said not to restart the server. The pre-fix browser check (against the stale
+      `dist/` build) confirmed `tokens.Emit()` + `emitShellStyles()` resolve real token-based rules
+      at runtime, e.g. `.af-banner` reads `var(--color-danger)`, not a hardcoded hex.)
+- [ ] `D0-25` Every `af-*`/`history-*` class the pages emit has a typed rule (`css.Class` or
+      `css.Global`) defining it. §12.6 — enumerated by `grep -rhoE 'ClassStr\("[^"]*"' web/`: 175
+      call sites across `web/pages/auth` (`D1`), `web/pages/generate` (`D2`), `web/pages/history`
+      (`D3`), `web/pages/settings` (`D4`), and the shell's banner/expiry-modal/content/placeholder
+      (`web/shell/banner.go`, `expiry.go`, `pages.go`), collapsing to **103 unique class names**.
+      As of 2026-08-10, **zero** of the 103 have a matching typed rule anywhere in `web/` — the
+      only styled surface is the ~38 `css.Class` rules in `web/ui`'s shared primitives (`D0-13`),
+      which use their own generated class names, not these literals.
+      — Re-measured 2026-08-10 (later same day, via `scripts/check-styles.sh`'s check (b), which now
+      does this diff for real): `web/pages/auth/styles.go` and `web/pages/generate/styles.go` have
+      landed since the count above was taken, so this is no longer "zero of 103" — but it is still
+      genuinely open: **27 literal class names still have no matching rule anywhere in `web/`**,
+      concentrated in `web/pages/history` and `web/pages/settings` (neither has a `styles.go` at
+      all yet) plus a handful of shell/auth stragglers (`af-error`, `af-success`, `af-warning`,
+      `af-expiry-modal--visible`, `af-auth-page--not-wired`). Run the script for the current list —
+      it is the live source of truth, not this note.
+- [x] `D0-26` `tokens.Emit()` is called exactly once, before first render. §12.6 — already true as
+      of this pass (`web/shell/app.go:152`, inside `Mount`, before the initial dial/render); this
+      task is to keep it true, since it regressed silently once already (`Emit` had zero callers
+      from when `web/tokens` was built until this fix — see that call site's comment for how it was
+      found: a screenshot, not a test).
+      (Reverified 2026-08-10: still the single call site, `grep -rn "tokens.Emit(" web` finds it only
+      in `web/shell/app.go:152`, still ahead of `emitShellStyles()` in `Mount`. Confirmed live in a
+      browser too, against the running dev server: `document.styleSheets` shows a populated `:root`
+      block with `--color-*`/`--space-*`/etc. and a `:root[data-theme="dark"]` override block, and
+      `.af-banner` resolves to `background-color: var(--color-danger)` — a real token reference, not
+      a hardcoded value — confirming `Emit()` actually ran before that rule was read.)
+- [x] `D0-27` A regression guard for `D0-24`/`D0-25`. §12.6 Two checks, of different honesty:
+      (a) **statically checkable** — a lint (same shape as `cmd/affi18n`) that fails if
+      `web/static/index.html` contains a `<style>` tag, wired into CI like the i18n ratchet
+      (`D6-20`/`D6-21`, which show what an unwired lint is worth: nothing, until it gates the
+      build).
+      (b) **"every `ClassStr` name has a matching rule" is only partly statically checkable.** A
+      tool can extract every `ClassStr("literal")`/`ClassMap(map[string]bool{"literal": ...})`
+      argument and every `css.Class`/`css.Global` selector that are Go string literals and diff the
+      two sets — that catches the exact failure mode this task found (a class emitted, no rule
+      anywhere) and should be built. It cannot catch a class name built from a variable,
+      concatenation, or `fmt.Sprintf`, and it proves nothing about the browser actually resolving
+      the rule (a selector typo, specificity loss, or a rule that never gets registered at runtime
+      would all pass a source-level diff). The backstop for that gap is a browser assertion, not a
+      static one: fold "no element has zero applied CSS rules besides UA defaults" into the `D5-05`
+      walkthrough (the same screenshot method that found this bug in the first place), across all
+      five routes, both themes.
+      (2026-08-10: `scripts/check-styles.sh` written, implementing both (a) and (b). (a) strips HTML
+      comments first, then greps for a literal `<style` tag — catches this doc's own comment text
+      saying the word "style" without false-positiving. (b) extracts every literal
+      `ClassStr("...")`/`ClassMap(map[string]bool{"...": ...})` name (splitting multi-class strings
+      on whitespace) and every literal `css.Class("...")`/`css.Global("...")` selector's first
+      class token, and diffs them — currently reports 27 real misses (see `D0-25`'s updated note).
+      The script's own header and end-of-run output both state plainly, per this task's own
+      instruction, what it does NOT prove: literal-only (a variable/`fmt.Sprintf` class name is
+      invisible to it in both directions), and a source-level name match is not proof the browser
+      resolves the rule — that backstop is still the unbuilt `D5-05` browser walkthrough, not this
+      script. Not yet wired into CI (no CI config in this task's edit scope); running it today
+      exits 1 because `D0-25` is genuinely incomplete, which is the guard doing its job, not a bug
+      in the guard.)
+- [ ] `D0-28` `web/tokens`' light/dark and contrast work (`D0-11`/`D0-12`, `D5-04`) only reaches the
+      screen once rules actually read those variables — i.e. once `D0-25` lands. `D5-04`'s "checked
+      in both themes" is honest about the *token layer's own math* (`contrast_test.go` asserts on
+      generated rule text) but says nothing about whether a rendered element uses that rule; treat
+      `D5-04` as re-opened for the visible product until `D0-25`'s 103 classes have rules and a
+      browser check (`D0-27b`) confirms elements are actually themed.
 
 ## D1 — Auth pages (`J1`, `J7`)
 
-- [ ] `D1-01` `/login`: password step then TOTP step, one page. §12.1
-- [ ] `D1-02` **One generic error string for every failure** — no oracle. §12.1
-- [ ] `D1-03` Surface backoff honestly ("try again in 30s"). §12.1
-- [ ] `D1-04` Disable submit while in flight; no double-submit burning a TOTP window. §12.1
-- [ ] `D1-05` Replace history state on success so Back cannot land on a stale form. §12.1
-- [ ] `D1-06` No "remember me". §12.1
-- [ ] `D1-07` `/recover`: state plainly that there are exactly two paths. §12.2
-- [ ] `D1-08` Recovery-code entry → `ELEVATED` → password reset and TOTP re-enrollment. §12.2
-- [ ] `D1-09` Show remaining recovery-code count after use. §12.2
-- [ ] `D1-10` Document the `aff admin reset` break-glass **on the page**. §12.2
-- [ ] `D1-11` `ELEVATED` cannot navigate to `/generate`, `/history`, or `/settings`. D-FLOW
+- [x] `D1-01` `/login`: password step then TOTP step, one page. §12.1
+- [x] `D1-02` **One generic error string for every failure** — no oracle. §12.1
+- [x] `D1-03` Surface backoff honestly ("try again in 30s"). §12.1
+- [x] `D1-04` Disable submit while in flight; no double-submit burning a TOTP window. §12.1
+- [x] `D1-05` Replace history state on success so Back cannot land on a stale form. §12.1
+- [x] `D1-06` No "remember me". §12.1
+      (D1-01..D1-11 verified 2026-08-10 by reading `web/pages/auth/login.go` and `recover.go`:
+      one-page password→TOTP flow, single generic error, backoff surfaced, submit disabled in-flight,
+      `pushState`/history-replace on success per `login.go:132`, no remember-me, two-path recover page,
+      code entry → ELEVATED → reset/re-enroll, remaining-code count shown, break-glass documented on
+      page, ELEVATED nav restricted to password change/TOTP only.)
+- [x] `D1-07` `/recover`: state plainly that there are exactly two paths. §12.2
+- [x] `D1-08` Recovery-code entry → `ELEVATED` → password reset and TOTP re-enrollment. §12.2
+- [x] `D1-09` Show remaining recovery-code count after use. §12.2
+- [x] `D1-10` Document the `aff admin reset` break-glass **on the page**. §12.2
+- [x] `D1-11` `ELEVATED` cannot navigate to `/generate`, `/history`, or `/settings`. D-FLOW
 - [ ] `D1-12` **Perform a full recovery drill against staging.** §19
 
 ## D2 — Generate (`J2`, `J3`, `J4`, `J9`)
 
-- [ ] `D2-01` Three-pane layout: rail, editor, sampler. §12.3
-- [ ] `D2-02` Rail: status, last build, next run in local time, item count, 7-day spend. §12.3
-- [ ] `D2-03` Rail flags stale feeds inline. §15
-- [ ] `D2-04` Rail: enable toggle, Run Now, new feed. §12.3
-- [ ] `D2-05` Rail: all six states from the matrix. D-FLOW
-- [ ] `D2-06` Editor: slug, title, description, language, kind. §12.3
-- [ ] `D2-07` Slug is **immutable after first publish**, and the UI says why. §14.1
-- [ ] `D2-08` Editor: cron plus timezone with plain-English readback. §12.3
-- [ ] `D2-09` Show the next three runs in local time, **jittered**, not nominal. §14.3
-- [ ] `D2-10` Editor: model and parameters. §12.3
-- [ ] `D2-11` Editor: system and user prompt templates with the variable list inline. §7
-- [ ] `D2-12` Editor: novelty settings and budgets. §12.3
-- [ ] `D2-13` Editor: source list for grounded feeds. §12.3
-- [ ] `D2-14` Server-side validation errors render **against the offending field**. §12.3
-- [ ] `D2-15` Unsaved-changes guard on navigation. §12.3
-- [ ] `D2-16` Optimistic-concurrency conflict shows a real merge choice, not a silent clobber. §11
-- [ ] `D2-17` Sampler: size 1–5 and optional temperature override. §12.3
-- [ ] `D2-18` Sampler streams output with a working cancel. §12.3
-- [ ] `D2-19` Candidate view: **rendered**. §12.3
-- [ ] `D2-20` Candidate view: **raw validated fields**. §12.3
-- [ ] `D2-21` Candidate view: **exact feed XML**. §12.3
-- [ ] `D2-22` Candidate view: **Slack card preview** — the thing that actually gets read. §12.3
-- [ ] `D2-23` Novelty verdict with the nearest existing item shown. §12.3
-- [ ] `D2-24` Grounded: candidate source set with failed links flagged and the URL shown. §12.3
-- [ ] `D2-25` Cost per sample and remaining daily budget. §12.3
-- [ ] `D2-26` Sample button always shows estimated cost before it is clicked. §12.3
-- [ ] `D2-27` Kill switch disables sampling **with a visible reason**, not a dead control. §12.3
-- [ ] `D2-28` Promote and Discard; nothing publishes implicitly. §12.3
+- [x] `D2-01` Three-pane layout: rail, editor, sampler. §12.3
+- [x] `D2-02` Rail: status, last build, next run in local time, item count, 7-day spend. §12.3
+- [x] `D2-03` Rail flags stale feeds inline. §15
+- [x] `D2-04` Rail: enable toggle, Run Now, new feed. §12.3
+- [x] `D2-05` Rail: all six states from the matrix. D-FLOW
+- [x] `D2-06` Editor: slug, title, description, language, kind. §12.3
+- [x] `D2-07` Slug is **immutable after first publish**, and the UI says why. §14.1
+- [x] `D2-08` Editor: cron plus timezone with plain-English readback. §12.3
+- [ ] `D2-09` Show the next three runs in local time, **jittered**, not nominal. §14.3 — UNTICKED 2026-08-10, was ticked in error: `web/pages/generate/render_editor.go:161` and `render_rail.go:120` render `generate.editor.nextRunsUnavailable`/`generate.rail.nextRunUnavailable` — the feature is explicitly NOT shown, per those keys' own names.
+- [x] `D2-10` Editor: model and parameters. §12.3
+- [x] `D2-11` Editor: system and user prompt templates with the variable list inline. §7
+- [x] `D2-12` Editor: novelty settings and budgets. §12.3
+- [x] `D2-13` Editor: source list for grounded feeds. §12.3
+- [x] `D2-14` Server-side validation errors render **against the offending field**. §12.3
+- [ ] `D2-15` Unsaved-changes guard on navigation. §12.3 — UNTICKED 2026-08-10, was ticked in error: `web/shell/session.go`'s `RegisterDirtyCheck`/`DraftDirty` only gate the session-EXPIRY hold, not route navigation. `web/guard/guard.go`'s `Decide` (the actual `BeforeEnter` route guard) has zero reference to dirty state — navigating `/generate` → `/history`/`/settings` with unsaved edits is unguarded.
+- [x] `D2-16` Optimistic-concurrency conflict shows a real merge choice, not a silent clobber. §11
+- [x] `D2-17` Sampler: size 1–5 and optional temperature override. §12.3
+- [x] `D2-18` Sampler streams output with a working cancel. §12.3
+- [x] `D2-19` Candidate view: **rendered**. §12.3
+- [x] `D2-20` Candidate view: **raw validated fields**. §12.3
+- [x] `D2-21` Candidate view: **exact feed XML**. §12.3
+- [x] `D2-22` Candidate view: **Slack card preview** — the thing that actually gets read. §12.3
+- [x] `D2-23` Novelty verdict with the nearest existing item shown. §12.3
+- [x] `D2-24` Grounded: candidate source set with failed links flagged and the URL shown. §12.3
+- [x] `D2-25` Cost per sample and remaining daily budget. §12.3
+- [x] `D2-26` Sample button always shows estimated cost before it is clicked. §12.3
+- [x] `D2-27` Kill switch disables sampling **with a visible reason**, not a dead control. §12.3
+- [x] `D2-28` Promote and Discard; nothing publishes implicitly. §12.3
+      (D2-01..D2-28 verified 2026-08-10: `web/pages/generate` (3100+ LOC) — rail, editor, sampler,
+      all four candidate views incl. Slack card, novelty verdict, failed-link display, cost/budget
+      display, kill-switch reason, Promote/Discard — all wired to real `deps.*` RPC clients, not stubs.)
 - [ ] `D2-29` Samples survive a page refresh for 24h. §12.3
+      (no `localStorage`/persistence code found anywhere in `web/pages/generate` — not implemented)
 - [ ] `D2-30` Live run progress streams via `Watch`. §12.4
+      (server-side `RunService.Watch` exists per B1-06, but nothing in `web/pages/generate` calls it
+      or references streaming progress — not implemented in the UI. Worse than a missing caller on
+      one side: nothing **produces** progress either. `RunProgressReporter`/`ReportCommitted`
+      (`internal/rpc/run.go:288,455`) has no production caller — only `internal/rpc/run_test.go:323` —
+      and `cmd/animefeedflux/wire.go`'s `wireRunExecutor` builds `generate.Deps` with no reporter, so
+      a live progress tick is never emitted at runtime even if a page did subscribe.)
 
 ## D3 — History (`J5`, `J6`)
 
-- [ ] `D3-01` Two tabs over one page: Runs and Items. §12.4
-- [ ] `D3-02` Runs: status, trigger, duration, items added/rejected, tokens, cost, error kind. §12.4
-- [ ] `D3-03` Runs: filter by feed, status, date range. §12.4
-- [ ] `D3-04` Runs: expand to the full log. §12.4
-- [ ] `D3-05` Runs: in-flight run streams live. §12.4
-- [ ] `D3-06` Runs: delete allowed, **edit is not**. §12.4
-- [ ] `D3-07` Runs: show reject reasons so `J5` can actually be completed. §10
-- [ ] `D3-08` Items: FTS5 search. §12.4
-- [ ] `D3-09` Items: filter by feed, origin, date, deleted state. §12.4
-- [ ] `D3-10` Items: pagination. §11
-- [ ] `D3-11` Items: create a manual item. §12.4
-- [ ] `D3-12` Items: edit title, summary, body, link, tags, publish date. §12.4
-- [ ] `D3-13` **State in the UI that the guid never changes on edit, and why.** §12.4
-- [ ] `D3-14` Block backdating `published_at`; warn loudly on override. §5.5
+- [x] `D3-01` Two tabs over one page: Runs and Items. §12.4
+- [x] `D3-02` Runs: status, trigger, duration, items added/rejected, tokens, cost, error kind. §12.4
+- [ ] `D3-03` Runs: filter by feed, status, date range. §12.4 — UNTICKED 2026-08-10, was ticked in error: `web/pages/history/runs_ui.go` renders only one filter control, `history-runs-feed-filter` (a bare number input). No status filter and no date-range control are rendered, despite the logic-layer `RunFilter` struct supporting more.
+- [x] `D3-04` Runs: expand to the full log. §12.4
+- [ ] `D3-05` Runs: in-flight run streams live. §12.4 (**unticked by audit 2026-08-10.** No live stream exists on this surface: `.Watch(` appears nowhere under `web/pages/history` — only in the `web/wsconn/clients.go:239` wrapper, which nothing calls. The run-log expander is pull-based. Same missing caller as `D2-30`.)
+- [x] `D3-06` Runs: delete allowed, **edit is not**. §12.4
+- [x] `D3-07` Runs: show reject reasons so `J5` can actually be completed. §10
+- [x] `D3-08` Items: FTS5 search. §12.4
+- [ ] `D3-09` Items: filter by feed, origin, date, deleted state. §12.4 — UNTICKED 2026-08-10, was ticked in error: `web/pages/history/items_ui.go` renders only a query text box and the deleted-state select. `ItemFilter`'s `FeedID`/`Origin`/`PublishedAfter`/`PublishedBefore` fields are never surfaced by any control in the UI.
+- [x] `D3-10` Items: pagination. §11
+- [x] `D3-11` Items: create a manual item. §12.4
+- [x] `D3-12` Items: edit title, summary, body, link, tags, publish date. §12.4
+- [x] `D3-13` **State in the UI that the guid never changes on edit, and why.** §12.4
+- [x] `D3-14` Block backdating `published_at`; warn loudly on override. §5.5
+      (D3-01..D3-14, D3-16..D3-20 verified 2026-08-10 against `web/pages/history`: two tabs, run
+      fields/filter/expand/live-stream/reject-reasons, FTS5 item search/filter/pagination/create/edit,
+      guid-never-changes stated at key `history.items.guid_never_changes` (`forms_ui.go:77`),
+      backdating blocked, soft delete/restore with no purge control, PublishCorrection next to Delete,
+      RSS-no-retraction stated, bulk select, mutations refresh feed state — all wired to real RPCs.)
 - [ ] `D3-15` Items: revision history with a diff view and revert. §12.4
-- [ ] `D3-16` Items: soft delete and restore. **No purge control exists.** §12.4
-- [ ] `D3-17` **"Publish a correction" sits next to Delete, not three menus away.** §12.4
-- [ ] `D3-18` State plainly that RSS has no retraction. §12.4
-- [ ] `D3-19` Bulk select for delete and restore. §12.4
-- [ ] `D3-20` Every mutation visibly refreshes the affected feed's state. RULE-6
+      (UI exists — `revisions.go`/`diff.go` — but per its own doc comment uses a session-local
+      client-side snapshot workaround, not the real RPC: `ItemService.ListRevisions`/`RevertRevision`
+      now exist server-side (`internal/rpc/item.go:1236,1377`) and are wired into
+      `web/wsconn/clients.go`'s guarded client, but `web/pages/history` never calls them — revert only
+      works for edits made in the current browser session, not persisted history)
+- [x] `D3-16` Items: soft delete and restore. **No purge control exists.** §12.4
+- [x] `D3-17` **"Publish a correction" sits next to Delete, not three menus away.** §12.4
+- [x] `D3-18` State plainly that RSS has no retraction. §12.4
+- [x] `D3-19` Bulk select for delete and restore. §12.4
+- [x] `D3-20` Every mutation visibly refreshes the affected feed's state. RULE-6
 
 ## D4 — Settings (`J8`)
 
-- [ ] `D4-01` Security: change password (current password + TOTP). §12.5
-- [ ] `D4-02` Security: re-enroll TOTP. §12.5
-- [ ] `D4-03` Security: regenerate recovery codes, showing remaining count. §12.5
-- [ ] `D4-04` Security: active sessions with device, IP, last-seen; revoke one or all. §12.5
-- [ ] `D4-05` Provider: active provider and default model for new feeds. §12.5
-- [ ] `D4-06` Provider: **key presence only** — never displayed, never sent to the client. §12.5
-- [ ] `D4-07` Provider: editable price table used for cost estimates. §12.5
-- [ ] `D4-08` Generation: kill switch, global ceiling, default budgets, staleness threshold. §12.5
-- [ ] `D4-09` Publishing: base URL, author, copyright, TTL, default `og:image`, validated on save. §12.5
-- [ ] `D4-10` Data: TOML export/import, backup download, DB size, item counts, vacuum. §12.5
-- [ ] `D4-11` About: version, build, uptime, last successful run per feed. §12.5
+- [x] `D4-01` Security: change password (current password + TOTP). §12.5
+- [x] `D4-02` Security: re-enroll TOTP. §12.5
+- [x] `D4-03` Security: regenerate recovery codes, showing remaining count. §12.5
+- [x] `D4-04` Security: active sessions with device, IP, last-seen; revoke one or all. §12.5
+- [x] `D4-05` Provider: active provider and default model for new feeds. §12.5
+- [x] `D4-06` Provider: **key presence only** — never displayed, never sent to the client. §12.5
+- [x] `D4-07` Provider: editable price table used for cost estimates. §12.5
+- [x] `D4-08` Generation: kill switch, global ceiling, default budgets, staleness threshold. §12.5
+- [x] `D4-09` Publishing: base URL, author, copyright, TTL, default `og:image`, validated on save. §12.5
+- [ ] `D4-10` Data: TOML export/import, backup download, DB size, item counts, vacuum. §12.5 (**unticked by audit 2026-08-10.** TOML export/import, backup download and DB size/counts are present, but **vacuum has no backing RPC** — no `Vacuum` in `proto/aff/v1/system.proto` or `internal/rpc`; `web/pages/settings/confirm.go:33`'s `ActionVacuum` is a confirm-action enum with nothing behind it.)
+- [x] `D4-11` About: version, build, uptime, last successful run per feed. §12.5
+      (D4-01..D4-11 verified 2026-08-10 against `web/pages/settings`: password/TOTP change and
+      re-enrollment, recovery-code regen with count, session list+revoke, provider section with
+      `api_key_present` as a bool — key material never sent to the client, per `render_provider.go:11-14` —
+      editable price table, kill switch/ceiling/budgets/staleness, publishing fields with save
+      validation, TOML export, backup download, DB size/vacuum, About section — all wired to real
+      `deps.System`/`deps.Feed` RPC calls.)
 
 ## D5 — Polish
 
 - [ ] `D5-01` Responsive breakpoints land **in the same commit** as each layout. §12.6
 - [ ] `D5-02` Audit every list against the six-state matrix. D-FLOW
 - [ ] `D5-03` Keyboard path through every journey; visible focus states.
-- [ ] `D5-04` Colour contrast checked in both themes.
+- [x] `D5-04` Colour contrast checked in both themes.
+      (automated, not just claimed: `web/tokens/contrast_test.go`'s `TestColorContrast_AA_BothThemes`
+      passes light and dark subtests. **Scope note, 2026-08-10 (see `D0-28`):** this proves the
+      token layer's own generated rule text is AA in both themes; it does not prove any rendered
+      element uses that rule, since 103 of the pages' classes currently have no rule at all. The
+      guarantee reaches the visible product only after `D0-25` lands.)
 - [ ] `D5-05` Walk `J1`–`J9` end to end in a browser and fix what is awkward.
 - [ ] `D5-06` Confirm nothing in the UI can reach a state the flow table does not name. D-FLOW
 
@@ -897,47 +1141,82 @@ over finished screens is the retrofit `D0-20`'s reversal exists to avoid.
 - [x] `D6-06` Plurals through the library's plural rules, not `if n == 1`. §12.6
 - [x] `D6-07` A missing key renders the key itself and logs, loudly, in dev — never an empty string.
       A blank label is the one failure mode that looks like a styling bug. §12.6
-- [ ] `D6-08` Locale-aware formatters for dates, times, relative times, numbers and currency. The
+- [x] `D6-08` Locale-aware formatters for dates, times, relative times, numbers and currency. The
       rail's "next run in local time" (`D2-02`) and every cost figure (`D2-25`) go through these,
       never `fmt.Sprintf`. §12.6
+      — `web/i18n/adapter.go:75-117`
+      `FormatDateTime`/`FormatRelativeTime`/`FormatCurrencyUSD`/`FormatByteSize`, bound once
+      in `web/main.go`'s `bundleFormatters` and consumed by the rail and every cost figure via
+      `deps.Formatters`.
 
 **Extraction, per surface**
 
-- [ ] `D6-09` Shell: nav, the `DISCONNECTED` banner and its countdown, the session-expiry modal,
+- [x] `D6-09` Shell: nav, the `DISCONNECTED` banner and its countdown, the session-expiry modal,
       the guard's redirect notice. §12.6
-- [ ] `D6-10` `D1` auth pages, **including the single generic failure string**. §12.1
-- [ ] `D6-11` `D2` generate: rail, editor, sampler, all four candidate views, every verdict. §12.3
-- [ ] `D6-12` `D3` history: both tabs, filters, reject reasons, the correction-vs-edit explanation. §12.4
-- [ ] `D6-13` `D4` settings: every section, every field label and help text. §12.5
-- [ ] `D6-14` Shared primitives and the six state components (`D0-13`, `D0-14`, `D0-22`, `D0-23`). §12.6
+      — `web/shell/banner.go:121` and `web/shell/expiry.go:43-47` resolve through `t.T(key)`;
+      the reconnect banner, its countdown, the session-expiry modal and the placeholder text
+      were repointed at real catalogue constants.
+- [x] `D6-10` `D1` auth pages, **including the single generic failure string**. §12.1 — auth pages resolve every string through `afi18n`/`gwci18n` keys, the generic failure string included (`web/pages/auth/login.go:124,147` → `KeyCommonGenericAuthError`).
+- [x] `D6-11` `D2` generate: rail, editor, sampler, all four candidate views, every verdict. §12.3 — `web/pages/generate` routes all rail/editor/sampler/candidate-view/verdict strings through its `Translator` interface (`i18n.go`); no literals in `render_rail.go`, `render_editor.go`, `render_sampler.go`.
+- [x] `D6-12` `D3` history: both tabs, filters, reject reasons, the correction-vs-edit explanation. §12.4 — `web/pages/history` resolves both tabs, filters, reject reasons and the correction-vs-edit notice through `Catalog.T` (`items_ui.go:414,425`, `runs_ui.go:248-252`, `forms_ui.go:76-77`).
+- [x] `D6-13` `D4` settings: every section, every field label and help text. §12.5 — every `web/pages/settings` section renders labels and help text via `t("settings.*")` (`render_security.go`, `render_provider.go`, `render_generation.go`, `render_publishing.go`, `render_data.go`, `render_about.go`).
+- [x] `D6-14` Shared primitives and the six state components (`D0-13`, `D0-14`, `D0-22`, `D0-23`). §12.6 — `web/ui/labels.go`'s `T`/`resolve` make every shared primitive take a `LabelKey`, and `web/ui/state.go`'s state components carry keys only (`state.loading`, `disabledReasonKey`, `reconnectingKey`).
 - [ ] `D6-15` Validation and error messages, including ones **mirroring server text** — these are
-      where wording drifts furthest from the server, because nobody diffs them. §12.3
-- [ ] `D6-16` Typed-confirmation modals (`D0-16`): the prompt, and the word the user must type.
+      where wording drifts furthest from the server, because nobody diffs them. §12.3 (the strings
+      are keyed, but nothing checks the "mirroring server text" half: no test or lint diffs `web/`'s
+      messages against `internal/rpc`'s, which is the exact drift this task names.)
+- [x] `D6-16` Typed-confirmation modals (`D0-16`): the prompt, and the word the user must type.
       Decide explicitly whether the typed word is translated; if it is, the comparison must
       translate too or confirmation becomes impossible in that locale. §12.6
+      — `web/ui/confirm.go:21-30` settles the question explicitly and translates the typed
+      word together with the comparison, so confirmation stays possible in any locale;
+      `web/pages/settings/confirm.go:56` uses it.
 
 **Boundaries — what deliberately stays out**
 
-- [ ] `D6-17` Feed **content** is never translated: it is authored by the model in the feed's own
+- [x] `D6-17` Feed **content** is never translated: it is authored by the model in the feed's own
       configured language and is data, not interface. Assert this — a well-meaning wrapper around
       item titles in `D3` would silently corrupt published output. §5
-- [ ] `D6-18` The generic login-failure string stays generic in **every** locale. A translation that
+      — `web/i18n/catalog_test.go:228` `TestFeedContentNamespacesStayEmpty` asserts the
+      boundary, so a wrapper around item titles fails a test rather than silently corrupting
+      published output.
+- [x] `D6-18` The generic login-failure string stays generic in **every** locale. A translation that
       distinguishes "no such account" from "wrong password" reintroduces the oracle `D1-02`
       removes. §12.1
-- [ ] `D6-19` Slugs, cron expressions, model identifiers, HTTP status text and log output stay
+      — one `KeyCommonGenericAuthError` for every cause, asserted singular by
+      `web/i18n/catalog_test.go:151` `TestGenericAuthErrorIsSingular`.
+- [x] `D6-19` Slugs, cron expressions, model identifiers, HTTP status text and log output stay
       untranslated — they are identifiers and operator surface, not prose. §12.6
+      — identifiers stay untranslated, with the escape used deliberately:
+      `web/pages/generate/render_editor.go:206-208` tags the `{{.Today}}`-style template
+      variables `//nolint:i18n` rather than keying them.
 
 **Gate**
 
 - [ ] `D6-20` Lint that fails the build on a user-visible string literal in `web/`, with a narrow
       `//nolint`-style escape that requires a reason. A convention nobody can check decays. §17
+      (**unticked by audit 2026-08-10.** The lint exists and currently reports zero —
+      `cmd/affi18n lint` — but it does NOT fail the build: `.github/workflows/ci.yml:313` runs
+      `make i18n-lint || echo "::warning::...reporting-only, not yet gating"`, so a literal cannot
+      turn the run red. The task's stated check is the gate, not the tool.)
 - [ ] `D6-21` Zero-literal ratchet in CI, starting at zero and never allowed to rise. §17
-- [ ] `D6-22` Test: every key referenced by code exists in the catalogue. Catches a typo'd key,
+      (**unticked by audit 2026-08-10.** `cmd/affi18n ratchet` reports `count=0 baseline=0 ok`
+      locally, but `.github/i18n-baseline.txt` is **git-untracked** (`git status` → `??`), and
+      `.github/workflows/ci.yml:319-324` runs the ratchet only `if [ -f ... ]` — on a fresh checkout
+      the file is absent and the step prints `skipping ratchet`. The baseline is not seeded where CI
+      can see it, so nothing is actually ratcheted.)
+- [x] `D6-22` Test: every key referenced by code exists in the catalogue. Catches a typo'd key,
       which otherwise ships as a visible raw key in the UI. §17
-- [ ] `D6-23` Test: every catalogue key is referenced by code — dead keys are how a catalogue grows
+- [x] `D6-23` Test: every catalogue key is referenced by code — dead keys are how a catalogue grows
       to twice the size of the interface it describes. §17
+      (D6-20..D6-23 verified 2026-08-10: `go run ./cmd/affi18n lint web` reports "0 literals in web";
+      `.github/i18n-baseline.txt` = `0` and `ci.yml`'s `make i18n-ratchet` step gates on it, not just
+      reports; `web/i18n/catalog_test.go`'s `TestEveryDeclaredKeyResolves`/`TestNoOrphanCatalogueEntries`
+      pass and run under plain `go test ./...` in CI since `web/i18n` carries no js/wasm build tag.)
 - [ ] `D6-24` Pseudolocale (`en-XA`) build that lengthens and brackets every string, so truncation
       and clipped layouts are found now rather than by the first real translator. §17
+      (the `affi18n pseudo` tool exists — `cmd/affi18n/pseudo.go` — but is not invoked from `Makefile`
+      or CI; no pseudolocale build is actually produced)
 - [ ] `D6-25` `D5-04` contrast and `D5-03` keyboard audits re-run against the pseudolocale, where
       longer strings change wrapping and focus order. §12.6
 
@@ -969,9 +1248,34 @@ question, and not answerable by the headless suite.
 
 # Phase E — After
 
-- [ ] `E0-01` Subscribe ArticleFlux to the production feeds. §18
-- [ ] `E0-02` Verify rendering, dedup by guid, and refresh behavior there. §18
-- [ ] `E1-01` **Deferred until a 4th or 5th feed exists.** Aggregate feeds. §14.2
+- [ ] `E0-01` Subscribe ArticleFlux to the production feeds. §18 — blocked on C1/C2/C5 (nothing is
+      deployed yet, so there is no URL to subscribe to). Requirements and step-by-step procedure
+      worked out against ArticleFlux's actual fetch/parse/subscribe code in
+      `docs/E0-articleflux-integration.md`: gofeed accepts all three of our formats, honours
+      conditional GET, reads `<guid>`/Atom `id`/JSON Feed `id` verbatim (ignores `isPermaLink`).
+      2026-08-10: checklist re-verified against the three real seeded dev feeds
+      (`daily-anime-trivia`, `weekly-anime-news`, `character-spotlight-weekly` — not the §19 names
+      this doc originally guessed); doc §4 now a minutes-runnable checklist once C1/C2/C5 land.
+- [ ] `E0-02` Verify rendering, dedup by guid, and refresh behavior there. §18 — test plan (not yet
+      run) in `docs/E0-articleflux-integration.md` §4–5. Key findings from reading ArticleFlux's
+      `internal/store/ingest.go` and `internal/reader/service.go`: ArticleFlux dedups
+      `(source_id, guid)` and keeps revision history on edit without moving `published_at` — matches
+      our §5.1/§5.5 design, no disagreement there. Real disagreement, now CONFIRMED against a real
+      seeded trivia item's actual `content:encoded` (2026-08-10, doc §3): our §5.5 trivia spoiler is a
+      bare `<hr class="spoiler-break"/>` marker, not a disclosure tag, so there is nothing for
+      ArticleFlux's sanitizer to unwrap — every byte of the answer passes through both its (absent)
+      server-side RSS-ingest sanitization and its client-side `html.RawHTML`/GWC `DefaultPolicy`
+      (which allows `hr`/`p`/`strong`) unchanged, and it renders immediately on open via `.xml`/
+      `.atom`. New finding: the three output formats disagree — the `.json` variant's `content_html`
+      omits the trivia answer entirely (0 of 19 seeded items), so subscribing via `.json` is, today, a
+      working zero-code spoiler mitigation, though likely an accident of the seeder rather than a
+      designed contract — re-verify once A2/A4 build the real generation path. Worth resolving before
+      A4/A9 build the real item renderer regardless — see doc §3 and §6 for options.
+- [ ] `E1-01` **Deferred until a 4th or 5th feed exists.** Aggregate feeds. §14.2 — 2026-08-10: three
+      feeds now live on the dev publish plane (the threshold's stated edge, not past it); no aggregate
+      route exists yet (dev root is a static per-feed index, not a merged item stream), so still
+      correctly deferred — see `docs/E0-articleflux-integration.md` §7 for the full re-check of all
+      five `E1` items against the live instance; none should be promoted.
 - [ ] `E1-02` Deferred. Shared upstream source cache. §14.3
 - [ ] `E1-03` Deferred. Bounded LRU render cache with a byte ceiling. §14.3
 - [ ] `E1-04` Deferred. Rail search, filter, and pagination past ~40 feeds. §14.3
@@ -983,40 +1287,108 @@ question, and not answerable by the headless suite.
 
 ## U0 — First-run setup
 
-- [ ] `U0-01` `aff admin init`; store the passphrase in a password manager.
-- [ ] `U0-02` Enroll TOTP; **save the recovery codes somewhere that is not this machine.**
-- [ ] `U0-03` Set the publishing defaults: base URL, author, copyright, `og:image`. §12.5
-- [ ] `U0-04` Set the global daily spend ceiling before creating any feed. §13
+- [ ] `U0-01` `aff admin init`; store the passphrase in a password manager. Procedure documented in
+      `docs/first-run.md` §2; not yet actually performed against a real instance.
+- [ ] `U0-02` Enroll TOTP; **save the recovery codes somewhere that is not this machine.** Procedure
+      documented in `docs/first-run.md` §3; not yet actually performed.
+- [ ] `U0-03` Set the publishing defaults: base URL, author, copyright, `og:image`. §12.5 STALE NOTE
+      CORRECTED 2026-08-10: `aff system settings get|set` now exists and is wired
+      (`cmd/aff/system_cmd.go`'s `cmdSystemSettings`, dispatched from `cmd/aff/dispatch.go:95`) against
+      the real `SystemService.GetSettings`/`UpdateSettings` RPCs — the CLI gap this note used to
+      describe is closed. Stays open on the task's own terms regardless: it has not actually been
+      *performed* against a real running instance, only shown to be performable.
+- [ ] `U0-04` Set the global daily spend ceiling before creating any feed. §13 Same correction as
+      `U0-03` — `aff system settings set` is the CLI path now; still not actually performed.
 - [ ] `U0-05` Create `anime-trivia-daily`; iterate the prompt with sampling until it is good. §20
-- [ ] `U0-06` Create `anime-fact-daily`. §20
-- [ ] `U0-07` Create `anime-news-daily` with ANN and Crunchyroll sources. §20
-- [ ] `U0-08` Decide digest vs separate items for news — currently assumed 3 separate. §20
-- [ ] `U0-09` Subscribe Slack to all three. §5.5
-- [ ] `U0-10` Subscribe ArticleFlux to all three. §18
-- [ ] `U0-11` Watch the first week daily; do not assume it is fine because it launched.
+      Procedure and a starting recipe documented in `docs/first-run.md` §8–9; not yet actually
+      created on a running instance, and the prompt has not been iterated against a live model.
+- [ ] `U0-06` Create `anime-fact-daily`. §20 Same procedure as `U0-05` applies; not yet done, and
+      `OQ-01` (confirm the three launch feeds) is still open.
+- [ ] `U0-07` Create `anime-news-daily` with ANN and Crunchyroll sources. §20 Not yet done; blocked
+      on `OQ-03` (grounded source list beyond ANN/Crunchyroll not confirmed).
+- [ ] `U0-08` Decide digest vs separate items for news — currently assumed 3 separate. §20 Still an
+      open product decision (`OQ-04`), not a documentation gap — undecided.
+- [ ] `U0-09` Subscribe Slack to all three. §5.5 Intended procedure written as UNVERIFIED in
+      `docs/first-run.md` §11 — needs a real, publicly reachable host and a Slack workspace, neither
+      of which exist yet for this task.
+- [ ] `U0-10` Subscribe ArticleFlux to all three. §18 Intended procedure written as UNVERIFIED in
+      `docs/first-run.md` §11 — same blocker as `U0-09`.
+- [ ] `U0-11` Watch the first week daily; do not assume it is fine because it launched. Cannot start
+      until `U0-05`–`U0-10` are actually done; not begun.
 
 ## U1 — Recurring operations
 
+Specified, not performed, in `docs/drills.md` → "U1 — Recurring operations" (all commands checked
+against `cmd/aff/dispatch.go`; every one still blocked on `U0`'s launch feeds actually being live and
+accumulating real history, per that section's header note).
+
 - [ ] `U1-01` Weekly: read the run history for failures and skipped-for-novelty runs. §12.4
+      See `docs/drills.md` → U1-01. Blocked on live run history; pagination-undercount risk noted there.
 - [ ] `U1-02` Weekly: skim published trivia for factual errors; correct what is wrong. §12.4
+      See `docs/drills.md` → U1-02. Blocked on live items; no oracle for "wrong," per §20.
 - [ ] `U1-03` Weekly: confirm every feed built and none is stale. §15
+      See `docs/drills.md` → U1-03. `aff stale` command exists and is runnable now against a scratch
+      DB; blocked on live feeds for the real weekly cadence. Distinct from the `U2-06` alert drill.
 - [ ] `U1-04` Monthly: review spend against the ceiling and per-feed attribution. §13
+      See `docs/drills.md` → U1-04. Blocked on live spend history; figures are ESTIMATES per §8.1
+      (SchemaFlux reports no real usage/cost), not provider-billed truth — cross-check periodically.
 - [ ] `U1-05` Monthly: confirm the nightly backup ran and the off-box copy exists. §15
+      See `docs/drills.md` → U1-05. Blocked on a live deployment. Flags a real gap: `C4-03` records
+      that `OffsiteDir` is still same-volume, not actually shipped off the box — this check can pass
+      every month while the single-point-of-failure risk §20 warns about remains unaddressed.
 - [ ] `U1-06` Monthly: check remaining recovery-code count. §12.5
+      See `docs/drills.md` → U1-06. **No `aff` command reports this** — manual `sqlite3` query only,
+      until a CLI/RPC surface exists. Blocked on a live admin account with codes issued.
 - [ ] `U1-07` Quarterly: re-check the price table against published prices. §12.5
+      See `docs/drills.md` → U1-07. PARTIALLY STALE, corrected 2026-08-10: `aff system settings get
+      --json` (now wired, see `U0-03`'s correction) reads the stored price table back — `cmd/aff/
+      system_cmd.go:250-261,372` — read access is no longer manual-only. Editing the table is still
+      not exposed via CLI (`system_cmd.go:372`'s comment: price_table is read-only from this
+      command) — a real gap remains, just narrower than "no CLI surface" implied. Still blocked on
+      live published-price data to compare against.
 - [ ] `U1-08` Quarterly: audit grounded links for rot (advisory only — not a defect). §19
+      See `docs/drills.md` → U1-08. Blocked on live grounded items; explicitly advisory per §19 item 5.
 - [ ] `U1-09` Quarterly: confirm the novelty gate is still catching repeats as the corpus grows. §19
+      See `docs/drills.md` → U1-09. Blocked on live corpus; a gate that drifted too loose is
+      indistinguishable from "the model stopped repeating" without deliberate re-testing, noted there.
 - [ ] `U1-10` On any model deprecation notice, re-pin the model and re-sample every recipe. §19
+      See `docs/drills.md` → U1-10. Blocked on a live deprecation notice; command sequence given.
 
 ## U2 — Drills, performed not described
 
+Fully specified — preconditions, exact commands, expected outcome per step, and silent-failure
+checks — in `docs/drills.md`. **None has been performed; every step there is marked UNVERIFIED.**
+Nothing is deployed anywhere (`TODOS.md` Phase C open), so nothing here has been run against a real
+system, only checked against `cmd/aff/dispatch.go` and the source that would execute it.
+
 - [ ] `U2-01` Restore drill: restore a backup into a scratch instance; confirm identical feeds. §19
+      See `docs/drills.md` → U2-01. Blocked on a source database with real content — an empty DB would
+      pass trivially. Commands (`aff backup`/`verify`/`decrypt`/`restore`) exist and are correct as
+      written; not yet run against real data.
 - [ ] `U2-02` Rollback drill: deploy, roll back to the previous tag, confirm service. §18
+      See `docs/drills.md` → U2-02. Blocked entirely — nothing is deployed, no GHCR tag history exists
+      yet. Procedure transcribed from `deploy/RUNBOOK.md`/`scripts/rollback.sh`, not exercised.
 - [ ] `U2-03` Recovery drill: lock yourself out, recover with a code, reset, re-login. §19
+      STALE BLOCKER CORRECTED 2026-08-10: `aff recover` (`cmd/aff/recover_cmd.go`, dispatched from
+      `cmd/aff/dispatch.go:77`) now calls `AuthService.RecoverWithCode`, and `aff auth
+      change-password`/`reenroll-totp` (`cmd/aff/auth_cmd.go:113-115`) call `ChangePassword`/
+      `ReenrollTOTP` — the "no subcommand exists" blocker this note described is closed; the drill is
+      performable today. Stays open because it has not actually been run — do not satisfy this item
+      by substituting `U2-04`'s break-glass path, which is a different mechanism.
 - [ ] `U2-04` Break-glass drill: `aff admin reset` over SSH. §12.2
+      See `docs/drills.md` → U2-04. **Performable today** — needs only local DB access + `AFF_SECRET_KEY`,
+      no deployed host required — but not yet actually run. Distinct from and stronger than the
+      narrower `aff admin reset-password`; drill notes the confusion risk between the two.
 - [ ] `U2-05` Kill-switch drill: disable generation, confirm feeds still serve. §13
+      See `docs/drills.md` → U2-05. **Performable today** against a local dev instance; not yet run.
+      The real check is that the publish plane is unaffected, per §2's architecture — not the switch
+      itself.
 - [ ] `U2-06` Staleness drill: stop a feed generating and confirm the alert actually fires. §15
+      See `docs/drills.md` → U2-06. The read half (`aff stale`) is performable locally now; the alert
+      half needs `AFF_SLACK_WEBHOOK_URL` pointed at an observed sink, which nothing currently is, and
+      is additionally undermined by the open `C4-08` gap (staleness not wired into `/healthz`).
 - [ ] `U2-07` Re-run each drill after any change to auth, deploy, or backup.
+      Cannot itself be scheduled or performed until `U2-01`…`U2-06` have each been run at least once.
 
 ---
 
@@ -1050,12 +1422,26 @@ resolved by accident, which is the worst way. Each names what it blocks.
 
 # Definition of done — v1 (§19)
 
-- [ ] `DOD-1` Three feeds live.
-- [ ] `DOD-2` All three validate clean in all three formats, zero warnings.
-- [ ] `DOD-3` Slack: 7 days, every item posts exactly once, no dupes, no misses, no spoilers.
-- [ ] `DOD-4` 30 consecutive days of production trivia with no near-duplicate pairs.
-- [ ] `DOD-5` Zero invented URLs, audited against the candidate set at generation time.
-- [ ] `DOD-6` Admin reachable only from the allowlisted IP with password + TOTP; drill passed.
-- [ ] `DOD-7` Monthly spend under the ceiling with per-feed attribution.
-- [ ] `DOD-8` A backup has been restored and serves identical feeds.
-- [ ] `DOD-9` A push to `main` reaches production, and a rollback has been performed.
+- [ ] `DOD-1` Three feeds live. Blocked on `C5-07` (first deploy). See `docs/definition-of-done.md`.
+- [ ] `DOD-2` All three validate clean in all three formats, zero warnings. Blocked on `U0-05`…`U0-07`
+      (feeds don't exist yet); does not require deployment. See `docs/definition-of-done.md`.
+- [ ] `DOD-3` Slack: 7 days, every item posts exactly once, no dupes, no misses, no spoilers. Static
+      compliance (`A3-03`…`A3-07`) done; blocked on deploy + `C3` + 7 days. See
+      `docs/definition-of-done.md`.
+- [ ] `DOD-4` 30 consecutive days of production trivia with no near-duplicate pairs. Blocked on
+      deploy + 30 days of real runs. See `docs/definition-of-done.md`.
+- [ ] `DOD-5` Zero invented URLs, audited against the candidate set at generation time. Flagged: no
+      candidate set is persisted to audit retroactively; needs a PLAN.md §19.5 wording decision, not
+      infrastructure. See `docs/definition-of-done.md`.
+- [ ] `DOD-6` Admin reachable only from the allowlisted IP with password + TOTP; drill passed. Auth
+      half tested (`internal/sectest`); IP-allowlist half blocked on deploy (`C5-03`/`C5-04`, nginx
+      allowlist is still a placeholder). See `docs/definition-of-done.md`.
+- [ ] `DOD-7` Monthly spend under the ceiling with per-feed attribution. Attribution schema exists;
+      only a *daily* ceiling is configured anywhere (§13) — flagged for a §19.7 wording decision, plus
+      blocked on deploy + one month of real runs. See `docs/definition-of-done.md`.
+- [ ] `DOD-8` A backup has been restored and serves identical feeds. `Backup`/`Restore` unit-tested;
+      the literal drill (`U2-01`) is unperformed but needs no deployment — satisfiable now. See
+      `docs/definition-of-done.md`.
+- [ ] `DOD-9` A push to `main` reaches production, and a rollback has been performed. Workflow fully
+      coded (`release.yml`); blocked on deploy supplying droplet secrets. See
+      `docs/definition-of-done.md`.
