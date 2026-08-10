@@ -168,10 +168,13 @@ func median(d []time.Duration) time.Duration {
 func TestIsWeakRejectsShortAndLowEntropy(t *testing.T) {
 	cases := []string{
 		"",
-		"short1!",
-		"aaaaaaaaaaaaaaaaaaaa",   // long but one distinct char
-		"abababababababababab",   // long but low variety, digits/symbols absent
-		"nodigitsnosymbolsatall", // letters only, meets length but fails mix rule
+		"short1!",                   // under the 15-char floor
+		"aaaaaaaaaaaaaaaaaaaa",      // long, one distinct character
+		"abababababababababab",      // long, a two-character cycle
+		"abcdefghijklmnopqrst",      // long, purely sequential
+		"password123",               // straight off every wordlist
+		"Password2026!",             // a common password wearing composition rules
+		"correcthorsebatterystaple", // famous enough to be in every wordlist
 	}
 	for _, pw := range cases {
 		if err := IsWeak(pw); err == nil {
@@ -181,8 +184,39 @@ func TestIsWeakRejectsShortAndLowEntropy(t *testing.T) {
 }
 
 func TestIsWeakAcceptsReasonablePassphrase(t *testing.T) {
-	if err := IsWeak(testPassword); err != nil {
-		t.Errorf("IsWeak(%q): unexpected rejection: %v", testPassword, err)
+	// Letters only, spaces, no digit and no symbol. Under the OLD composition
+	// rule this was REJECTED — the rule actively selected the weaker password,
+	// which is precisely why NIST SP 800-63B dropped composition requirements.
+	// This case exists to stop anyone reinstating them.
+	for _, pw := range []string{
+		"correct battery dinosaur tennis",
+		testPassword,
+		"すもももももももものうち すもも", // Unicode and spaces are allowed
+	} {
+		if err := IsWeak(pw); err != nil {
+			t.Errorf("IsWeak(%q): unexpected rejection: %v", pw, err)
+		}
+	}
+}
+
+func TestIsWeakRejectsOverMaximum(t *testing.T) {
+	// A maximum exists only to bound the work argon2id is asked to do; 128 is
+	// far above anything a human types and far below a denial-of-service.
+	long := strings.Repeat("a b c d ", 40) // > 128 runes, not a simple repeat
+	if err := IsWeak(long); err == nil {
+		t.Error("IsWeak: expected rejection over the maximum length")
+	}
+}
+
+func TestNormalizeMakesEquivalentFormsVerify(t *testing.T) {
+	// The same passphrase typed on two platforms can differ byte-for-byte (NFC
+	// vs NFD). Without normalisation the second one fails to verify and the
+	// admin is locked out by their own keyboard. Written as escapes so the two
+	// forms stay visibly different in source.
+	nfc := "éclair passphrase for testing"  // precomposed e-acute
+	nfd := "éclair passphrase for testing" // e + combining acute
+	if Normalize(nfc) != Normalize(nfd) {
+		t.Errorf("normalisation did not converge: %q vs %q", Normalize(nfc), Normalize(nfd))
 	}
 }
 

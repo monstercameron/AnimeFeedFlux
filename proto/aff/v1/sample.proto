@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package aff.v1;
+
+import "google/protobuf/timestamp.proto";
+import "aff/v1/common.proto";
+
+option go_package = "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1";
+
+// SampleService backs the sampler pane (PLAN.md §12.3) — "the part that
+// matters". A sample runs the full generation pipeline against the live
+// provider and writes nothing except a `samples` row (PLAN.md §11): no item,
+// no run, no render-cache invalidation. Sampling draws from the same budget
+// as scheduled generation (PLAN.md §13), so estimated cost is always
+// returned, never omitted.
+service SampleService {
+  // Sample is the unary dry run: candidates only, nothing streamed.
+  rpc Sample(SampleServiceSampleRequest) returns (SampleServiceSampleResponse);
+  // SampleStream is the same pipeline, but emits each candidate as it
+  // arrives rather than blocking behind a spinner, with cancel support via
+  // the client closing the stream (PLAN.md §12.3).
+  rpc SampleStream(SampleServiceSampleStreamRequest) returns (stream SampleServiceSampleStreamResponse);
+  // ListSamples backs "samples persist server-side for 24h, so a good one
+  // survives a refresh" (PLAN.md §12.3).
+  rpc ListSamples(SampleServiceListSamplesRequest) returns (SampleServiceListSamplesResponse);
+  rpc DiscardSample(SampleServiceDiscardSampleRequest) returns (SampleServiceDiscardSampleResponse);
+}
+
+// NoveltyVerdict reports the dedup check's result for one candidate
+// (PLAN.md §12.3: "runs the real novelty check and shows the verdict with
+// the nearest existing item, so repetition is caught before publishing").
+message NoveltyVerdict {
+  bool is_novel = 1;
+  double similarity = 2;
+  // Empty if there is no near match (or is_novel is true).
+  int64 nearest_item_id = 3;
+  string nearest_item_title = 4;
+}
+
+// LinkVerdict is the grounded-feed byte-equality check result for one
+// candidate source URL (PLAN.md §9.6, §12.3: "flags any link failing the
+// byte-equality check, with the failing URL").
+message LinkVerdict {
+  string url = 1;
+  bool ok = 2;
+}
+
+// SampleCandidate is one generated-but-unpublished item, shown three ways
+// per PLAN.md §12.3: rendered, raw fields, and the exact feed XML fragment
+// that would be emitted.
+message SampleCandidate {
+  // Server-assigned handle used by PromoteSample (ItemService) and
+  // DiscardSample. Not a real item id — nothing has been persisted as an
+  // item yet.
+  string candidate_id = 1;
+
+  string title = 10;
+  string summary_text = 11;
+  string body_html = 12;
+  string answer_html = 13;
+  string link = 14;
+  string source_name = 15;
+
+  // The exact <item>/<entry> fragment that would be emitted, for the "feed
+  // XML" view (PLAN.md §12.3).
+  string rendered_xml = 20;
+  // Approximates what actually gets read: title link + plain-text summary,
+  // so a trivia answer leaking into summary_text is visible immediately
+  // (PLAN.md §12.3, §5.5).
+  string slack_preview_text = 21;
+
+  NoveltyVerdict novelty = 30;
+  // Only populated for grounded feeds.
+  repeated LinkVerdict link_verdicts = 31;
+
+  int32 tokens_in = 40;
+  int32 tokens_out = 41;
+  // Labelled an estimate everywhere it is shown (PLAN.md §8.1: SchemaFlux's
+  // Generating[T] reports no usage/cost today, so this is computed from
+  // token counts at the prompt/response boundary, not authoritative).
+  double estimated_cost_usd = 42;
+}
+
+// SampleServiceSampleRequest and SampleServiceSampleStreamRequest are
+// structurally identical (both just parameterize one dry-run call) but are
+// kept as two distinct messages rather than shared, since a request/response
+// pair must be unique to one RPC (buf's RPC_REQUEST_RESPONSE_UNIQUE) and a
+// gRPC method's wire request type cannot be reused across methods anyway.
+message SampleServiceSampleRequest {
+  int64 feed_id = 1;
+  // 1-5 (PLAN.md §12.3).
+  int32 sample_size = 2;
+  // Optional; 0 means "use the recipe's temperature". Documented as a
+  // presently-inert override — SchemaFlux exposes no per-call temperature
+  // knob yet (PLAN.md §8.1).
+  double temperature_override = 3;
+}
+
+message SampleServiceSampleResponse {
+  string sample_id = 1;
+  repeated SampleCandidate candidates = 2;
+  // Remaining daily budget after this sample, so the sampler can show it
+  // without a second round trip (PLAN.md §12.3).
+  double remaining_daily_budget_usd = 3;
+}
+
+message SampleServiceSampleStreamRequest {
+  int64 feed_id = 1;
+  int32 sample_size = 2;
+  double temperature_override = 3;
+}
+
+// SampleServiceSampleStreamResponse is one increment of a streaming sample.
+// The stream ends with exactly one event carrying `done = true`.
+message SampleServiceSampleStreamResponse {
+  string sample_id = 1;
+  // Set when one candidate finishes generating.
+  SampleCandidate candidate = 2;
+  bool done = 3;
+  // Set only if the run failed outright (ErrorKind taxonomy, PLAN.md §8);
+  // partial candidates already emitted are still valid and stay visible.
+  ErrorKind error_kind = 4;
+  string error_message = 5;
+}
+
+message SampleServiceListSamplesRequest {
+  int64 feed_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message SampleServiceListSamplesResponse {
+  message SampleSummary {
+    string sample_id = 1;
+    int64 feed_id = 2;
+    google.protobuf.Timestamp created_at = 3;
+    google.protobuf.Timestamp expires_at = 4;
+    int32 candidate_count = 5;
+  }
+  repeated SampleSummary samples = 1;
+  string next_page_token = 2;
+}
+
+message SampleServiceDiscardSampleRequest {
+  string sample_id = 1;
+}
+
+message SampleServiceDiscardSampleResponse {}

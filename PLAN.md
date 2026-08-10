@@ -203,22 +203,99 @@ Dockerfile               multi-stage; distroless static nonroot runtime
 Single human user, who is the admin. **No authorization model** — one role, everything or nothing.
 That makes authentication the entire defense, so it gets built properly rather than sketched.
 
+**No JWTs, no OAuth, no bearer tokens — deliberately.** Those solve a problem this system does not
+have: letting independent services validate claims without consulting the session authority. There
+is one backend and one admin here, so a server-side opaque session is the simpler tool and it makes
+logout *immediate* rather than "immediate once the token expires". Nothing to introspect, no
+denylist, no JWKS, no rotation machinery, and no signing key to leak. If third-party identity is
+ever required, that is the point to revisit — not before.
+
 - **Credential:** password hashed with **argon2id** (not bcrypt — no 72-byte truncation, memory-hard
-  params tunable), stored in SQLite. Parameters recorded alongside the hash so they can be raised
-  later and rehashed on next successful login. Verification is constant-time. No default password;
-  the account is created by `aff admin init`, reading from stdin, refusing weak passphrases.
+  params tunable), stored in SQLite. Verification is constant-time. No default password; the account
+  is created by `aff admin init`, reading from stdin.
+
+  | Parameter | Value | Why |
+  |---|---|---|
+  | memory | 64 MiB | Above OWASP's 19 MiB floor; benchmark before raising |
+  | iterations | 3 | |
+  | parallelism | **1** | OWASP's recommendation for the 19 MiB-class profile |
+  | salt | 16 random bytes, per credential, from the OS CSPRNG | |
+  | output | 32 bytes | |
+
+  The salt is **not secret** and lives beside the hash. It must never be derived from anything —
+  not the user id, not the email, not a constant — because the whole point is that two identical
+  passwords produce different hashes.
+
+  **Parameters and a `password_version` travel with the hash**, so cost can be raised later and the
+  credential rehashed on next successful login. A hash whose cost is not recorded cannot be migrated
+  without locking the only admin out.
+
+- **Pepper (optional, defence in depth):** `HMAC-SHA256(pepper, argon2idOutput)` before storage,
+  with the 256-bit pepper held **outside the database** in the environment, and a `pepper_version`
+  column from day one so rotation is possible at all. This is what makes a stolen database file
+  insufficient on its own: it yields the salt, the parameters and the hash, but not the pepper.
+  It is genuinely optional — the design is sound without it — and the cost is rotation complexity,
+  which is why the version column exists before it is needed rather than after.
+
+- **Password policy follows NIST SP 800-63B, which means it looks unfamiliar:** 15–128 characters,
+  spaces and Unicode allowed, **no mandatory composition rules**, and **passwords never expire**.
+
+  There is no periodic rotation and no maximum age — not "a long one", none. Forced rotation
+  measurably produces worse passwords, because a human asked to change a passphrase on a schedule
+  increments a digit. Mandatory character classes fail the same way, pushing people toward
+  `P@ssw0rd2026!` and away from `correct battery dinosaur tennis`, which is far stronger.
+
+  What replaces both is a **compromised-password blocklist**: length plus "not already breached" is
+  the pair that actually matters. A password is changed when there is a reason to change it — a
+  suspected compromise — and `password_changed_at` exists to record when that happened, never to
+  expire anything.
+
+  Unicode is NFKC-normalised before hashing, or the same passphrase typed on a different keyboard
+  fails to verify.
 - **Second factor: TOTP (RFC 6238), required, not optional.** With a single admin and a public
   droplet, a leaked password otherwise loses everything. ±1 step drift window; **used steps are
   recorded and rejected on replay**, enforced by a primary key so two concurrent attempts with the
   same code lose the race in the database rather than in a check-then-insert. Recovery codes generated once at enrollment, shown
   once, stored hashed. TOTP secret encrypted at rest with a key derived from an env-supplied secret,
   so a stolen DB file alone is not a second factor.
-- **Sessions:** 256-bit random token, hashed at rest, delivered as `HttpOnly; Secure;
-  SameSite=Strict` cookie scoped to the admin host, `__Host-` prefixed. Absolute lifetime 12h, idle
-  timeout 60m, rotation on login and on privilege change.
-- **Bridge auth:** the WebSocket upgrade validates the session cookie *and* checks `Origin` against
-  an allowlist. Every RPC additionally passes the session through a server interceptor — no
-  "authenticated at upgrade, trusted forever". Session revocation kills in-flight streams.
+- **Sessions:** a 256-bit opaque random token from the OS CSPRNG. The database stores only
+  `SHA-256(token)`, never the token itself, so **the sessions table contains no usable bearer
+  credential** — stealing it does not let anyone paste a session into a browser. SHA-256 rather than
+  argon2id is correct here and the distinction matters: argon2id exists to make *low-entropy human
+  passwords* expensive to guess, and there is no brute-forceable space in 256 random bits.
+
+  Delivered as `__Host-session`, `Secure; HttpOnly; SameSite=Strict; Path=/`, and **no `Domain`
+  attribute ever** — the `__Host-` prefix is only honoured when all three hold, which is what makes
+  the browser enforce the scoping rather than trusting us to. Rotated on login and on privilege
+  change.
+
+  **The token never touches JavaScript or WASM.** No `localStorage`, no `sessionStorage`, no
+  IndexedDB, and not held in WASM memory. The client cannot read its own credential, which is the
+  property that makes an XSS in the admin app survivable.
+
+  Absolute lifetime 12h, idle timeout 60m. Those are deliberately tighter than the 7-day/24-hour
+  figures reasonable for a consumer PWA: this is a single-admin operations console that can rewrite
+  every published feed, and re-authenticating twice a day is a small price. They are policy, not
+  cryptography, and can be relaxed without weakening anything structural.
+
+- **Bridge auth:** the WebSocket upgrade validates the session cookie *and* exact-matches `Origin`
+  against an allowlist. The browser attaches the cookie to a cross-site WebSocket handshake attempt
+  automatically, so `Origin` checking is the principal defence against cross-site WebSocket
+  hijacking — not a formality.
+
+  Every RPC additionally passes the session through a server interceptor: no "authenticated at
+  upgrade, trusted forever".
+
+  **The socket revalidates the session periodically and closes when it expires or is revoked.**
+  Without this there is a real and quiet bug: authenticate at 12:01, session expires at 18:00, and
+  the socket is still happily serving RPCs at 23:00 because nothing re-checked. On close the client
+  reconnects, the upgrade fails 401, and the login screen appears — which is the correct visible
+  outcome.
+
+- **Password reset and any future email-verification tokens use the same opaque-token
+  construction**, never a JWT: 256 random bits, `SHA-256` in the database, single-use, expiring, and
+  **revoking every existing session on use**. A reset that leaves old sessions alive has not
+  actually locked anyone out.
 - **CSRF:** `SameSite=Strict` does the primary work — current browsers will not attach the cookie to
   a cross-site WebSocket handshake at all — and gRPC-over-WS is not form-submittable. The `Origin`
   check is defense in depth for older browsers, non-browser clients, and a future misconfiguration

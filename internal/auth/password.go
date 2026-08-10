@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -35,9 +37,13 @@ type Params struct {
 // of an offline crack against a stolen hash.
 func DefaultParams() Params {
 	return Params{
-		Time:    3,
-		Memory:  64 * 1024, // 64 MiB
-		Threads: 4,
+		Time:   3,
+		Memory: 64 * 1024, // 64 MiB
+		// Parallelism 1, per OWASP's recommendation for this memory profile.
+		// It was 4; that is not "more secure", it just splits the same memory
+		// across lanes and makes the cost easier to parallelise for an attacker
+		// with GPUs than for us on one droplet core.
+		Threads: 1,
 		SaltLen: 16, // 128-bit salt
 		KeyLen:  32, // 256-bit derived key
 	}
@@ -172,41 +178,51 @@ func decode(encoded string) (variant string, version int, p Params, salt, key []
 	return variant, version, p, salt, key, nil
 }
 
-// minPasswordLen is deliberately a length floor, not a composition rule ("must contain a
-// symbol"): composition rules push users toward predictable substitutions (Password1! patterns)
-// that don't actually raise entropy, while length is the dominant factor in resisting both
-// online guessing and an offline crack of a stolen argon2id hash.
-const minPasswordLen = 12
+// Password policy follows NIST SP 800-63B (PLAN.md §4), which looks unfamiliar
+// next to the rules most systems still use.
+//
+// Length is the whole of it: 15 minimum, 128 maximum, spaces and Unicode
+// allowed. There are deliberately NO composition rules and NO expiry.
+//
+// Both of those were here and were removed. A mandatory letters-plus-digits mix
+// does not raise entropy — it pushes people toward P@ssw0rd2026! and away from
+// "correct battery dinosaur tennis", which is far stronger and would have been
+// REJECTED by the old check for containing neither a digit nor a symbol. That
+// is the rule actively selecting the weaker password, which is why NIST dropped
+// it. Expiry fails the same way: a human asked to rotate on a schedule
+// increments a digit.
+//
+// What replaces them is length plus a compromised-password blocklist, since
+// "long" and "not already breached" are the two properties that actually
+// resist an offline crack of a stolen argon2id hash.
+const (
+	minPasswordLen = 15
+	maxPasswordLen = 128
+)
 
-// IsWeak rejects passwords that are too short or drawn from an obvious low-entropy set (e.g. the
-// same character repeated) before they're ever hashed. This runs at enrolment (`aff admin init`)
-// and inside Hash, so a caller cannot accidentally bypass it by calling Hash directly.
+// Normalize applies NFKC before hashing. Without it the same passphrase typed
+// on a different keyboard or platform produces different bytes and fails to
+// verify — a support burden with no security benefit.
+func Normalize(password string) string { return norm.NFKC.String(password) }
+
+// IsWeak rejects a password on length, on normalisation, or because it appears
+// in the compromised-password blocklist. It runs at enrolment and inside Hash,
+// so a caller cannot bypass it by calling Hash directly.
 func IsWeak(password string) error {
-	if len(password) < minPasswordLen {
+	p := Normalize(password)
+
+	// Counted in runes, not bytes. A 15-character Japanese passphrase is 45
+	// bytes and would sail past a byte-length check while a 15-byte ASCII one
+	// would not — the same rule applied inconsistently.
+	n := utf8.RuneCountInString(p)
+	if n < minPasswordLen {
 		return fmt.Errorf("auth: password must be at least %d characters", minPasswordLen)
 	}
-
-	runes := []rune(password)
-	distinct := make(map[rune]struct{}, len(runes))
-	var hasLetter, hasDigit, hasOther bool
-	for _, r := range runes {
-		distinct[r] = struct{}{}
-		switch {
-		case unicode.IsLetter(r):
-			hasLetter = true
-		case unicode.IsDigit(r):
-			hasDigit = true
-		default:
-			hasOther = true
-		}
+	if n > maxPasswordLen {
+		return fmt.Errorf("auth: password must be at most %d characters", maxPasswordLen)
 	}
-	// A handful of distinct characters over a long string ("aaaaaaaaaaaaaa" or "abababababab")
-	// clears the length bar but not the entropy bar.
-	if len(distinct) < 6 {
-		return errors.New("auth: password has too little variety")
-	}
-	if !hasLetter || (!hasDigit && !hasOther) {
-		return errors.New("auth: password must mix letters with digits or symbols")
+	if IsBreached(p) {
+		return errors.New("auth: password appears in a compromised-password list; choose another")
 	}
 	return nil
 }

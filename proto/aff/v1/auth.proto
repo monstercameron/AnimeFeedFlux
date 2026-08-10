@@ -1,0 +1,173 @@
+syntax = "proto3";
+
+package aff.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1";
+
+// AuthService is the entire defense for a single-admin, no-authorization
+// system (PLAN.md §4: "one role, everything or nothing... that makes
+// authentication the entire defense, so it gets built properly rather than
+// sketched"). Every RPC on every other service is reached only through a
+// session minted here, checked by a server interceptor on every call — "no
+// authenticated at upgrade, trusted forever" (§4).
+service AuthService {
+  // Login verifies password + TOTP together in one call. Password and code
+  // travel together (not as two separate RPCs) so the server can return the
+  // same generic failure for "wrong password" and "wrong code" without the
+  // client-visible shape of the exchange itself becoming an oracle
+  // (PLAN.md §4, §12.1: "one generic error string for every failure").
+  rpc Login(AuthServiceLoginRequest) returns (AuthServiceLoginResponse);
+
+  // RecoverWithCode consumes a single-use recovery code and opens a
+  // short-lived (10 min) elevated session that can only reach
+  // ChangePassword and ReenrollTOTP (PLAN.md §12.2). It forces a full
+  // re-login and revokes every other session once the elevated session is
+  // used, so a stolen code cannot leave a standing door open.
+  rpc RecoverWithCode(AuthServiceRecoverWithCodeRequest) returns (AuthServiceRecoverWithCodeResponse);
+
+  // Logout revokes the calling session only.
+  rpc Logout(AuthServiceLogoutRequest) returns (AuthServiceLogoutResponse);
+
+  // Session is the "whoami" call the shell uses on boot to decide whether to
+  // render the login page or the app (deep links must resolve correctly,
+  // PLAN.md §12).
+  rpc Session(AuthServiceSessionRequest) returns (AuthServiceSessionResponse);
+
+  // ChangePassword requires the current password AND a fresh TOTP code even
+  // though the caller already holds a session — a stolen, still-live session
+  // token must not be enough on its own to lock the real admin out
+  // (PLAN.md §4 credential + second-factor model).
+  rpc ChangePassword(AuthServiceChangePasswordRequest) returns (AuthServiceChangePasswordResponse);
+
+  // ListSessions powers the settings page's "active sessions with
+  // device/IP/last-seen" list (PLAN.md §12.5).
+  rpc ListSessions(AuthServiceListSessionsRequest) returns (AuthServiceListSessionsResponse);
+
+  // RevokeSession kills one session, including any in-flight bridge stream
+  // it holds (PLAN.md §4: "session revocation kills in-flight streams").
+  rpc RevokeSession(AuthServiceRevokeSessionRequest) returns (AuthServiceRevokeSessionResponse);
+
+  // RevokeAllSessions is the global "sign out everywhere" — used after
+  // recovery and offered standalone from Settings (PLAN.md §12.5).
+  rpc RevokeAllSessions(AuthServiceRevokeAllSessionsRequest) returns (AuthServiceRevokeAllSessionsResponse);
+
+  // ReenrollTOTP replaces the TOTP secret. Reachable from an elevated
+  // recovery session (PLAN.md §12.2) or from Settings with a live session
+  // (§12.5); the two entry points share this one RPC.
+  rpc ReenrollTOTP(AuthServiceReenrollTOTPRequest) returns (AuthServiceReenrollTOTPResponse);
+
+  // RegenerateRecoveryCodes invalidates the old code set and returns a new
+  // one, shown once (PLAN.md §4: "shown once, stored hashed").
+  rpc RegenerateRecoveryCodes(AuthServiceRegenerateRecoveryCodesRequest) returns (AuthServiceRegenerateRecoveryCodesResponse);
+}
+
+// Session mirrors one row of `sessions` (PLAN.md §10), minus the token hash
+// itself — the raw token only ever exists as the HttpOnly cookie (§4) and is
+// never echoed back in a message body.
+message Session {
+  string id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  google.protobuf.Timestamp last_seen_at = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  string ip = 5;
+  string user_agent = 6;
+  // Unset (zero) while the session is live. Set once revoked, so the UI can
+  // still show a recently-revoked row rather than having it vanish.
+  google.protobuf.Timestamp revoked_at = 7;
+  // True only on the Session entry that corresponds to the calling
+  // connection, so ListSessions can highlight "this device" without the
+  // client comparing tokens it never has access to.
+  bool is_current = 8;
+}
+
+message AuthServiceLoginRequest {
+  string password = 1;
+  // 6-digit RFC 6238 code. Required — TOTP is not optional (PLAN.md §4).
+  string totp_code = 2;
+}
+
+message AuthServiceLoginResponse {
+  Session session = 1;
+}
+
+message AuthServiceRecoverWithCodeRequest {
+  string recovery_code = 1;
+}
+
+message AuthServiceRecoverWithCodeResponse {
+  // The elevated, scope-limited session described in PLAN.md §12.2.
+  Session session = 1;
+  // Codes left after this one is consumed. The UI nags at <=2 remaining
+  // (PLAN.md §12.2).
+  int32 remaining_recovery_codes = 2;
+}
+
+message AuthServiceLogoutRequest {}
+
+message AuthServiceLogoutResponse {}
+
+message AuthServiceSessionRequest {}
+
+message AuthServiceSessionResponse {
+  // Unset if there is no live session — the shell renders /login rather
+  // than treating an empty response as an error (PLAN.md §12: /login "must
+  // never break").
+  Session session = 1;
+}
+
+message AuthServiceChangePasswordRequest {
+  string current_password = 1;
+  string totp_code = 2;
+  string new_password = 3;
+}
+
+message AuthServiceChangePasswordResponse {}
+
+message AuthServiceListSessionsRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message AuthServiceListSessionsResponse {
+  repeated Session sessions = 1;
+  string next_page_token = 2;
+}
+
+message AuthServiceRevokeSessionRequest {
+  string session_id = 1;
+}
+
+message AuthServiceRevokeSessionResponse {}
+
+message AuthServiceRevokeAllSessionsRequest {}
+
+message AuthServiceRevokeAllSessionsResponse {
+  // Number of sessions actually revoked, including the caller's own — the
+  // caller should expect to be logged out too.
+  int32 revoked_count = 1;
+}
+
+message AuthServiceReenrollTOTPRequest {
+  // Required unless called from an elevated recovery session, where
+  // identity was already re-proven by the recovery code itself.
+  string current_password = 1;
+}
+
+message AuthServiceReenrollTOTPResponse {
+  // otpauth:// URI for the QR code. Shown once; never retrievable again
+  // (PLAN.md §4).
+  string provisioning_uri = 1;
+}
+
+message AuthServiceRegenerateRecoveryCodesRequest {
+  string current_password = 1;
+  string totp_code = 2;
+}
+
+message AuthServiceRegenerateRecoveryCodesResponse {
+  // Plaintext codes, shown exactly once (PLAN.md §4: "shown once, stored
+  // hashed"). The server retains only their hashes after this response.
+  repeated string recovery_codes = 1;
+}

@@ -1,0 +1,183 @@
+syntax = "proto3";
+
+package aff.v1;
+
+import "google/protobuf/timestamp.proto";
+import "aff/v1/common.proto";
+
+option go_package = "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1";
+
+// ItemService backs the Items tab of History (PLAN.md §12.4): full CRUD
+// over published items, except there is deliberately no hard delete.
+// PurgeDeleted was in an earlier draft and was cut, because it contradicted
+// three promises this design makes: §7's "only runs rows and stale
+// embeddings are ever pruned", §5.1's guid that is "never freed", and the
+// permalink that 410s forever — purging leaves nothing to 410 on, and the
+// route would fall through to a generic 404 (PLAN.md §12.4). If a genuine
+// hard delete is ever required it must arrive as a documented exception to
+// §7, not as a silent addition here.
+//
+// Every mutation that changes rendered output invalidates that item's
+// feed's render cache and bumps lastBuildDate (PLAN.md §11, §12.4), and
+// Update/Delete/Restore/PublishCorrection all carry expected_version so two
+// tabs editing the same item cannot silently clobber each other.
+service ItemService {
+  rpc List(ItemServiceListRequest) returns (ItemServiceListResponse);
+  rpc Get(ItemServiceGetRequest) returns (ItemServiceGetResponse);
+  // Create hand-authors an item with origin = ORIGIN_MANUAL (PLAN.md
+  // §12.4).
+  rpc Create(ItemServiceCreateRequest) returns (ItemServiceCreateResponse);
+  // Update edits are recorded in item_revisions with a diff view and revert
+  // (PLAN.md §12.4). The guid never changes on edit — ItemKey is not a
+  // field on this request because it is immutable by construction
+  // (internal/model.Item doc). Changing published_at is guarded by the
+  // no-backdating rule (PLAN.md §5.5) — enforced server-side, not expressed
+  // as a proto constraint.
+  rpc Update(ItemServiceUpdateRequest) returns (ItemServiceUpdateResponse);
+  // Delete is soft only: the item leaves the feed window, its permalink
+  // returns 410 Gone, and the guid is never reused (PLAN.md §12.4).
+  rpc Delete(ItemServiceDeleteRequest) returns (ItemServiceDeleteResponse);
+  rpc Restore(ItemServiceRestoreRequest) returns (ItemServiceRestoreResponse);
+  // PromoteSample persists a chosen SampleService candidate as a real item,
+  // origin = ORIGIN_SAMPLED, stamped now (PLAN.md §12.3). No
+  // expected_version: this creates a new item rather than mutating an
+  // existing one, so there is nothing to collide with yet.
+  rpc PromoteSample(ItemServicePromoteSampleRequest) returns (ItemServicePromoteSampleResponse);
+  // PublishCorrection is the only mechanism that actually reaches
+  // subscribers after the fact — RSS has no retraction (PLAN.md §12.4). It
+  // creates a new item linked via `corrections`, stamped now, prefixed
+  // "Correction:". It does not mutate the original item's row, so it does
+  // not require the original's expected_version.
+  rpc PublishCorrection(ItemServicePublishCorrectionRequest) returns (ItemServicePublishCorrectionResponse);
+}
+
+// Item mirrors internal/model.Item. Field numbers are grouped in blocks of
+// 10 so a field added within a group (e.g. a second answer format) never
+// forces renumbering the timestamps or versioning blocks.
+message Item {
+  int64 id = 1;
+  int64 feed_id = 2;
+  // Opaque ULID assigned once at insert; the RSS guid and Atom id are both
+  // derived from it and never change (internal/model.Item doc, PLAN.md
+  // §5.1). Read-only — absent from Create/Update request bodies below.
+  string item_key = 3;
+
+  string title = 10;
+  // Plain text — becomes <description> and og:description (internal/
+  // model.Item doc, PLAN.md §5.5).
+  string summary_text = 11;
+  // Full HTML, emitted as content:encoded.
+  string body_html = 12;
+  // Trivia only. Must never reach summary_text or og:description, or the
+  // channel preview spoils the question (PLAN.md §5.5).
+  string answer_html = 13;
+  string link = 14;
+  string source_name = 15;
+  repeated string tags = 16;
+
+  Origin origin = 20;
+  // Unique within a feed and strictly increasing — Slack drops items that
+  // share a timestamp, silently (internal/model.Item doc, PLAN.md §5.5).
+  google.protobuf.Timestamp published_at = 21;
+  google.protobuf.Timestamp created_at = 22;
+  google.protobuf.Timestamp updated_at = 23;
+  google.protobuf.Timestamp edited_at = 24;
+  // Zero/unset means not deleted. Set means soft-deleted (PLAN.md §12.4);
+  // the permalink for this item now returns 410.
+  google.protobuf.Timestamp deleted_at = 25;
+
+  int64 version = 40;
+}
+
+message ItemServiceListRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+
+  // FTS5 search over title/summary_text/body_html (PLAN.md §12.4).
+  string query = 10;
+  int64 feed_id = 11;
+  Origin origin = 12;
+  google.protobuf.Timestamp published_after = 13;
+  google.protobuf.Timestamp published_before = 14;
+  // Tri-state via the enum below rather than a bool, because "only
+  // deleted" is a real filter the UI needs (bulk restore), not just
+  // "include deleted".
+  DeletedFilter deleted_filter = 15;
+}
+
+enum DeletedFilter {
+  DELETED_FILTER_UNSPECIFIED = 0;
+  DELETED_FILTER_EXCLUDE_DELETED = 1;
+  DELETED_FILTER_ONLY_DELETED = 2;
+  DELETED_FILTER_INCLUDE_ALL = 3;
+}
+
+message ItemServiceListResponse {
+  repeated Item items = 1;
+  string next_page_token = 2;
+}
+
+message ItemServiceGetRequest {
+  int64 id = 1;
+}
+
+message ItemServiceGetResponse {
+  Item item = 1;
+}
+
+message ItemServiceCreateRequest {
+  // id, item_key, origin, version and timestamps are server-assigned;
+  // origin is forced to ORIGIN_MANUAL regardless of what is set here.
+  Item item = 1;
+}
+
+message ItemServiceCreateResponse {
+  Item item = 1;
+}
+
+message ItemServiceUpdateRequest {
+  Item item = 1;
+  int64 expected_version = 2;
+}
+
+message ItemServiceUpdateResponse {
+  Item item = 1;
+}
+
+message ItemServiceDeleteRequest {
+  int64 item_id = 1;
+  int64 expected_version = 2;
+}
+
+message ItemServiceDeleteResponse {}
+
+message ItemServiceRestoreRequest {
+  int64 item_id = 1;
+  int64 expected_version = 2;
+}
+
+message ItemServiceRestoreResponse {
+  Item item = 1;
+}
+
+message ItemServicePromoteSampleRequest {
+  string sample_id = 1;
+  string candidate_id = 2;
+}
+
+message ItemServicePromoteSampleResponse {
+  Item item = 1;
+}
+
+message ItemServicePublishCorrectionRequest {
+  // The item this correction points back to (`corrections.corrects_item_id`,
+  // PLAN.md §10, §12.4).
+  int64 corrects_item_id = 1;
+  string title = 2;
+  string summary_text = 3;
+  string body_html = 4;
+}
+
+message ItemServicePublishCorrectionResponse {
+  Item item = 1;
+}

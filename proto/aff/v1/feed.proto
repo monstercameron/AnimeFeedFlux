@@ -1,0 +1,290 @@
+syntax = "proto3";
+
+package aff.v1;
+
+import "google/protobuf/timestamp.proto";
+import "aff/v1/common.proto";
+
+option go_package = "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1";
+
+// FeedService is the editor pane's backend (PLAN.md §12.3): create or edit a
+// feed's recipe, validate it, run it, import/export it. Every write here
+// that changes a feed's published representation — Update, SetEnabled,
+// SetMembers, Delete — must invalidate that feed's (and any containing
+// aggregate's) render cache and bump lastBuildDate, and must take the
+// per-feed write lock (PLAN.md §11, "Two invariants" paragraph). That is
+// server-side behavior, not expressed in these messages, but is why Update/
+// SetEnabled/SetMembers all carry expected_version: two browser tabs editing
+// the same feed must not silently clobber each other (PLAN.md §11).
+service FeedService {
+  rpc List(FeedServiceListRequest) returns (FeedServiceListResponse);
+  rpc Get(FeedServiceGetRequest) returns (FeedServiceGetResponse);
+  rpc Create(FeedServiceCreateRequest) returns (FeedServiceCreateResponse);
+  rpc Update(FeedServiceUpdateRequest) returns (FeedServiceUpdateResponse);
+  rpc SetEnabled(FeedServiceSetEnabledRequest) returns (FeedServiceSetEnabledResponse);
+  // Delete is the feed-level soft delete (the feed stops publishing; its
+  // items keep the same fate as ItemService.Delete governs — the permalink
+  // promise in PLAN.md §12.4 does not stop at the feed boundary).
+  rpc Delete(FeedServiceDeleteRequest) returns (FeedServiceDeleteResponse);
+  // RunNow triggers an out-of-cycle generation run with RunTrigger =
+  // RUN_TRIGGER_MANUAL (PLAN.md §10). It is a normal run, not a bypass —
+  // budgets, the run lock and the kill switch all still apply (PLAN.md §13).
+  rpc RunNow(FeedServiceRunNowRequest) returns (FeedServiceRunNowResponse);
+  // ValidateSpec is the server-side gate behind the editor's live
+  // validation (PLAN.md §7: "the UI's copy is a convenience, never the
+  // gate"). It executes the prompt templates against a populated dummy
+  // context — Parse succeeding is not enough, since an unknown
+  // {{.Variable}} only surfaces at Execute (PLAN.md §7).
+  rpc ValidateSpec(FeedServiceValidateSpecRequest) returns (FeedServiceValidateSpecResponse);
+  // SetMembers is the only place aggregate membership changes, and the only
+  // place the "aggregates cannot nest" invariant is enforced (PLAN.md
+  // §14.2: "Enforced in the RPC rather than the schema, and named here so
+  // the invariant has an owner").
+  rpc SetMembers(FeedServiceSetMembersRequest) returns (FeedServiceSetMembersResponse);
+  rpc ExportTOML(FeedServiceExportTOMLRequest) returns (FeedServiceExportTOMLResponse);
+  rpc ImportTOML(FeedServiceImportTOMLRequest) returns (FeedServiceImportTOMLResponse);
+}
+
+// PromptVariables documents the fixed set of {{.Foo}} names available to
+// both templates (PLAN.md §7), returned so the editor can render the
+// variable list inline without duplicating this list client-side.
+message PromptVariables {
+  string today = 1;
+  string weekday = 2;
+  string season = 3;
+  string feed_title = 4;
+  int32 items_per_run = 5;
+  repeated string recent_titles = 6;
+  string candidates_preview = 7;
+}
+
+// NoveltySettings configures the dedup gate (PLAN.md §8, §9.5 novelty
+// check). Kept as its own message because it is edited as a unit in the
+// editor pane and sampled against in SampleService.
+message NoveltySettings {
+  // How many days back the embedding comparison looks. Distinct from the
+  // feed window (how many items render) and archive retention (how long
+  // items live) — three different numbers that PLAN.md §7 is explicit must
+  // never be conflated.
+  int32 novelty_window_items = 1;
+  // Cosine-similarity threshold above which a candidate is rejected as a
+  // repeat.
+  double similarity_threshold = 2;
+}
+
+// SourceSpec is one upstream URL for a grounded feed (backs `sources`,
+// PLAN.md §10). Grounded feeds require at least one (PLAN.md §7).
+message SourceSpec {
+  string url = 1;
+  // Free-form label for the candidates list shown in the sampler
+  // (PLAN.md §12.3), e.g. "ANN", "MAL news".
+  string kind = 2;
+}
+
+// FeedSpec is the recipe (PLAN.md §7): everything that controls what a feed
+// generates, distinct from the Feed identity/publishing fields that control
+// how it is presented (title, og:image, etc. — those stay on Feed itself
+// since they apply even to aggregates, which have no spec at all).
+//
+// Field numbers are grouped in blocks of 10 (schedule, generation, novelty,
+// budgets, sources) so a new field within a group never forces renumbering
+// a later group.
+message FeedSpec {
+  // Standard cron expression, evaluated in `timezone` — never UTC-normalized
+  // client-side, or "7am" silently drifts across DST (PLAN.md §7).
+  string cron = 1;
+  // IANA zone, e.g. "America/New_York" (PLAN.md §7).
+  string timezone = 2;
+
+  int32 items_per_run = 10;
+  // How many items appear in the rendered XML window (PLAN.md §7's "feed
+  // window", default 50) — deliberately not the same number as
+  // items_per_run or novelty_window_items.
+  int32 feed_window = 11;
+  string model = 12;
+  double temperature = 13;
+  string system_prompt_template = 14;
+  string user_prompt_template = 15;
+
+  NoveltySettings novelty = 20;
+
+  // Per-day caps enforced before the provider call (PLAN.md §13).
+  int64 daily_token_budget = 30;
+  int32 daily_run_budget = 31;
+
+  // Only meaningful (and required, per ValidateSpec) when kind =
+  // FEED_KIND_GROUNDED.
+  repeated SourceSpec sources = 40;
+}
+
+// Feed mirrors internal/model.Feed plus the recipe (FeedSpec) and the
+// derived jitter_offset the UI needs to explain "next three runs" honestly
+// (PLAN.md §14.3: "the UI's 'next three runs' shows the jittered times, not
+// the nominal ones — otherwise the readback lies").
+//
+// Aggregate feeds (kind = FEED_KIND_AGGREGATE) carry member_slugs instead of
+// a spec; spec is unset for them (PLAN.md §14.2: "never generate").
+message Feed {
+  int64 id = 1;
+  // Immutable after first publish (PLAN.md §14.1) — changing it would break
+  // every subscription and orphan the Tag URI guids that embed it.
+  string slug = 2;
+  FeedKind kind = 3;
+
+  string title = 10;
+  string description = 11;
+  string language = 12;
+  string author = 13;
+  string copyright = 14;
+  string og_image = 15;
+  int32 ttl_minutes = 16;
+
+  bool enabled = 20;
+  google.protobuf.Timestamp last_built_at = 21;
+  // CreatedAt fixes this feed's Tag URI epoch (internal/model.Feed doc:
+  // deriving the guid year from time.Now would change every guid on New
+  // Year's Day).
+  google.protobuf.Timestamp created_at = 22;
+  // Seconds within the jitter window this feed's cron is offset by,
+  // deterministically derived from hash(slug) (PLAN.md §14.3). Read-only —
+  // the server computes it, the client only displays it.
+  int32 jitter_offset_seconds = 23;
+  int32 consecutive_failures = 24;
+
+  // Present only for generative/grounded feeds.
+  FeedSpec spec = 30;
+  // Present only for kind = FEED_KIND_AGGREGATE; member feed slugs in
+  // render order (PLAN.md §14.2).
+  repeated string member_slugs = 31;
+
+  // Optimistic-concurrency token (PLAN.md §11). Returned by every read,
+  // required on every write below.
+  int64 version = 40;
+}
+
+message FeedServiceListRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+  // Optional filters for the rail past ~40 feeds (PLAN.md §14.3): search,
+  // status. Empty means no filter.
+  string search = 3;
+  bool enabled_only = 4;
+}
+
+message FeedServiceListResponse {
+  repeated Feed feeds = 1;
+  string next_page_token = 2;
+}
+
+message FeedServiceGetRequest {
+  // Either id or slug may be set; slug alone lets the editor deep-link by
+  // URL without a prior List round trip.
+  int64 id = 1;
+  string slug = 2;
+}
+
+message FeedServiceGetResponse {
+  Feed feed = 1;
+}
+
+message FeedServiceCreateRequest {
+  // id, version, jitter_offset_seconds, consecutive_failures and
+  // last_built_at are server-assigned and ignored if set.
+  Feed feed = 1;
+}
+
+message FeedServiceCreateResponse {
+  Feed feed = 1;
+}
+
+message FeedServiceUpdateRequest {
+  Feed feed = 1;
+  int64 expected_version = 2;
+}
+
+message FeedServiceUpdateResponse {
+  Feed feed = 1;
+}
+
+message FeedServiceSetEnabledRequest {
+  int64 feed_id = 1;
+  bool enabled = 2;
+  int64 expected_version = 3;
+}
+
+message FeedServiceSetEnabledResponse {
+  Feed feed = 1;
+}
+
+message FeedServiceDeleteRequest {
+  int64 feed_id = 1;
+  int64 expected_version = 2;
+}
+
+message FeedServiceDeleteResponse {}
+
+message FeedServiceRunNowRequest {
+  int64 feed_id = 1;
+}
+
+message FeedServiceRunNowResponse {
+  // Populated once the run is created (before it necessarily finishes) so
+  // the UI can jump straight to RunService.Watch.
+  int64 run_id = 1;
+}
+
+message FeedServiceValidateSpecRequest {
+  // kind is required here too: grounded implies >=1 source (PLAN.md §7).
+  FeedKind kind = 1;
+  string slug = 2;
+  FeedSpec spec = 3;
+}
+
+message FeedServiceValidateSpecResponse {
+  bool valid = 1;
+  // Machine-readable, field-scoped errors so the UI can render them against
+  // the offending field (PLAN.md §11: "errors use gRPC status codes with a
+  // machine-readable detail").
+  repeated FieldError errors = 2;
+}
+
+// FieldError names one invalid field by its FeedSpec/Feed field path, e.g.
+// "spec.cron" or "spec.sources[0].url".
+message FieldError {
+  string field = 1;
+  string message = 2;
+}
+
+message FeedServiceSetMembersRequest {
+  int64 aggregate_feed_id = 1;
+  // Member slugs in render order. Every member's kind must not itself be
+  // FEED_KIND_AGGREGATE (PLAN.md §14.2) — rejected here, not in the schema.
+  repeated string member_slugs = 2;
+  int64 expected_version = 3;
+}
+
+message FeedServiceSetMembersResponse {
+  Feed feed = 1;
+}
+
+message FeedServiceExportTOMLRequest {
+  int64 feed_id = 1;
+}
+
+message FeedServiceExportTOMLResponse {
+  // For versioning and disaster recovery, not the live path (PLAN.md §7:
+  // "SQLite is the source of truth for recipes").
+  string toml = 1;
+}
+
+message FeedServiceImportTOMLRequest {
+  string toml = 1;
+  // If set, replaces this feed's spec (subject to expected_version); if
+  // unset, imports as a new feed.
+  int64 feed_id = 2;
+  int64 expected_version = 3;
+}
+
+message FeedServiceImportTOMLResponse {
+  Feed feed = 1;
+}

@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+// aff.v1 is the control-plane API described in PLAN.md §11: the gRPC surface
+// the admin UI (GWC) and the CLI both speak. There is no privileged back
+// door — "aff admin init" and "aff admin reset" are the only local-only
+// commands, and everything else, including the CLI, is a client of these
+// same services (PLAN.md §11, closing paragraph).
+package aff.v1;
+
+option go_package = "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1";
+
+// FeedKind distinguishes the three sorts of feed (PLAN.md §1, §14.2; mirrors
+// internal/model.FeedKind). Aggregates never generate and cannot nest
+// (PLAN.md §14.2) — SetMembers is where that invariant is enforced.
+enum FeedKind {
+  FEED_KIND_UNSPECIFIED = 0;
+  // The model is the source; content is ours, permalinked to us.
+  FEED_KIND_GENERATIVE = 1;
+  // The model only edits fetched articles; links are byte-equality checked
+  // against the source (PLAN.md §9.6) so a hallucinated URL cannot publish.
+  FEED_KIND_GROUNDED = 2;
+  // No generator of its own — merges member feeds, newest first
+  // (PLAN.md §14.2). Never spends budget, never nests.
+  FEED_KIND_AGGREGATE = 3;
+}
+
+// Origin records how an item came to exist (mirrors internal/model.Origin).
+// Surfaced on ItemService.List/Get so the admin UI can distinguish
+// scheduler output from a hand-authored or promoted-sample item.
+enum Origin {
+  ORIGIN_UNSPECIFIED = 0;
+  ORIGIN_GENERATED = 1;
+  ORIGIN_SAMPLED = 2;
+  ORIGIN_MANUAL = 3;
+  ORIGIN_CORRECTION = 4;
+}
+
+// RunStatus is the outcome of one entry in the `runs` table (PLAN.md §10).
+// RUN_STATUS_SKIPPED exists because a run that hit a per-feed or global
+// budget cap before calling the provider must be visible on the dashboard,
+// not silently absent (PLAN.md §13: "exceeding logs a skipped run with a
+// distinct status, visible on the dashboard rather than silent").
+enum RunStatus {
+  RUN_STATUS_UNSPECIFIED = 0;
+  RUN_STATUS_RUNNING = 1;
+  RUN_STATUS_SUCCEEDED = 2;
+  RUN_STATUS_FAILED = 3;
+  RUN_STATUS_SKIPPED = 4;
+}
+
+// RunTrigger names the only two producers of a `runs` row (PLAN.md §10):
+// "the scheduler and RunNow. Sampling writes a samples row, never a run;
+// there is no backfill entry point."
+enum RunTrigger {
+  RUN_TRIGGER_UNSPECIFIED = 0;
+  RUN_TRIGGER_CRON = 1;
+  RUN_TRIGGER_MANUAL = 2;
+}
+
+// ErrorKind is the provider error taxonomy from PLAN.md §8: "the API failed"
+// is not actionable at 4am, so every failure is bucketed into one of these
+// before it reaches a run row or a log line.
+enum ErrorKind {
+  ERROR_KIND_UNSPECIFIED = 0;
+  // 429, 5xx, timeout, connection reset — already retried with backoff
+  // before landing here.
+  ERROR_KIND_TRANSIENT = 1;
+  // Schema violation, refusal, truncated output — already given one repair
+  // attempt before landing here.
+  ERROR_KIND_INVALID = 2;
+  // Auth, quota exhausted, model not found — failed immediately, and the
+  // caller should check /healthz and the dashboard rather than retry.
+  ERROR_KIND_FATAL = 3;
+}
+
+// RejectReason tallies why candidate items were dropped during a run
+// (`runs.reject_reasons_json`, PLAN.md §10) — e.g. duplicate, novelty-gate
+// hit, byte-equality link mismatch (§9.6). Structured here instead of a
+// free-form string so the history UI (§12.4) can group and count reasons
+// without parsing JSON client-side.
+message RejectReason {
+  string reason = 1;
+  int32 count = 2;
+}

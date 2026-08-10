@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package aff.v1;
+
+import "google/protobuf/timestamp.proto";
+import "aff/v1/common.proto";
+
+option go_package = "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1";
+
+// RunService backs the Runs tab of History (PLAN.md §12.4): "runs is the
+// operational spine — cost, drift, and 'why is this feed stale' all resolve
+// there" (PLAN.md §10). Runs support delete (pruning noise) but not edit —
+// "a run records something that happened, and editing it would make the
+// cost and drift numbers lie" (PLAN.md §12.4). Delete carries no
+// expected_version: the `runs` table has no version column (PLAN.md §10),
+// and deleting a historical row is not a "recipe" two tabs can silently
+// clobber in the sense §11 is guarding against.
+service RunService {
+  rpc History(RunServiceHistoryRequest) returns (RunServiceHistoryResponse);
+  rpc Get(RunServiceGetRequest) returns (RunServiceGetResponse);
+  // Watch streams progress for an in-flight run (PLAN.md §12.4: "in-flight
+  // runs stream via Watch"). Terminates after the run reaches a terminal
+  // RunStatus.
+  rpc Watch(RunServiceWatchRequest) returns (stream RunServiceWatchResponse);
+  rpc Delete(RunServiceDeleteRequest) returns (RunServiceDeleteResponse);
+}
+
+// Run mirrors one row of `runs` (PLAN.md §10). Field numbers are grouped in
+// blocks of 10 so a later addition (e.g. a second cost figure) does not
+// force renumbering the outcome or provider-usage blocks.
+message Run {
+  int64 id = 1;
+  int64 feed_id = 2;
+  RunTrigger trigger = 3;
+
+  google.protobuf.Timestamp started_at = 10;
+  google.protobuf.Timestamp finished_at = 11;
+  // heartbeat_at is how a crashed run is detected and reclaimed (PLAN.md
+  // §10, §15) — surfaced so the UI can distinguish "still running" from
+  // "died without finishing".
+  google.protobuf.Timestamp heartbeat_at = 12;
+
+  RunStatus status = 20;
+  ErrorKind error_kind = 21;
+  string error = 22;
+  int32 items_added = 23;
+  int32 items_rejected = 24;
+  repeated RejectReason reject_reasons = 25;
+
+  int32 tokens_in = 30;
+  int32 tokens_out = 31;
+  // Estimated, not authoritative — SchemaFlux's Generating[T] reports no
+  // usage/cost today (PLAN.md §8.1), so this is computed from token counts
+  // at the prompt/response boundary and labelled as an estimate wherever
+  // shown.
+  double est_cost_usd = 32;
+}
+
+message RunServiceHistoryRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+
+  // All filters below are optional; unset means unfiltered (PLAN.md §12.4:
+  // "Filter by feed, status, date range").
+  int64 feed_id = 10;
+  RunStatus status = 11;
+  google.protobuf.Timestamp started_after = 12;
+  google.protobuf.Timestamp started_before = 13;
+}
+
+message RunServiceHistoryResponse {
+  repeated Run runs = 1;
+  string next_page_token = 2;
+}
+
+message RunServiceGetRequest {
+  int64 run_id = 1;
+}
+
+message RunServiceGetResponse {
+  Run run = 1;
+  // The full log for the expandable row (PLAN.md §12.4: "rows expand to
+  // the full log").
+  string log = 2;
+}
+
+message RunServiceWatchRequest {
+  int64 run_id = 1;
+}
+
+message RunServiceWatchResponse {
+  Run run = 1;
+  // Incremental log lines since the previous event, so the client appends
+  // rather than re-fetching the whole log each tick.
+  repeated string log_lines = 2;
+}
+
+message RunServiceDeleteRequest {
+  int64 run_id = 1;
+}
+
+message RunServiceDeleteResponse {}

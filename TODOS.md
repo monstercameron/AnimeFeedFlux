@@ -106,7 +106,7 @@ an incident — which is exactly when it is switched on.
 - [x] `A0-T08` CI runs `go test -race` on ubuntu — the only place `-race` can run. §17.2
 - [x] `A0-T09` `-shuffle=on` for local runs, knowing it is weaker than `-race`. §17.2
 - [x] `A0-T10` Per-package coverage measured and reported. §17.2
-- [ ] `A0-T11` Coverage **ratchet** — the number may not go down. Not a target. §17.2
+- [x] `A0-T11` Coverage **ratchet** — the number may not go down. Not a target. §17.2
 - [x] `A0-T12` `go vet` + linter + `govulncheck` gate the build. §17.2
 
 ## A1 — Store
@@ -311,8 +311,8 @@ an incident — which is exactly when it is switched on.
 - [x] `A9-20` Span `http.request` with route, status, and cache result (hit|miss|304). §15.0a
 - [x] `A9-21` Child span `render.feed` on a cache miss only — a hit must stay cheap. §15.0a
 - [x] `A9-22` `aff_http_requests_total` and `aff_cache_hits_total`; the 304 ratio is the number that matters. §15.0a
-- [ ] `A9-23` Publish-plane requests are ratio-sampled; errors always sampled. §15.0a
-- [ ] `A9-24` Emit the canonical `http.request` event once per request, not per stage. §15.0
+- [x] `A9-23` Publish-plane requests are ratio-sampled; errors always sampled. §15.0a
+- [x] `A9-24` Emit the canonical `http.request` event once per request, not per stage. §15.0
 
 ## AF — Fuzz, soak, and load (cross-cutting; land as the pieces they target land)
 
@@ -340,6 +340,103 @@ an incident — which is exactly when it is switched on.
 
 ## B0 — Auth
 
+
+### B0-SEC — Authentication architecture (§4)
+
+The shape is deliberately small: **argon2id for low-entropy human passwords, SHA-256 for
+already-high-entropy random tokens, one opaque cookie the client cannot read.** No JWT, no OAuth, no
+refresh tokens, no bearer token in WASM. Those solve a problem this system does not have — letting
+independent services validate claims without asking the session authority — and buy a signing key to
+leak, a denylist to maintain, and a logout that is not actually immediate.
+
+**Credential**
+
+- [x] `SEC-01` argon2id parameters: 64 MiB, 3 iterations, **parallelism 1**, 16-byte salt, 32-byte output. §4
+- [x] `SEC-02` Correct the current `p=4` to `p=1` — OWASP's recommendation for this memory profile. §4
+- [x] `SEC-03` Salt is 16 fresh CSPRNG bytes per credential, never derived from id, email or a constant. §4
+- [x] `SEC-04` Store parameters AND a `password_version` with the hash, so cost can be raised later. §4
+- [x] `SEC-05` Rehash on next successful login when stored parameters are weaker than current. §4
+- [x] `SEC-06` NFKC-normalise the password before hashing, or the same passphrase fails on another keyboard. §4
+
+**Pepper (optional, defence in depth)**
+
+- [ ] `SEC-07` `HMAC-SHA256(pepper, argon2idOutput)` before storage; pepper from env, never in the DB. §4
+- [ ] `SEC-08` `pepper_version` column from day one — without it rotation is impossible, not merely hard. §4
+- [ ] `SEC-09` Migration adding `password_version` and `pepper_version`. §10
+- [ ] `SEC-10` Test: a database dump alone (salt + params + hash, no pepper) does not permit verification.
+
+**Password policy — NIST SP 800-63B, which looks unfamiliar on purpose**
+
+- [x] `SEC-11` Minimum **15** characters, maximum **128**. Replaces the current 12-char floor. §4
+- [x] `SEC-12` **Remove the composition-rule check.** Mandatory character classes measurably produce
+      worse passwords by pushing people to `P@ssw0rd2026!` instead of a passphrase. §4
+- [x] `SEC-13` Allow spaces and Unicode. §4
+- [x] `SEC-14` **Passwords never expire.** No periodic rotation, no maximum age, no `password_age`
+      check anywhere. `password_changed_at` records when a change happened and must never be read
+      to force one — a human asked to rotate on a schedule increments a digit. §4
+- [x] `SEC-15` Compromised-password blocklist; reject a breached or common password. Length plus
+      not-already-breached is the pair that actually matters. §4
+- [x] `SEC-16` Ship the blocklist offline (no k-anonymity API call at login — a login path that
+      depends on a third party is a login path that fails when they do).
+
+**Session tokens**
+
+- [x] `SEC-17` 256 bits from the OS CSPRNG, never a counter, timestamp or UUIDv1. §4
+- [x] `SEC-18` Store **only** `SHA-256(token)` — the sessions table must hold no usable credential. §4
+- [x] `SEC-19` SHA-256 not argon2id here, and a comment saying why: there is no brute-forceable
+      space in 256 random bits, so a memory-hard KDF buys nothing and costs latency. §4
+- [ ] `SEC-20` Test: the stored value cannot be replayed as a cookie.
+
+**Cookie**
+
+- [x] `SEC-21` `__Host-session`, `Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/`. §4
+- [x] `SEC-22` **Never set `Domain`** — `__Host-` is only honoured without it. §4
+- [x] `SEC-23` Test asserting every flag, and asserting `Domain` is absent.
+- [x] `SEC-24` Never place the token in localStorage, sessionStorage, IndexedDB or WASM memory. §4
+- [ ] `SEC-25` D-phase check: grep the built WASM bundle for the cookie name and fail if present.
+
+**WebSocket upgrade**
+
+- [ ] `SEC-26` Exact-match `Origin` against an allowlist — the browser attaches the cookie to a
+      cross-site handshake automatically, so this is the principal anti-hijacking defence. §4
+- [ ] `SEC-27` Authenticate from the cookie at upgrade; reject with 401 before switching protocols. §4
+- [ ] `SEC-28` **Revalidate the session periodically on a live socket and close when it expires or is
+      revoked.** Without it: authenticated 12:01, session expires 18:00, socket still serving at
+      23:00. §4
+- [ ] `SEC-29` Test that exact clock scenario with an injected clock.
+- [ ] `SEC-30` Test: a near-miss Origin (`https://app.example.com.evil.tld`) is refused.
+
+**Reset and single-use tokens**
+
+- [ ] `SEC-31` Reset tokens are 256-bit opaque, SHA-256 in the DB, single-use, expiring — never a JWT. §4
+- [ ] `SEC-32` Migration for `password_reset_tokens(token_hash, expires_at, used_at)`. §10
+- [ ] `SEC-33` **Using a reset revokes every existing session** — a reset that leaves old sessions
+      alive has not locked anyone out. §4
+- [ ] `SEC-34` Test: a used token is refused; an expired token is refused; sessions are gone after use.
+
+**Login protection**
+
+- [ ] `SEC-35` Rate-limit attempts per IP and per account, exponential backoff. §4
+- [ ] `SEC-36` One generic failure message for every cause, to prevent enumeration. §4
+- [x] `SEC-37` Always run the KDF, even for an unknown account, so timing does not leak existence. §4
+- [x] `SEC-38` Log every attempt, success or failure, to `auth_events`. §4
+
+**Adversarial tests — the suite that must fail closed**
+
+- [x] `SEC-39` Timing: unknown-account and wrong-password medians are indistinguishable over N runs.
+- [ ] `SEC-40` A forged cookie with a plausible-looking token is refused.
+- [ ] `SEC-41` A valid token for a REVOKED session is refused everywhere, including mid-stream.
+- [ ] `SEC-42` A session past its absolute lifetime is refused even if recently active.
+- [ ] `SEC-43` A session past its idle timeout is refused even if within absolute lifetime.
+- [x] `SEC-44` TOTP replay across two concurrent logins loses the race in the DB, not the app. §4
+- [x] `SEC-45` A recovery code cannot be used twice, under concurrency.
+- [ ] `SEC-46` Password change revokes all other sessions.
+- [ ] `SEC-47` Fuzz the cookie parser: no panic, no accept, on arbitrary bytes.
+- [ ] `SEC-48` Fuzz the password validator: no panic on arbitrary Unicode, including lone surrogates.
+- [ ] `SEC-49` An argon2id hash string that is malformed, truncated, or has absurd parameters is
+      rejected without panicking and without attempting a multi-gigabyte allocation.
+- [ ] `SEC-50` No secret (password, token, pepper, TOTP secret) appears in any log line, at any level.
+
 - [x] `B0-01` argon2id hashing; store parameters beside the hash for later raising. §4
 - [x] `B0-02` Rehash on next successful login when parameters change. §4
 - [x] `B0-03` Constant-time verification; always run the KDF even for unknown users. §4
@@ -351,19 +448,19 @@ an incident — which is exactly when it is switched on.
 - [x] `B0-09` Sessions: 256-bit token, hashed at rest, 12h absolute / 60m idle, rotation on login. §4
 - [x] `B0-10` `__Host-` prefixed cookie, `HttpOnly; Secure; SameSite=Strict`. §4
 - [x] `B0-11` Per-IP and per-account exponential backoff with one generic failure message. §4
-- [ ] `B0-12` Log every attempt to `auth_events`. §4
-- [ ] `B0-13` `aff admin reset` break-glass, requiring local DB access. §12.2
-- [ ] `B0-14` Recovery flow: consume a code → 10-minute elevated session → force re-login. §12.2
-- [ ] `B0-15` Elevated session reaches **only** password change and TOTP re-enrollment. §12.2
-- [ ] `B0-16` Recovery revokes every other session. §12.2
-- [ ] `B0-17` Test: replayed TOTP rejected; drift-window edges behave.
-- [ ] `B0-18` Test: session expiry, rotation, revocation.
-- [ ] `B0-19` Test: timing uniformity between unknown user and bad password.
-- [ ] `B0-20` Test: a recovery code cannot be used twice.
+- [x] `B0-12` Log every attempt to `auth_events`. §4
+- [x] `B0-13` `aff admin reset` break-glass, requiring local DB access. §12.2
+- [x] `B0-14` Recovery flow: consume a code → 10-minute elevated session → force re-login. §12.2
+- [x] `B0-15` Elevated session reaches **only** password change and TOTP re-enrollment. §12.2
+- [x] `B0-16` Recovery revokes every other session. §12.2
+- [x] `B0-17` Test: replayed TOTP rejected; drift-window edges behave.
+- [x] `B0-18` Test: session expiry, rotation, revocation.
+- [x] `B0-19` Test: timing uniformity between unknown user and bad password.
+- [x] `B0-20` Test: a recovery code cannot be used twice.
 
 ## B1 — RPC services
 
-- [ ] `B1-01` `proto/aff/v1` definitions for all six services; buf codegen wired into the build. §11
+- [x] `B1-01` `proto/aff/v1` definitions for all six services; buf codegen wired into the build. §11
 - [ ] `B1-02` `AuthService`. §11
 - [ ] `B1-03` `FeedService` including `ValidateSpec`, `SetMembers`, TOML export/import. §11
 - [ ] `B1-04` `SampleService`. §11

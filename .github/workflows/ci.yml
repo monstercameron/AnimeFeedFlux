@@ -160,10 +160,17 @@ jobs:
           go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
           staticcheck ./...
 
-      # -race is the reason this job exists. It cannot run on windows/arm64, so
-      # CI is the ONLY place it ever happens (§17.2). Never weaken this to plain
-      # `go test` to make a run green.
-      - name: go test -race
+      # -race is the reason this job exists: it CANNOT run on the maintainer's
+      # windows/arm64 machine, so this ubuntu job is the ONLY place it ever
+      # happens (§17.2). Never weaken this to plain `go test` to make a run
+      # green — that would silence the one place data races are ever caught.
+      #
+      # No -short here, deliberately: the pre-commit hook runs -short so local
+      # commits stay fast, which means the 90-day soak (internal/generate),
+      # the poll-load check (internal/publish), and the fuzz seed corpus are
+      # SKIPPED everywhere except here. If this job ever gained -short, those
+      # tests would stop running anywhere at all.
+      - name: "go test -race (full suite, no -short — the ONLY place -race runs)"
         run: go test -race ./...
         env:
           # RULE-1: the default suite must not call a paid API. Asserting the
@@ -176,18 +183,52 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           govulncheck ./...
 
+      # Coverage ratchet (§17.2): the number may not go down. Chasing a
+      # percentage produces tests written to touch lines rather than assert
+      # behaviour, so this only stops erosion — it never demands the number
+      # climb, and it never rewrites its own floor. See
+      # scripts/coverage-ratchet.sh for the full reasoning and the tolerance
+      # that absorbs -shuffle=on noise.
       - name: Coverage ratchet
         run: |
-          go test -coverprofile=cover.out ./... >/dev/null 2>&1 || true
+          go test -coverprofile=cover.out ./...
           pct=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
           echo "coverage: ${pct}%"
           echo "$pct" > coverage.txt
-          # A ratchet, not a target (§17.2). Enforced once a baseline is stored;
-          # until then this records the number so the first baseline is real.
+          sh scripts/coverage-ratchet.sh cover.out
       - uses: actions/upload-artifact@v4
         with:
           name: coverage
           path: coverage.txt
+
+      # Mutation fuzzing on every push, not only when someone remembers to run
+      # it by hand (§17.3): the HTML sanitizer, the URL normalizer's
+      # idempotence property, and the three renderers' well-formedness. Each
+      # target gets a bounded 30s budget so the job stays fast but still
+      # mutates on every push. The corpus these runs discover is written
+      # under `$(go env GOCACHE)/fuzz`, which is the same tree setup-go's
+      # `cache: true` above already persists between runs (it hashes and
+      # restores GOCACHE wholesale), so no extra cache step is needed for the
+      # corpus to carry forward run to run.
+      - name: "Fuzz targets, 30s each (seed corpus only runs here — -short skips it)"
+        run: |
+          set -eu
+          targets="
+            internal/render:FuzzRSSWellFormed
+            internal/render:FuzzAtomWellFormed
+            internal/render:FuzzJSONFeedValid
+            internal/sanitize:FuzzHTMLNeverEmitsDisallowed
+            internal/urlnorm:FuzzNormalizeIdempotent
+          "
+          for t in $targets; do
+            pkg="./${t%%:*}"
+            fn="${t##*:}"
+            echo "::group::fuzz $fn ($pkg)"
+            go test "$pkg" -run '^$' -fuzz "^${fn}\$" -fuzztime=30s
+            echo "::endgroup::"
+          done
+        env:
+          AFF_LIVE_LLM: ""
 
   feeds:
     name: Feed validator

@@ -1,0 +1,132 @@
+syntax = "proto3";
+
+package aff.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1";
+
+// SystemService backs the Settings page (PLAN.md §12.5) and the dashboard's
+// system-wide numbers. Unlike Feed and Item, `settings` is a flat key/value
+// singleton table with no version column (PLAN.md §10: "settings(key
+// PRIMARY KEY, value)"), so UpdateSettings does not carry expected_version —
+// there is no per-row version to protect, and the convention in PLAN.md §11
+// exists to stop two tabs from clobbering a *recipe*, which this is not.
+service SystemService {
+  rpc Stats(SystemServiceStatsRequest) returns (SystemServiceStatsResponse);
+  // SetGenerationEnabled is the global kill switch (PLAN.md §13): existing
+  // feeds keep serving, nothing generates. Distinct from
+  // AFF_GENERATION_ENABLED=0, which is the cold-start environment variant
+  // of the same switch.
+  rpc SetGenerationEnabled(SystemServiceSetGenerationEnabledRequest) returns (SystemServiceSetGenerationEnabledResponse);
+  rpc GetSettings(SystemServiceGetSettingsRequest) returns (SystemServiceGetSettingsResponse);
+  rpc UpdateSettings(SystemServiceUpdateSettingsRequest) returns (SystemServiceUpdateSettingsResponse);
+  rpc Version(SystemServiceVersionRequest) returns (SystemServiceVersionResponse);
+  // Backup triggers an on-demand DB backup download (PLAN.md §12.5, Data
+  // section).
+  rpc Backup(SystemServiceBackupRequest) returns (SystemServiceBackupResponse);
+}
+
+// PriceEntry is one row of the editable price table used for cost estimates
+// (PLAN.md §12.5: "published prices change and a stale table silently makes
+// every cost number wrong").
+message PriceEntry {
+  string model = 1;
+  double usd_per_1k_tokens_in = 2;
+  double usd_per_1k_tokens_out = 3;
+}
+
+// Settings groups the five sections of PLAN.md §12.5. Nested per-section so
+// the editor can save one section without resending the others, and so a
+// future section is a new nested message rather than a renumber of this
+// one. Field numbers jump by 10 across sections for the same reason.
+message Settings {
+  message Provider {
+    string active_provider = 1;
+    string default_model = 2;
+    string embedding_model = 3;
+    // Key material itself is never in this message — it lives in the
+    // environment only, never displayed, never sent to the client, never
+    // editable here (PLAN.md §12.5, §4).
+    bool api_key_present = 4;
+    repeated PriceEntry price_table = 5;
+  }
+  message Generation {
+    bool enabled = 1;
+    int64 global_daily_token_ceiling = 2;
+    double global_daily_spend_ceiling_usd = 3;
+    int64 default_daily_token_budget = 4;
+    int32 default_daily_run_budget = 5;
+    int32 default_feed_window = 6;
+    // Age (in minutes) past which a feed is flagged stale on the rail
+    // (PLAN.md §15).
+    int32 staleness_threshold_minutes = 7;
+  }
+  message Publishing {
+    // Validated on save: absolute URL, correct scheme (PLAN.md §12.5) —
+    // these land in every channel element, so an invalid value here is
+    // wrong everywhere at once.
+    string public_base_url = 1;
+    string default_author = 2;
+    string default_contact = 3;
+    string default_copyright = 4;
+    int32 default_ttl_minutes = 5;
+    string default_cache_control = 6;
+    string default_og_image = 7;
+  }
+
+  Provider provider = 10;
+  Generation generation = 20;
+  Publishing publishing = 30;
+}
+
+message SystemServiceStatsRequest {}
+
+message SystemServiceStatsResponse {
+  int32 feed_count = 1;
+  int32 enabled_feed_count = 2;
+  int64 item_count = 3;
+  int64 db_size_bytes = 4;
+  double today_spend_usd = 5;
+  double today_remaining_budget_usd = 6;
+  bool generation_enabled = 7;
+}
+
+message SystemServiceSetGenerationEnabledRequest {
+  bool enabled = 1;
+}
+
+message SystemServiceSetGenerationEnabledResponse {
+  bool enabled = 1;
+}
+
+message SystemServiceGetSettingsRequest {}
+
+message SystemServiceGetSettingsResponse {
+  Settings settings = 1;
+}
+
+message SystemServiceUpdateSettingsRequest {
+  Settings settings = 1;
+}
+
+message SystemServiceUpdateSettingsResponse {
+  Settings settings = 1;
+}
+
+message SystemServiceVersionRequest {}
+
+message SystemServiceVersionResponse {
+  string version = 1;
+  string build = 2;
+  google.protobuf.Timestamp started_at = 3;
+}
+
+message SystemServiceBackupRequest {}
+
+message SystemServiceBackupResponse {
+  // Raw SQLite file bytes. Fine as a unary response — DB backups are not
+  // multi-gigabyte at this project's scale (PLAN.md §14.4).
+  bytes db_file = 1;
+  string filename = 2;
+}
