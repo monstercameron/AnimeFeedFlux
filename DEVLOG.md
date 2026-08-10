@@ -13,6 +13,44 @@ Newest entries at the top.
 
 ---
 
+## 2026-08-10 — i18n was ruled out for the wrong reason
+
+`D0-20` said: no i18n, single user, English, out of scope. Cam reversed it. The
+reversal is worth recording because the original reasoning was not wrong so much
+as answering a different question.
+
+"Do we need other languages?" — no, and still no. But that is not what i18n buys
+at one user and one locale. What it buys is that strings have an owner. Without a
+catalogue the same label gets written three slightly different ways on three
+screens, an error message drifts from the server text it is supposed to mirror,
+and there is no way to see what the interface actually says without reading every
+component. With one, the interface's vocabulary is an artefact that can be
+reviewed and diffed.
+
+The timing argument is the stronger one. Retrofitting i18n means touching every
+component that was written without it — a large, low-status, all-at-once job that
+never gets scheduled. Phase D has barely started, so the cost right now is close
+to zero and falls with every screen not yet written. That is why `D6-*` says to
+extract per surface *alongside* each screen rather than as a pass afterwards: a
+cleanup pass over finished screens is exactly the retrofit being avoided.
+
+Two boundaries fell out of writing it down, and neither was obvious beforehand:
+
+- **Feed content must never go through the catalogue.** It is authored by the
+  model in the feed's own configured language and is data, not interface. A
+  well-meaning wrapper around item titles in the history screen would silently
+  corrupt published output — and it would look like tidiness.
+- **The generic login-failure string stays generic in every locale.** §12.1
+  removes the account-existence oracle by using one message for every failure. A
+  translator handed those keys in isolation would naturally make "no such
+  account" and "wrong password" distinct, because that reads better, and would
+  reintroduce the oracle without ever touching the auth code. The constraint has
+  to live in the catalogue, not only in the login page.
+
+The gate is a zero-literal ratchet, for the usual reason: a convention nobody can
+check decays, and this one decays invisibly — a hardcoded string looks exactly
+like a translated one until someone greps.
+
 ## 2026-08-10 — The password rule that was choosing the weaker password
 
 Cam supplied a fully-specified authentication architecture (NIST SP 800-63B +

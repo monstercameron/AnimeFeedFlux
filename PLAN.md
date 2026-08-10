@@ -874,12 +874,30 @@ Worth being blunt about the constraint: one admin, no second human, and **no ema
 infrastructure**. "Email me a reset link" does not exist, and pretending otherwise would leave a
 dead end at the worst possible moment. Recovery is exactly two paths, and the page says so:
 
-1. **Recovery code** — the single-use codes from enrollment. Consumes the code, opens a short-lived
-   (10 min) elevated session that can *only* reach "set new password" and "re-enroll TOTP", then
-   forces a full re-login and revokes every other session. Used codes are marked, never reusable,
-   and the remaining count is shown afterwards. At ≤2 remaining, the dashboard nags.
-2. **Break-glass on the box** — `aff admin reset` over SSH, requiring local DB access. The page
-   states this plainly so a locked-out future me knows the answer immediately.
+1. **Recovery code** — the single-use codes from enrollment. Consumes the code and opens a
+   short-lived (10 min) elevated session that can reach "set new password" **or** "re-enroll TOTP" —
+   **exactly one of the two, not both in sequence.** Both `ChangePassword` and `ReenrollTOTP`
+   (`internal/rpc/auth.go`) end the elevated session the instant either succeeds — whichever runs
+   first is the last thing the session can do — then force a full re-login and revoke every other
+   session. The UI (`web/pages/auth/recover.go`) makes this an explicit choice right after the code
+   is accepted, rather than silently chaining two calls where the second would already be
+   unauthenticated. Used codes are marked, never reusable, and the remaining count is shown
+   afterwards. At ≤2 remaining, the dashboard nags.
+
+   This is a real tradeoff, not an oversight, and it is undecided — see `OQ-06`. Ending elevation
+   after one action is the safer default: a recovery code is a bearer credential, so a longer-lived
+   elevated window is exactly what an attacker who found one would want, and one action per code
+   keeps the blast radius of a leaked code to a single change. But the realistic lockout is "new
+   phone, lost authenticator" — the admin needs a fresh TOTP enrollment and may reasonably want a
+   fresh password too, in the same sitting. Today that costs two recovery codes out of a finite set
+   of ten, at the worst possible moment to be down to a code you don't have. Whether that cost is
+   worth the safety margin is Cam's call, not decided here.
+2. **Break-glass on the box** — `aff admin reset` over SSH, requiring local DB access. Unlike the
+   recovery-code path, this resets password, TOTP, and recovery codes **all at once** in a single
+   command (`cmd/aff/admin_cmd.go`'s `cmdAdminReset`) — a deliberately different, stronger tradeoff,
+   justified there by there being no remaining code to protect: a partial reset would leave the
+   operator still locked out by whichever factor it didn't touch. The page states this plainly so a
+   locked-out future me knows the answer immediately.
 
 Same generic-error and backoff rules as login. Recovery attempts land in `auth_events` and are the
 one event worth alerting on if a notification channel is ever configured.
@@ -981,8 +999,33 @@ declared effect deps, no reading browser state from the render body. Responsive 
 the same commit as the layout. Every destructive action (delete, purge, revoke all, regenerate
 recovery codes) sits behind a `⋯` kebab rather than a primary button, and irreversible ones require
 typed confirmation. Loading, empty, and error states are designed for every list — an admin tool
-that shows a blank box on failure is how a stale feed goes unnoticed for a week. No i18n: single
-user, English, explicitly out of scope.
+that shows a blank box on failure is how a stale feed goes unnoticed for a week.
+
+**Every string the admin can read goes through i18n.** This reverses an earlier decision that i18n
+was out of scope because there is one user and they read English, and the reversal is not about
+shipping other languages — it is about where strings live. A hardcoded string is a string with no
+single owner: the same label gets written three slightly different ways on three screens, an error
+message drifts from the server text it is supposed to mirror, and nobody can list what the interface
+actually says without reading every file. A catalogue makes the interface's vocabulary an artefact
+that can be reviewed, kept consistent, and diffed.
+
+The cost of adding it later is what makes it a now decision. Retrofitting means touching every
+component that was written without it, which is exactly the work that never gets scheduled — and
+`en` is the only locale that has to exist for the discipline to pay off.
+
+Concretely: one `en` catalogue, keys named for meaning rather than for the English text (so fixing
+wording is not a rename); the provider mounted in the root component, above the router, because a
+provider mounted inside a route cannot serve the shell's own reconnect banner; interpolation and
+plurals through the library rather than string concatenation, which does not survive a second
+locale; dates, times and currency formatted by locale-aware formatters, never `fmt.Sprintf`.
+
+Two things stay OUT of the catalogue deliberately. Feed content is authored by the model in the
+feed's own configured language and is data, not interface. And the single generic login-failure
+string (§12.1) stays generic in every locale — a translation that distinguishes "no such account"
+from "wrong password" reintroduces the oracle §12.1 exists to prevent.
+
+A lint gate enforces it, because a convention nobody can check is a convention that decays: a
+user-visible literal in `web/` fails the build. The ratchet starts at zero and may not rise.
 
 ## 13. Cost model and blast radius
 
@@ -1669,10 +1712,17 @@ names what it blocks. Record the answer and the date here when one is decided.
 
 1. **Which feeds ship first?** Assumption: `anime-trivia-daily`, `anime-fact-daily`,
    `anime-news-daily` (grounded). Confirm or swap.
-2. **Are the published feeds public?** The plan assumes public read-only on
-   `anime.earlcameron.com`, which is what makes §2's unauthenticated plane safe. Private feeds would
-   need per-subscriber tokens in the URL and would change §5.4's caching. Note Slack can subscribe
-   to a tokenized URL, so this is possible — just a different design.
+2. **Are the published feeds public?** **Decided: yes, public — 2026-08-10.** The implementation
+   never grew the private-feed machinery this question was gating: `internal/model.Feed` and
+   `migrations/0002_feeds_items.sql`'s `feeds` table carry no token/secret column, and
+   `internal/publish/server.go`'s `Deps.GetFeed` resolves a feed by bare slug with no credential
+   check anywhere on the publish plane — matching §2's table, which already documents the plane as
+   `unauthenticated`. A codebase-wide search for subscriber-token machinery (`subscriber_token`,
+   `feed_token`, per-subscriber URL tokens) turns up nothing outside this plan and `TODOS.md`/
+   `DEVLOG.md`/`SECURITY.md` prose. This was settled by omission during Phase A/B build-out rather
+   than recorded here at the time — `DEVLOG.md`'s "Open before Phase A can finish" note is now
+   stale. If private feeds are ever wanted, it is a new feature (per-subscriber tokens in the URL,
+   §5.4 caching changes), not a flag flip on what exists today.
 3. **Grounded sources** — starting set is ANN + Crunchyroll News RSS. Others in or out?
 4. **Posting cadence for the news feed** — one digest item per day, or N separate items? Separate
    items read better in Slack; a digest is cheaper and quieter. Assumption: 3 separate items.

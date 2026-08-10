@@ -60,10 +60,21 @@ jobs:
       # marker, so this check stays general instead of accumulating hardcoded
       # exceptions — which is what it had after the first two, and would have
       # kept growing.
+      #
+      # Not every `§` is ours. `XML 1.0 §2.11` cites the XML specification, and
+      # reading it as a reference to PLAN.md §2.11 reported a dangling link for
+      # a citation that was correct. The fix belongs here rather than in the
+      # prose: the alternative is rewriting accurate citations to appease a
+      # check, which is the check training the documents instead of the other
+      # way round. External citations are stripped by the spec name that
+      # precedes them, so adding a new one means adding it to this list.
       - name: Every plan reference resolves to a real section
         run: |
           fail=0
-          grep -ohE '§[0-9]+(\.[0-9]+)?' PLAN.md TODOS.md AGENTS.md CONTRIBUTING.md README.md 2>/dev/null \
+          ext='XML 1\.0|XML|RFC [0-9]+|Atom 1\.0|RSS 2\.0|JSON Feed 1\.[01]|HTTP/1\.1|SP 800-63B|OWASP'
+          sed -E "s#(${ext}) §[0-9]+(\.[0-9]+)?##g" \
+            PLAN.md TODOS.md AGENTS.md CONTRIBUTING.md README.md 2>/dev/null \
+            | grep -ohE '§[0-9]+(\.[0-9]+)?' \
             | sed 's/§//' | sort -u > /tmp/refs.txt
           while IFS= read -r r; do
             [ -n "$r" ] || continue

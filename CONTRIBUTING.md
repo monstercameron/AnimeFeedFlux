@@ -3,11 +3,19 @@
 This document is short on purpose. Almost everything about how this repository works is already in
 `PLAN.md`; what follows is the part you need before your first change.
 
-## Read this first: there is no code yet
+## Read this first: there is a real codebase now, and it is mid-build
 
-The repository is a specification and a build order. If you are picking up work, you are starting a
-task from `TODOS.md`, not modifying an existing implementation. Check the phase ordering before you
-begin — tasks are in dependency order, and Phase A must be real before Phase B means anything.
+Phase A (core engine) and Phase B (headless control surface) are both substantially built — store,
+renderers, generation, novelty, grounded news, scheduler, publish plane, auth, RPC, bridge, CLI —
+and covered by the test suites named below. Phase C has a container and nothing else yet; Phases D
+and E have not started. **Nothing is deployed anywhere, no feed has ever been published, and Slack
+has never been exercised against a live instance** — see `README.md` → "Status" and "Build order"
+for the current phase-by-phase state.
+
+If you are picking up work, you are almost always starting a task from `TODOS.md` against existing
+code, not against an empty repository — read the surrounding package before changing it. Check the
+phase ordering before you begin: tasks are in dependency order, and a Phase C or D task that depends
+on an unfinished Phase A/B task should not be started early just because it is next on a list.
 
 ## The document set, and which one wins
 
@@ -78,13 +86,29 @@ therefore stated plainly:
 - **Flow sanity tests (`BF-*`, §17.5) are not optional.** They drive a whole user flow and then
   assert on resulting *system state*, not on a mock's call log. This is where this design's real
   failures live: a sample that writes, a promote that skips cache invalidation, a correction that
-  reuses a guid.
+  reuses a guid. They live in `internal/flowtest` and run headless, before Phase D UI exists.
 - Adversarial generator tests must **reject** rather than publish. Malformed JSON, a URL absent from
   the candidate set, a near-duplicate, `<script>` in the body, an answer leaked into the summary, a
   backdated timestamp.
-- `-race` runs in CI on ubuntu, because it cannot run on windows/arm64. It is a gate.
-- Coverage is a **ratchet, not a target** — it may not go down. Chasing a percentage produces tests
-  written to touch lines.
+- **Fuzz targets exist and run in CI on every push**, not just when someone remembers to run them by
+  hand: `FuzzRSSWellFormed`, `FuzzAtomWellFormed`, `FuzzJSONFeedValid` (`internal/render`),
+  `FuzzHTMLNeverEmitsDisallowed` (`internal/sanitize`), `FuzzNormalizeIdempotent`
+  (`internal/urlnorm`). Each gets a 30s budget in CI; run one longer locally with
+  `go test ./internal/render -run '^$' -fuzz FuzzRSSWellFormed -fuzztime=5m` when you touch the code
+  it covers.
+- **A soak test** (`internal/generate/soak_test.go`) exercises generation over a long simulated
+  run. **A poll-load check** (`internal/publish/load_test.go`) proves the publish plane stays
+  read-only and behaves under sustained polling. Both are skipped by `-short`, which is what the
+  pre-commit hook runs — they only run in CI's full `go test -race ./...`, so a change to either
+  package is not proven safe until CI is green, not just `go build`.
+- `-race` runs in CI on ubuntu, because it cannot run on windows/arm64. It is a gate, and it is the
+  *only* place `-race` ever runs — never weaken that job to plain `go test` to get a run green.
+- Coverage is a **ratchet, not a target** — `scripts/coverage-ratchet.sh` fails CI if the percentage
+  drops (with a small tolerance for `-shuffle=on` noise). It never demands the number climb.
+  Chasing a percentage produces tests written to touch lines rather than assert behaviour.
+- `make validate` runs the external feed validator against rendered output in CI (`feeds` job) and
+  gates on warnings as well as errors — Slack's own troubleshooting advice is to run feeds through a
+  validator, so treat this as a compatibility gate, not a tidiness one.
 
 ## Branches
 

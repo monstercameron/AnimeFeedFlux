@@ -361,8 +361,11 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 **Pepper (optional, defence in depth)**
 
 - [ ] `SEC-07` `HMAC-SHA256(pepper, argon2idOutput)` before storage; pepper from env, never in the DB. §4
-- [ ] `SEC-08` `pepper_version` column from day one — without it rotation is impossible, not merely hard. §4
-- [ ] `SEC-09` Migration adding `password_version` and `pepper_version`. §10
+      (primitive only — `internal/auth/pepper.go`'s `Pepper`/`VerifyPeppered` exist and are tested, but nothing in
+      `password.go`'s Hash/Verify or `internal/rpc/auth.go`'s login path calls them; a pepper is never actually
+      applied to a stored credential)
+- [x] `SEC-08` `pepper_version` column from day one — without it rotation is impossible, not merely hard. §4
+- [x] `SEC-09` Migration adding `password_version` and `pepper_version`. §10
 - [ ] `SEC-10` Test: a database dump alone (salt + params + hash, no pepper) does not permit verification.
 
 **Password policy — NIST SP 800-63B, which looks unfamiliar on purpose**
@@ -409,10 +412,16 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 **Reset and single-use tokens**
 
 - [ ] `SEC-31` Reset tokens are 256-bit opaque, SHA-256 in the DB, single-use, expiring — never a JWT. §4
-- [ ] `SEC-32` Migration for `password_reset_tokens(token_hash, expires_at, used_at)`. §10
+      (primitive only — `internal/auth/reset.go`'s `NewResetToken`/`VerifyResetToken` are implemented and tested
+      as 256-bit/SHA-256/TTL-bound, but no RPC handler anywhere issues or consumes one — grep of `internal/rpc`
+      and `cmd` finds zero references — so "single-use" is only representable in the schema, not enforced)
+- [x] `SEC-32` Migration for `password_reset_tokens(token_hash, expires_at, used_at)`. §10
 - [ ] `SEC-33` **Using a reset revokes every existing session** — a reset that leaves old sessions
-      alive has not locked anyone out. §4
+      alive has not locked anyone out. §4 (documented as the caller's obligation in `reset.go`'s doc comment, but
+      no such caller exists yet — no revocation actually happens anywhere)
 - [ ] `SEC-34` Test: a used token is refused; an expired token is refused; sessions are gone after use.
+      (`TestResetTokenStoreSingleUseAndExpiry` only proves the schema can represent used/expired via raw SQL —
+      no function actually rejects a used or expired token, so there's nothing yet to test rejection of)
 
 **Login protection**
 
@@ -431,11 +440,11 @@ leak, a denylist to maintain, and a logout that is not actually immediate.
 - [x] `SEC-44` TOTP replay across two concurrent logins loses the race in the DB, not the app. §4
 - [x] `SEC-45` A recovery code cannot be used twice, under concurrency.
 - [x] `SEC-46` Password change revokes all other sessions.
-- [ ] `SEC-47` Fuzz the cookie parser: no panic, no accept, on arbitrary bytes.
-- [ ] `SEC-48` Fuzz the password validator: no panic on arbitrary Unicode, including lone surrogates.
-- [ ] `SEC-49` An argon2id hash string that is malformed, truncated, or has absurd parameters is
+- [x] `SEC-47` Fuzz the cookie parser: no panic, no accept, on arbitrary bytes.
+- [x] `SEC-48` Fuzz the password validator: no panic on arbitrary Unicode, including lone surrogates.
+- [x] `SEC-49` An argon2id hash string that is malformed, truncated, or has absurd parameters is
       rejected without panicking and without attempting a multi-gigabyte allocation.
-- [ ] `SEC-50` No secret (password, token, pepper, TOTP secret) appears in any log line, at any level.
+- [x] `SEC-50` No secret (password, token, pepper, TOTP secret) appears in any log line, at any level.
 
 - [x] `B0-01` argon2id hashing; store parameters beside the hash for later raising. §4
 - [x] `B0-02` Rehash on next successful login when parameters change. §4
@@ -636,19 +645,25 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 
 ## C4 — Ops
 
-- [ ] `C4-01` In-process nightly backup: `VACUUM INTO` plus an integrity check on the copy. §15
-- [ ] `C4-02` Retain 14 days locally. §15
-- [ ] `C4-03` **Encrypt and ship the copy off the box.** §15
-- [ ] `C4-04` `SystemService.Backup` on-demand download. §11
-- [ ] `C4-05` Alert on backup failure — its failure is otherwise invisible. §15
-- [ ] `C4-06` **Restore into a scratch instance and confirm identical feeds.** §19
-- [ ] `C4-07` Staleness watchdog comparing last success against schedule plus grace. §15
-- [ ] `C4-08` Surface stale feeds on `/healthz` and via the Slack webhook. §15
-- [ ] `C4-09` Graceful shutdown: stop new runs, drain, checkpoint WAL, exit. §15
-- [ ] `C4-10` Mark runs still active at the shutdown deadline as interrupted. §15
-- [ ] `C4-11` Boot watchdog releases stale run locks. §15
-- [ ] `C4-12` A stale run found **with** committed items is `completed_unconfirmed`, not a failure. §15
-- [ ] `C4-13` Nightly prune: expired samples, old embeddings, `runs` past 180 days except failures. §15
+- [x] `C4-01` In-process nightly backup: `VACUUM INTO` plus an integrity check on the copy. §15
+- [x] `C4-02` Retain 14 days locally. §15
+- [ ] `C4-03` **Encrypt and ship the copy off the box.** §15 (encryption primitive only — `internal/ops/offsite.go`'s
+      AES-256-GCM chunked Encrypt/Decrypt is implemented and tested, but nothing calls it against a real backup and
+      no off-box transport — upload, rsync, S3, etc. — exists anywhere; the copy never leaves the box)
+- [x] `C4-04` `SystemService.Backup` on-demand download. §11
+- [ ] `C4-05` Alert on backup failure — its failure is otherwise invisible. §15 (`ops.Scheduler.runOnce` only
+      `slog.Error`s a failed backup; the Slack webhook `Notify` path is wired to the staleness watchdog only, not
+      to backup failure, so a failing nightly backup has no alert channel, only a log line)
+- [ ] `C4-06` **Restore into a scratch instance and confirm identical feeds.** §19 (requires a real deployment —
+      nothing is deployed anywhere; `ops.Restore` is unit-tested but the drill itself has not been performed)
+- [x] `C4-07` Staleness watchdog comparing last success against schedule plus grace. §15
+- [ ] `C4-08` Surface stale feeds on `/healthz` and via the Slack webhook. §15 (webhook half exists —
+      `ops.Notify` — but nothing wires `ops.Check`'s stale list into the `/healthz` handler; not surfaced there)
+- [x] `C4-09` Graceful shutdown: stop new runs, drain, checkpoint WAL, exit. §15
+- [x] `C4-10` Mark runs still active at the shutdown deadline as interrupted. §15
+- [x] `C4-11` Boot watchdog releases stale run locks. §15
+- [x] `C4-12` A stale run found **with** committed items is `completed_unconfirmed`, not a failure. §15
+- [x] `C4-13` Nightly prune: expired samples, old embeddings, `runs` past 180 days except failures. §15
 - [ ] `C4-14` Test: kill after the model returns but before commit → interrupted, zero items. §17
 - [ ] `C4-15` Expose per-feed last-success age and error counts on `/healthz`. §15
 - [ ] `C4-16` Export `aff_feed_staleness_seconds` so the watchdog's number is graphable. §15.0a
@@ -719,6 +734,11 @@ interface is reachable, and `/recover` documents it rather than implementing it.
 **Navigation.** Three top-level destinations in `AUTH`. No nested navigation, no hamburger, no
 breadcrumb — three pages do not need wayfinding.
 
+**Text.** Every user-visible string in this section's screens comes from the i18n catalogue
+(`D6-*`), including the state matrix's own strings — the reason in `disabled-with-reason` and the
+banner in `disconnected`. There is one locale. The catalogue exists so the interface's wording has
+one owner, not because a second language is planned.
+
 ## D0 — Shell
 
 - [ ] `D0-01` GWC (v5 pin) project set up under `web/`, building to WASM. §3
@@ -740,7 +760,16 @@ breadcrumb — three pages do not need wayfinding.
 - [ ] `D0-17` GWC discipline: hooks unconditional and positional. §12.6
 - [ ] `D0-18` No `UseAtom` in render-only paths. §12.6
 - [ ] `D0-19` Declared effect deps; no browser-state reads in the render body. §12.6
-- [ ] `D0-20` No i18n — single user, English, explicitly out of scope. §12.6
+- [-] `D0-20` ~~No i18n — single user, English, explicitly out of scope.~~ **Reversed 2026-08-10.**
+      Superseded by `D6-*`. The original reasoning was about *languages*; the actual value is about
+      *where strings live*, which applies at one user and one locale. Retrofitting later means
+      touching every component written without it, which is the work that never gets scheduled. §12.6
+- [ ] `D0-21` i18n provider mounted in the **root component, above the router** — a provider inside
+      a route cannot serve the shell's own reconnect banner or the guard's redirect notice. §12.6
+- [ ] `D0-22` Every shared primitive (`D0-13`) takes its labels as keys, never literals — a
+      primitive with a hardcoded label defeats the catalogue everywhere it is reused. §12.6
+- [ ] `D0-23` The six shared state components (`D0-14`) carry i18n keys, including the reason string
+      in `disabled-with-reason` and the countdown in `disconnected`. §12.6
 
 ## D1 — Auth pages (`J1`, `J7`)
 
@@ -836,6 +865,71 @@ breadcrumb — three pages do not need wayfinding.
 - [ ] `D5-05` Walk `J1`–`J9` end to end in a browser and fix what is awkward.
 - [ ] `D5-06` Confirm nothing in the UI can reach a state the flow table does not name. D-FLOW
 
+## D6 — i18n across every user-visible string (§12.6)
+
+Reverses `D0-20`. One locale ships (`en`); the point is not other languages but that the
+interface's vocabulary becomes a reviewable artefact instead of three hundred literals scattered
+across components. Do these **alongside** each surface, not as a pass afterwards — a cleanup pass
+over finished screens is the retrofit `D0-20`'s reversal exists to avoid.
+
+**Foundations**
+
+- [ ] `D6-01` Adopt GWC v5's `i18n` package; record in `PLAN.md` §12.6 what it does and does not do
+      (interpolation, plurals, formatters) before any keys are written. §12.6
+- [ ] `D6-02` `en` catalogue as a single checked-in source of truth, loaded at build time. §12.6
+- [ ] `D6-03` **Keys named for meaning, not for the English text** — `auth.login.submit`, never
+      `auth.login.signIn`. A key named after its wording turns fixing wording into a rename. §12.6
+- [ ] `D6-04` Namespace keys by surface (`auth.*`, `generate.*`, `history.*`, `settings.*`,
+      `shell.*`, `common.*`) so an unused key is findable and a missing one is obvious. §12.6
+- [ ] `D6-05` Interpolation through the library, never string concatenation — concatenated
+      fragments assume English word order and silently break the moment a second locale exists. §12.6
+- [ ] `D6-06` Plurals through the library's plural rules, not `if n == 1`. §12.6
+- [ ] `D6-07` A missing key renders the key itself and logs, loudly, in dev — never an empty string.
+      A blank label is the one failure mode that looks like a styling bug. §12.6
+- [ ] `D6-08` Locale-aware formatters for dates, times, relative times, numbers and currency. The
+      rail's "next run in local time" (`D2-02`) and every cost figure (`D2-25`) go through these,
+      never `fmt.Sprintf`. §12.6
+
+**Extraction, per surface**
+
+- [ ] `D6-09` Shell: nav, the `DISCONNECTED` banner and its countdown, the session-expiry modal,
+      the guard's redirect notice. §12.6
+- [ ] `D6-10` `D1` auth pages, **including the single generic failure string**. §12.1
+- [ ] `D6-11` `D2` generate: rail, editor, sampler, all four candidate views, every verdict. §12.3
+- [ ] `D6-12` `D3` history: both tabs, filters, reject reasons, the correction-vs-edit explanation. §12.4
+- [ ] `D6-13` `D4` settings: every section, every field label and help text. §12.5
+- [ ] `D6-14` Shared primitives and the six state components (`D0-13`, `D0-14`, `D0-22`, `D0-23`). §12.6
+- [ ] `D6-15` Validation and error messages, including ones **mirroring server text** — these are
+      where wording drifts furthest from the server, because nobody diffs them. §12.3
+- [ ] `D6-16` Typed-confirmation modals (`D0-16`): the prompt, and the word the user must type.
+      Decide explicitly whether the typed word is translated; if it is, the comparison must
+      translate too or confirmation becomes impossible in that locale. §12.6
+
+**Boundaries — what deliberately stays out**
+
+- [ ] `D6-17` Feed **content** is never translated: it is authored by the model in the feed's own
+      configured language and is data, not interface. Assert this — a well-meaning wrapper around
+      item titles in `D3` would silently corrupt published output. §5
+- [ ] `D6-18` The generic login-failure string stays generic in **every** locale. A translation that
+      distinguishes "no such account" from "wrong password" reintroduces the oracle `D1-02`
+      removes. §12.1
+- [ ] `D6-19` Slugs, cron expressions, model identifiers, HTTP status text and log output stay
+      untranslated — they are identifiers and operator surface, not prose. §12.6
+
+**Gate**
+
+- [ ] `D6-20` Lint that fails the build on a user-visible string literal in `web/`, with a narrow
+      `//nolint`-style escape that requires a reason. A convention nobody can check decays. §17
+- [ ] `D6-21` Zero-literal ratchet in CI, starting at zero and never allowed to rise. §17
+- [ ] `D6-22` Test: every key referenced by code exists in the catalogue. Catches a typo'd key,
+      which otherwise ships as a visible raw key in the UI. §17
+- [ ] `D6-23` Test: every catalogue key is referenced by code — dead keys are how a catalogue grows
+      to twice the size of the interface it describes. §17
+- [ ] `D6-24` Pseudolocale (`en-XA`) build that lengthens and brackets every string, so truncation
+      and clipped layouts are found now rather than by the first real translator. §17
+- [ ] `D6-25` `D5-04` contrast and `D5-03` keyboard audits re-run against the pseudolocale, where
+      longer strings change wrapping and focus order. §12.6
+
 ## DF — Flow sanity walkthroughs, through the UI (§22, §17.5)
 
 The `BF` suite already proves the system stays coherent. `DF` proves the **interface can actually
@@ -854,6 +948,11 @@ question, and not answerable by the headless suite.
 - [ ] `DF-10` `J9` watch a live run, **drop the WebSocket mid-run**, reconnect, see true state. §22
 - [ ] `DF-11` `J10` subscribe a real reader to the real URL and observe two poll cycles. §17.5
 - [ ] `DF-12` Every `DF` flow re-walked at the narrowest supported breakpoint. §12.6
+- [ ] `DF-13` Every `DF` flow re-walked under the pseudolocale (`D6-24`): no clipped label, no
+      overflowed button, no flow made uncompletable by a longer string. §12.6
+- [ ] `DF-14` `J3` and `J5` re-walked checking that **no raw key and no blank label** appears
+      anywhere on screen — the two failure modes `D6-07` and `D6-22` are meant to catch, verified
+      where a human would actually notice them. §12.6
 
 ---
 
@@ -916,12 +1015,27 @@ These are decisions, not tasks, and each one blocks something concrete. Left und
 resolved by accident, which is the worst way. Each names what it blocks.
 
 - [ ] `OQ-01` Confirm the three launch feeds. Blocks `U0-05`…`U0-07`. §21.1
-- [ ] `OQ-02` **Public or private feeds?** Private needs per-subscriber URL tokens and changes the
+- [x] `OQ-02` **Public or private feeds?** Private needs per-subscriber URL tokens and changes the
       §5.4 caching design and the §2 unauthenticated plane. Blocks `A9-01`. Decide before A9. §21.2
+      **Decided 2026-08-10: public.** Settled by the implementation, not a fresh decision: no
+      token/secret column on `feeds` (`migrations/0002_feeds_items.sql`), no credential check in
+      `internal/publish/server.go`'s `Deps.GetFeed`, and no subscriber-token code anywhere in the
+      tree. See `PLAN.md` §21.2.
 - [ ] `OQ-03` Confirm the grounded source list beyond ANN and Crunchyroll. Blocks `U0-07`. §21.3
 - [ ] `OQ-04` News cadence: one digest item per day, or N separate items? Currently assumed 3
       separate, which reads better in Slack. Blocks `A6-13`. §21.4
 - [ ] `OQ-05` Record each answer in `PLAN.md` §21 as decided, with the date and the reason.
+- [ ] `OQ-06` **Does a recovery-code elevated session grant one privileged action or two?** Today it
+      grants exactly one: `ChangePassword` and `ReenrollTOTP` both end the elevated session
+      (`internal/rpc/auth.go`'s `endElevatedSession`) the moment either succeeds, so a code cannot
+      chain "reset password" and "re-enroll TOTP" in one recovery. Ending elevation after a single
+      action is the safer default (a recovery code is a bearer credential; a longer-lived elevated
+      window is exactly what an attacker who found one would want) but costs a second code at
+      "new phone, lost authenticator" — the realistic lockout, where both are wanted at once — out of
+      a finite set. Decide whether that tradeoff is acceptable or whether a recovery session should
+      cover both actions. Blocks nothing currently shipped (the UI at `web/pages/auth/recover.go`
+      already models "choose one" honestly), but should be settled before `U2-03`'s recovery drill is
+      treated as final. §12.2
 
 # Definition of done — v1 (§19)
 

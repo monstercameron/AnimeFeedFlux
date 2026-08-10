@@ -8,29 +8,76 @@ the decisions that were made and then reversed — see [`DEVLOG.md`](DEVLOG.md).
 is deliberate: a changelog that carries reasoning becomes unreadable, and a narrative that carries
 version diffs becomes unmaintainable.
 
-No software is released yet. The project is in planning — see `README.md` → "Status".
+No software is released yet — nothing built here has been deployed anywhere, and no feed has ever
+been published. See `README.md` → "Status" for what is actually built versus what is still planned.
 
-`0.0.1-dev` versions the **specification**, not an implementation. The `-dev` pre-release tag is
-deliberate: it sorts below any `0.0.1` release under semver precedence, so tagging a real build
-later cannot be shadowed by this one. The number will stay in the `0.0.x-dev` range for as long as
-the repository contains no code, and the first version that means "you can run this" is the one cut
-at the end of Phase C.
+`0.0.1-dev` versioned the **specification**, not an implementation; `-dev` sorts below any real
+release under semver precedence, so tagging a real build later cannot be shadowed by an early one.
+The number stays in the `0.0.x-dev` range through the build phases, and the first version that means
+"you can run this" is the one cut at the end of Phase C.
 
 ## [Unreleased]
 
-### Added
+Everything below landed on `dev` since `0.0.2-dev`. It is a large amount of code — the engine,
+Phase A, and the headless control surface, Phase B, are both substantially built — but **none of it
+is running anywhere.** There is no staging host, no production deploy, and Slack has never been
+pointed at a real instance. If you're deciding whether to upgrade or deploy: there is nothing yet to
+deploy *to*; this is still development-only.
 
-- **First application code.** Phase A0: the module, `internal/config`, `internal/obs`, and a
-  `cmd/animefeedflux` that boots, serves `/healthz`, and shuts down cleanly.
-- `config.Load` validates the whole environment and reports **every** problem at once, so a
-  misconfigured boot is fixed in one pass rather than four deploys.
-- `config.Secret` redacts itself through `fmt`, `%#v`, and `slog`, so a secret cannot leak by being
-  part of a struct someone logged.
-- `obs.RedactingWriter` scrubs credential shapes from every log line as a third, independent
-  backstop under RULE-2.
-- Run and request identifiers are attached to log records by a handler rather than at each call
-  site — an identifier that must be remembered is missing from the line you need during an incident.
-- `Makefile` with `build`, `test`, `test-race`, `fmt-check`, `lint`, `cover`, `validate`, `hooks`.
+### Added — Phase A, the core engine
+
+- **Store** (`internal/store`): schema, migrations, a reader/writer split, WAL boot ordering, and
+  FTS5 search, all with migration tests. Complete.
+- **Renderers** (`internal/render`): RSS 2.0, Atom, JSON Feed, and permalink HTML from seeded items,
+  checked against golden files and three fuzz targets for well-formedness. Complete.
+- **Compliance** (`internal/feedvalidate`): external-validator-clean output and Slack-compatibility
+  checks — the date tag, item ordering, and no-duplicate-timestamp rules Slack's RSS app enforces
+  silently. Complete.
+- **Generation** (`internal/generate`): SchemaFlux wired for typed model output, trivia and grounded
+  news paths exercised end-to-end on recorded cassettes, plus a soak test. Most of it is done; a
+  handful of tasks remain.
+- **Novelty** (`internal/novelty`): embedding-based dedup and retry, proven against a seeded
+  near-duplicate corpus. Nearly complete.
+- **Grounded news** (`internal/sources`, `internal/urlnorm`): source fetch, candidate
+  normalization, and the structural link-integrity rule — a published link must be byte-equal to a
+  URL actually fetched, never model-generated. Most of it is done.
+- **Scheduler** (`internal/schedule`): cron with timezone/DST handling, jitter, a worker pool,
+  budget accounting, and a kill switch. Most of it is done.
+- **Sampling**: a dry-run pipeline that returns items, rendered XML, and validator verdicts without
+  writing to the store. Complete.
+- **Publish plane** (`internal/publish`): conditional GET, HEAD, gzip, caching, the 404/410/405
+  cases, rate limiting, and a poll-load check proving it stays read-only under load. Complete.
+- **Cross-cutting**: fuzz targets for the renderers, the HTML sanitizer, and URL normalization; the
+  generation soak test; the publish-plane poll-load check; all wired into CI. Complete.
+
+### Added — Phase B, the control surface (still headless)
+
+- **Auth** (`internal/auth`): argon2id password hashing, TOTP, recovery codes, sessions, and
+  backoff, plus `aff admin init`. Most of it is done.
+- **RPC services** (`internal/rpc`, `gen/aff/v1`): all six services, an auth interceptor,
+  optimistic concurrency, and pagination. Complete.
+- **Bridge** (`internal/bridge`): GoGRPCBridge wired in, `Origin` checking, keepalive pairing, and
+  streaming RPCs verified. Complete.
+- **CLI** (`cmd/aff`): drives create, sample, promote, run, and history end to end. Nearly complete.
+- **Flow sanity tests** (`internal/flowtest`): headless suites that drive a whole user flow and
+  assert on resulting system state rather than a mock's call log. Mostly green.
+
+### Added — Phase C, shipping (just started)
+
+- `Dockerfile`: multi-stage build, `CGO_ENABLED=0`, distroless runtime, no shell in the final image.
+- `deploy/`: a `compose.yaml` and nginx config, for later use — nothing here is running against
+  them yet. The CI/CD pipeline (GHCR push, tag scheme), staging host, Slack proof, ops runbook, and
+  production deploy are all still ahead.
+
+### Added — repository
+
+- CI workflow (`.github/workflows/ci.yml`) covering docs/hygiene checks, hook and script tests,
+  `go build`/`go vet`/`staticcheck`/`go test -race`/`govulncheck`, a coverage ratchet, the fuzz
+  targets, and `make validate` against the external feed validator — gated by a single `CI gate`
+  aggregating job, so branch protection never needs updating when a job is added.
+- New real dependencies: `modernc.org/sqlite` (pure-Go SQLite with FTS5), `schemaflux`,
+  `GoGRPCBridge`, `GoWebComponents`, `go.opentelemetry.io/otel` and its exporters, `golang.org/x/crypto`
+  and `github.com/pquerna/otp` (auth), `github.com/BurntSushi/toml`, `google.golang.org/grpc`.
 
 ### Decided
 

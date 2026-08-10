@@ -84,6 +84,22 @@ validate: ## Validate the rendered golden feeds
 	echo "validating $$(ls $$golden | wc -l) golden documents"; \
 	./bin/affvalidate $$golden/*.golden
 
+i18n-lint: ## Fail on user-visible string literals in web/ (§12.6, D6-20)
+	@if [ ! -d web ]; then echo "no web/ yet — nothing to lint"; exit 0; fi; \
+	go run ./cmd/affi18n lint web
+
+i18n-check: ## Catalogue key drift, both directions (D6-22, D6-23)
+	@if [ ! -d web/i18n ]; then echo "no catalogue yet — nothing to check"; exit 0; fi; \
+	go run ./cmd/affi18n check web
+
+# The ratchet is deliberately NOT in `all` yet. Phase D is mid-build and the
+# gate currently reports real literals; wiring it in before web/ is clean would
+# make `make all` red from the day it was added, which is how a gate gets
+# ignored — the same reasoning that kept CI's Go jobs skipping until A0 landed.
+# It goes into `all` and into CI once `make i18n-lint` reports zero (D6-21).
+i18n-ratchet: ## Zero-literal ratchet; the count may never rise (D6-21)
+	go run ./cmd/affi18n ratchet --baseline=.github/i18n-baseline.txt web
+
 tidy: ## go mod tidy
 	go mod tidy
 
