@@ -106,7 +106,8 @@ sequenceDiagram
     UI-->>Cam: Rendered, raw fields, feed XML, Slack preview
     Cam->>UI: Promote or Discard
     UI->>RPC: ItemService.PromoteSample, stamped now
-    RPC->>DB: Insert item
+    RPC->>DB: Insert item, retry on timestamp collision
+    RPC->>PUB: Invalidate render cache, bump lastBuildDate
 
     Note over Cam,SL: Phase 3 — Scheduled generation
     SCH->>DB: Acquire per-feed run lock, start heartbeat
@@ -115,10 +116,9 @@ sequenceDiagram
     GEN->>LLM: Generate
     LLM-->>GEN: Items
     GEN->>GEN: Same validation gates as sampling
-    GEN->>DB: Insert items in one transaction
-    Note right of DB: Distinct, strictly increasing pubDate<br/>never earlier than newest item
+    GEN->>DB: Insert items AND close the run in one transaction
+    Note right of DB: Distinct, strictly increasing pubDate<br/>never earlier than newest item<br/>Run row commits with the items, never after
     GEN->>PUB: Invalidate render cache, bump lastBuildDate
-    GEN->>DB: Close run with tokens, cost, rejections
 
     Note over Cam,SL: Phase 4 — Delivery, unauthenticated and read-only
     SL->>PUB: GET /feeds/anime-trivia-daily.xml, If-None-Match
@@ -383,7 +383,7 @@ GET/HEAD  /                       feed index (HTML) + <link rel="alternate"> aut
 GET/HEAD  /feeds/{slug}.xml       RSS 2.0
 GET/HEAD  /feeds/{slug}.atom      Atom 1.0
 GET/HEAD  /feeds/{slug}.json      JSON Feed 1.1
-GET/HEAD  /items/{guid-hash}      permalink page (OG tags, answer reveal for trivia)
+GET/HEAD  /items/{item_key}       permalink page (OG tags, answer reveal for trivia)
 GET       /healthz                liveness + per-feed staleness
 GET       /robots.txt             allow the index and permalinks, disallow nothing important
 GET       /favicon.ico
@@ -517,7 +517,9 @@ Per run:
 
 1. **Acquire context.** Generative: the last N item titles as an exclusion list. Grounded: fetch all
    sources (conditional GET against *them* too, storing their ETag/Last-Modified), parse, keep
-   entries newer than the last run, cap at ~40 candidates.
+   entries newer than the last run, cap at ~40 candidates. **Candidate URLs are normalized here,
+   once** — absolutized and stripped of tracking parameters — and only the normalized form is ever
+   shown to the model or compared against later. This is load-bearing: see step 6.
 2. **Call the model** with structured output. Record tokens in/out, model, and cost on the run.
 3. **Validate** against the Go schema. Malformed output → one repair attempt (§8), then fail.
 4. **Sanitize** HTML through the allowlist; absolutize every URL; strip tracking parameters
@@ -526,17 +528,33 @@ Per run:
    embeddings, cosine above threshold → discard and retry up to N times, then skip the run and log
    it. Repetition is what kills a daily trivia feed, and prompting alone will not prevent it at 200
    items.
-6. **Link integrity** (grounded): the item's `link` MUST be byte-equal (after normalization) to a URL
-   in the fetched candidate set. Not "similar to" — present. Failures are dropped and counted.
-   Optional second check: `GET` returns 200 with a non-empty title.
+6. **Link integrity** (grounded): the item's `link` MUST be byte-equal to a URL in the fetched
+   candidate set. Not "similar to" — present. Failures are dropped and counted. Optional second
+   check: `GET` returns 200 with a non-empty title.
+
+   **Both sides of that comparison must be normalized identically, by the same function, or the
+   check rejects good links.** News RSS routinely carries `utm_*` and `fbclid` on item URLs; if
+   candidates keep them and step 4 strips them from the model's output, a perfectly faithful echo of
+   a real candidate fails byte-equality and gets dropped. The failure is silent and looks like the
+   model misbehaving, when it is our own asymmetry — and it would starve the news feed while
+   appearing to work. Hence normalization happens once at step 1, and step 4's stripping is only a
+   safety net on the output side. A test feeds candidates carrying tracking parameters and asserts
+   the echoed link is accepted.
 7. **Persist** with an opaque ULID `item_key` (§5.1) forming the Tag URI guid, a
    `content_hash = sha256(slug | normalized_title | date)` carried in a separate column purely for
    idempotency, and a **distinct, strictly increasing `published_at`** never earlier than the feed's
    current newest (§5.5).
 8. **Invalidate** the render cache for that slug; bump `lastBuildDate`.
 
-Steps 3–8 run in a single transaction from the store's perspective: a run either adds its items or
-adds none. Failure is always "the feed keeps its previous items and logs an error run" — never a
+**The run row is closed in the same transaction that inserts the items** — not as a following step.
+Otherwise a crash in the gap between "items committed" and "run marked finished" leaves live items
+in the feed alongside a run record the boot watchdog will mark `interrupted`, and the history then
+lies about what happened. That is precisely the failure §12.4 refuses to allow when it forbids
+editing runs. Cache invalidation (step 8) is deliberately *outside* the transaction, because it is
+idempotent and recoverable: a missed invalidation self-heals on the next write or restart, and a
+cache is not a source of truth.
+
+So the commit boundary is: items, their embeddings, and the closed run row atomically together. Failure is always "the feed keeps its previous items and logs an error run" — never a
 partial feed, never an invented link.
 
 ## 10. Data model
@@ -606,6 +624,19 @@ Conventions: every mutation takes an `expected_version` for optimistic concurren
 must not silently clobber a recipe — a lesson already paid for in CashFlux); list RPCs paginate with
 an opaque cursor; errors use gRPC status codes with a machine-readable detail so the UI can render
 against the offending field.
+
+Two invariants hold for **every** write path that touches `items` — generation, `PromoteSample`,
+`Create`, `Update`, `Delete`, `Restore`, `PublishCorrection` — stated once here rather than
+repeated per surface, because stating them per surface is how one gets missed:
+
+- **Invalidate that feed's render cache and bump `lastBuildDate`.** Any aggregate containing the
+  feed is invalidated too. A promoted sample that sits in the database behind a stale cached feed is
+  indistinguishable from a bug.
+- **Take the per-feed write lock and resolve timestamp collisions by retry.** `PromoteSample` and a
+  scheduled run can both stamp `now()` within the same second and collide on
+  `UNIQUE(feed_id, published_at)`; the insert retries at +1 second until it succeeds, the same rule
+  already used within a run (§5.5). Without this, a manual promote during a scheduled run surfaces
+  as a raw constraint error to the admin.
 
 `Sample` is the important one: a full dry run returning the items it *would* publish, the rendered
 XML fragment, the novelty verdict, the grounded-link verdicts, and measured cost — writing nothing
@@ -814,7 +845,9 @@ newest first, into one URL. Cheap, because every item already lives in one table
   the alternative (leaving duplicate timestamps) means Slack silently drops items, which is the
   failure this whole design exists to avoid. Where the two rules conflict, **delivery wins over
   cosmetic date fidelity**, and the exception is written down rather than discovered later.
-- Aggregates never generate, never spend, and cannot nest.
+- Aggregates never generate, never spend, and **cannot nest** — `SetMembers` rejects any member
+  whose `kind = aggregate`. Enforced in the RPC rather than the schema, and named here so the
+  invariant has an owner instead of being an assertion.
 
 ### 14.3 What breaks as feeds multiply
 
@@ -915,13 +948,17 @@ finish within a timeout (a partially-charged LLM call should not be wasted), dra
 connections, checkpoints WAL, and exits. Runs still active at the deadline are marked interrupted.
 
 **Crash recovery.** Runs hold a lock row with a heartbeat. At boot, any run whose heartbeat is older
-than the threshold is marked `interrupted` and its lock released, so a crash mid-generation does not
-wedge a feed forever. Because generation commits atomically (§9), an interrupted run leaves no
-partial items.
+than the threshold has its lock released so a crash mid-generation does not wedge a feed forever.
+Because items and the closed run row commit in one transaction (§9), a stale-heartbeat run is by
+construction one that never reached its commit — it has no items, and is marked `interrupted`
+truthfully. The watchdog still asserts this rather than assuming it: if a stale run is somehow found
+with committed items, it is marked `completed_unconfirmed` and flagged for review instead of being
+recorded as a failure that demonstrably did work.
 
 **Data growth.** Items are retained indefinitely by default (they are the archive and they are
 small); embeddings are pruned beyond the comparison window; `runs` older than 180 days are pruned
-except failures. A size figure on the settings page makes growth visible before it is a problem.
+except failures; **expired `samples` rows are deleted by the nightly job**, since sampling is meant
+to be a cheap loop run often and `expires_at` filtering alone would grow the table forever. A size figure on the settings page makes growth visible before it is a problem.
 
 ## 16. Configuration
 
@@ -974,7 +1011,13 @@ as absolute with a scheme, since it is baked into every guid.
   absent from the source set; a near-duplicate of yesterday; `<script>` in `body_html`; a relative
   URL in an anchor; a title containing `]]>`; a summary over the cap; an answer leaked into
   `summary_text`; a backdated `published_at`; two items in one run sharing a timestamp.
-- Crash-recovery test: kill mid-run, assert the lock is reclaimed and no partial items exist.
+- Crash-recovery test: kill mid-run, assert the lock is reclaimed and no partial items exist; kill
+  in the window after the model returns but before commit, and assert the run is `interrupted` with
+  zero items rather than items with a failed run.
+- Grounded normalization test: candidates carrying `utm_*`/`fbclid`, model echoes one verbatim,
+  assert the link is **accepted** — the asymmetric-normalization trap in §9 step 6.
+- Concurrency test: `PromoteSample` racing a scheduled run on the same feed in the same second,
+  asserting both items land with distinct timestamps and no raw constraint error escapes.
 - Multi-feed tests: 20 feeds on an identical cron spread across the jitter window with no more than
   `AFF_MAX_CONCURRENT_RUNS` in flight; one feed timing out or panicking without affecting the
   others; an aggregate feed emitting strictly decreasing unique timestamps when two members share
@@ -1000,15 +1043,22 @@ as absolute with a scheme, since it is baked into every guid.
 | M10 | Grounded news | Source fetch, candidate set, link-integrity enforcement, ranking prompt |
 | M11 | Sampling | `Sample`/`SampleStream`, sample persistence, promote, cost reporting |
 | M12 | Admin UI | Five GWC pages against real RPCs, responsive, empty/error states |
+| M12a | Staging host | `staging.anime.earlcameron.com`: subdomain, Caddy, TLS, publish plane reachable |
 | M13 | Slack proof | Private workspace subscribes to staging; items post, no dupes, no spoilers |
 | M14 | Ops | Backups + tested restore, staleness watchdog, graceful shutdown, crash recovery |
-| M15 | Deploy | Caddy, systemd hardening, IP allowlist, `.wasm.gz`, feeds live |
+| M15 | Deploy | Production host, systemd hardening, IP allowlist on admin, `.wasm.gz`, feeds live |
 | M16 | Integration | ArticleFlux subscribes; verify rendering, dedup, refresh behavior |
 | M17 | Multi-feed | **Deferred.** Aggregates, feed index, shared source cache, LRU eviction |
 
 M1–M4 are plumbing and should land fast. M8 and M10 are the actual engineering. M5/M6 come before
 anything is exposed, because that is where mistakes are expensive. M13 is deliberately before
 deploy: discovering Slack drops your items after go-live is the expensive ordering.
+
+M12a exists because M13 was otherwise unsatisfiable. Slack is an external service that polls over
+public TLS, so "subscribe to staging" needs a real reachable HTTPS host — which the milestone table
+did not deliver until M15. M12a is the *minimum* to be reachable (subdomain, Caddy, certificate,
+publish plane only); the systemd hardening, admin IP allowlist, and production cutover stay in M15.
+The staging host serves throwaway content and is torn down or repointed after M16.
 
 **M17 is deferred on purpose, and that is a correction to an earlier draft.** §14.4 says the v1
 target of 1–10 feeds needs none of that machinery, so scheduling it ahead of backups and deploy
