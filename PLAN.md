@@ -389,7 +389,8 @@ With an admin UI editing prompts, **SQLite is the source of truth** for recipes.
 import/export (`aff recipe export|import`) exists for versioning and disaster recovery, not as the
 live path.
 
-A recipe carries: slug, title, description, language, kind (`generative` | `grounded`), schedule,
+A recipe carries: slug, title, description, language, kind (`generative` | `grounded` |
+`aggregate`, the last having members instead of a generator — §14.2), schedule,
 items per run, retention window, model params, system and user prompt templates, novelty settings,
 per-day token and run budgets, and — for grounded feeds — one or more source URLs.
 
@@ -510,7 +511,11 @@ auth_events(id, at, kind, ip, ok, detail)
 settings(key PRIMARY KEY, value)            -- singleton config editable at runtime (§12.5)
 
 feeds(id, slug UNIQUE, title, description, language, kind, spec_json, enabled,
-      timezone, last_fired_slot, last_built_at, deleted_at, created_at, updated_at)
+      timezone, jitter_offset, last_fired_slot, last_built_at, consecutive_failures,
+      author, copyright, og_image, ttl_minutes, deleted_at, created_at, updated_at)
+      -- kind: generative | grounded | aggregate   (aggregate never generates, §14.2)
+      -- jitter_offset is derived from hash(slug), stored so the UI readback matches reality
+feed_members(aggregate_feed_id, member_feed_id, position)
 items(id, feed_id, guid UNIQUE, title, summary_text, body_html, answer_html, link,
       source_name, published_at, model, prompt_hash, tokens_in, tokens_out, run_id,
       origin, created_at, updated_at, edited_at, deleted_at)
@@ -531,7 +536,7 @@ sources(id, feed_id, url, kind, last_fetched_at, last_etag, last_modified, last_
 
 `runs` is the operational spine — cost, drift, and "why is this feed stale" all resolve there, and
 it is the first screen of the history page. `heartbeat_at` plus `lock_holder` is how a crashed run
-is detected and reclaimed (§14).
+is detected and reclaimed (§15).
 
 Migrations are forward-only numbered SQL files applied at boot inside a transaction, with the
 version recorded. No down-migrations: the recovery path is a backup restore, which is honest about
@@ -543,7 +548,7 @@ what would actually happen.
   `ChangePassword`, `ListSessions`, `RevokeSession`, `RevokeAllSessions`, `ReenrollTOTP`,
   `RegenerateRecoveryCodes`.
 - `FeedService`: `List`, `Get`, `Create`, `Update`, `SetEnabled`, `Delete`, `RunNow`,
-  `ValidateSpec`, `ExportTOML`, `ImportTOML`.
+  `ValidateSpec`, `SetMembers` (aggregates, §14.2), `ExportTOML`, `ImportTOML`.
 - `SampleService`: `Sample` (unary dry run), `SampleStream` (server-stream), `ListSamples`,
   `DiscardSample`.
 - `ItemService`: `List` (search/filter/paginate), `Get`, `Create`, `Update`, `Delete`, `Restore`,
@@ -614,7 +619,7 @@ The main working surface: pick or create a feed, edit its recipe, **sample it**,
 panes — rail, editor, sampler.
 
 - **Rail** — feeds with status, last build, next run (local time), item count, 7-day spend; enable
-  toggle, Run Now, new feed. A stale feed (§14) is flagged here, not buried in a log.
+  toggle, Run Now, new feed. A stale feed (§15) is flagged here, not buried in a log.
 - **Editor** — slug, title, description, language, kind, cron **plus timezone** with a plain-English
   readback and the next three runs in local time, model and params, system and user prompt templates
   with the variable list inline, novelty settings, budgets, and sources for grounded feeds.
@@ -717,7 +722,116 @@ user, English, explicitly out of scope.
 - Scheduler is single-flight per feed via a DB run lock with heartbeat, so a slow run cannot stack.
 - `Sample` and the CLI's `--dry-run` never publish.
 
-## 14. Operations
+## 14. Multi-feed operation
+
+One instance hosts many feeds. That is already the design and no restructuring is needed for it:
+`feeds` is a table, the publish routes are keyed by slug, the scheduler iterates feeds, budgets and
+locks are per-feed, and the admin rail lists them. Nothing anywhere assumes one feed.
+
+What the plan did *not* answer is what changes as the count grows, and several defaults silently
+assume "a handful". Those are the real gaps.
+
+### 14.1 URL and identity namespace
+
+Slugs are the namespace, flat and global: `/feeds/{slug}.{xml,atom,json}`. A slug is
+`[a-z0-9-]{3,48}`, unique, immutable after first publish — changing it would break every
+subscription and orphan the Tag URI guids that embed it. The UI offers "duplicate this feed" rather
+than rename. Reserved slugs (`all`, `index`, `healthz`, `robots`, `favicon`, `items`, `feeds`) are
+rejected at validation.
+
+Each feed carries its own published identity — title, description, language, author/contact,
+copyright, `og:image`, TTL — defaulting from the global publishing settings (§12.5) and overridable
+per feed. Ten feeds should not all unfurl with the same picture.
+
+`/` is the feed index: every enabled feed, its description, subscribe links for all three formats,
+and `<link rel="alternate">` autodiscovery tags. It is also the page you paste into Slack when you
+have forgotten a slug.
+
+### 14.2 Aggregate feeds
+
+With many feeds, the useful thing is not more URLs — it is fewer. An **aggregate** feed
+(`kind = aggregate`) has member slugs and no generator of its own: it merges its members' items,
+newest first, into one URL. Cheap, because every item already lives in one table with one ordering.
+
+- One Slack channel can follow "everything" instead of subscribing seven times.
+- Items keep their original guid, so a subscriber to both the aggregate and a member sees the item
+  deduplicated by guid in any competent reader.
+- The `UNIQUE(feed_id, published_at)` rule does not span feeds, so an aggregate *can* surface two
+  items sharing a timestamp — which Slack drops. Aggregates therefore re-stamp on render with a
+  deterministic tie-break (member order, then guid) so the emitted sequence is strictly decreasing.
+  This is the one place the render layer adjusts a date, and it is tested explicitly.
+- Aggregates never generate, never spend, and cannot nest.
+
+### 14.3 What breaks as feeds multiply
+
+| Assumption | Fails around | Fix |
+|---|---|---|
+| Every feed's cron fires when it says | ~10 feeds on the same schedule | Deterministic jitter |
+| Unbounded render cache | ~100 feeds | Bounded LRU |
+| Serial scheduler loop | ~20 concurrent runs | Worker pool + semaphore |
+| One upstream fetch per feed | ~5 feeds sharing a source | Shared source cache |
+| Rail lists every feed | ~40 feeds | Search, filter, paginate |
+
+**Cron thundering herd.** People write `0 12 * * *` for everything, so twenty feeds fire in the same
+second, hit the provider concurrently, and spike cost and rate limits together. Each feed gets a
+**deterministic jitter** derived from `hash(slug)` spread across a configurable window (default 10
+minutes), so the schedule is still exact-ish and reproducible but the load is smeared. The UI's
+"next three runs" shows the jittered times, not the nominal ones — otherwise the readback lies.
+
+**Concurrency.** A worker pool runs at most `AFF_MAX_CONCURRENT_RUNS` (default 3) generations at
+once, with a separate global semaphore on provider calls so sampling and scheduled runs cannot
+collectively exceed the provider's rate limit. Overflow queues rather than failing; a run waiting on
+a slot is a visible state, not a silent delay.
+
+**Isolation.** One misbehaving feed must not starve the rest. Every run has a hard wall-clock
+timeout; a feed that fails N consecutive runs is auto-disabled with a loud reason rather than
+burning budget every hour forever; a source that times out affects only its own feed's run. Panics
+in a generator are recovered at the worker boundary and recorded as a failed run.
+
+**Render cache memory.** Naively the cache is `feeds × 3 formats × 2 encodings`. At ~100 KB per
+rendered feed and 50 feeds that is roughly 30 MB — fine; at 500 feeds it is not. The cache is a
+bounded LRU with a configured byte ceiling, and a miss is cheap (one indexed read plus a render).
+Cache stats go on the settings page so the ceiling is tuned from evidence.
+
+**Shared upstream sources.** If ten grounded feeds all pull ANN, that is ten fetches of the same
+URL per cycle — wasteful and rude. Source fetches are deduplicated by normalized URL within a cycle
+and cached briefly, with conditional GET against upstream, so N feeds sharing a source cost one
+request.
+
+**SQLite writes.** One writer, serialized. Generation writes are small and infrequent (a handful of
+rows per run), so contention is not the constraint even at hundreds of feeds — but runs must not
+hold a transaction open across an LLM call. The transaction opens *after* the model returns and
+covers only the inserts, which §9 already requires and this makes explicit as a scaling reason.
+
+**Admin UI.** Past roughly 40 feeds the rail needs search, status filtering, and pagination, and the
+dashboard needs "what needs attention" (stale, failing, over budget, disabled) ahead of the full
+list. History already paginates.
+
+### 14.4 Scale envelope
+
+Honest estimates, to be replaced with measurements once M9 exists:
+
+| Feeds | Binding constraint | Notes |
+|---|---|---|
+| 1–10 | Nothing | The v1 target. Defaults are correct as written. |
+| 10–50 | Cron herding, provider rate limits | Jitter and the worker pool matter here. |
+| 50–200 | **Cost**, not compute | 200 daily feeds is 200 LLM calls a day; the server is idle. |
+| 200+ | Cost, and admin ergonomics | Feed management becomes the bottleneck, not the runtime. |
+
+The point worth internalizing: **this system is cost-bound long before it is resource-bound.** A
+droplet serving cached XML with conditional GET will handle far more feeds and subscribers than the
+budget will. So the scaling levers that matter are the budget hierarchy (§13) and the kill switch,
+not more hardware.
+
+### 14.5 Multiple instances
+
+Not supported, deliberately. SQLite has a single writer and the render cache is in-process, so two
+instances against one file would fight. If separation is ever wanted — say a private set of feeds on
+a different host — the answer is a **second instance with its own database and its own hostname**,
+not a shared-storage cluster. Sharing nothing is the only clustering story this design has, and
+saying so now avoids designing for a scale-out that will not happen.
+
+## 15. Operations
 
 **Observability.** Structured JSON logs (`log/slog`) with a request/run id threaded through, secrets
 redacted. `/healthz` returns per-feed last-success age, enabled state, error counts, and provider
@@ -755,7 +869,7 @@ partial items.
 small); embeddings are pruned beyond the comparison window; `runs` older than 180 days are pruned
 except failures. A size figure on the settings page makes growth visible before it is a problem.
 
-## 15. Configuration
+## 16. Configuration
 
 Environment only — no config file, no secrets on disk beyond the systemd `EnvironmentFile`.
 
@@ -769,6 +883,10 @@ Environment only — no config file, no secrets on disk beyond the systemd `Envi
 | `AFF_SECRET_KEY` | yes | derives the TOTP-secret encryption key |
 | `OPENAI_API_KEY` | yes | provider credential |
 | `AFF_GENERATION_ENABLED` | no | cold-start kill switch, default `1` |
+| `AFF_MAX_CONCURRENT_RUNS` | no | scheduler worker pool size, default `3` (§14.3) |
+| `AFF_PROVIDER_MAX_INFLIGHT` | no | global cap on concurrent provider calls, default `4` |
+| `AFF_SCHEDULE_JITTER` | no | jitter window for same-schedule feeds, default `10m` |
+| `AFF_CACHE_MAX_BYTES` | no | render-cache LRU ceiling, default `64MiB` |
 | `AFF_LOG_LEVEL` | no | default `info` |
 | `AFF_BACKUP_DIR` | no | nightly snapshot destination |
 | `AFF_SLACK_WEBHOOK_URL` | no | staleness/failure alerts |
@@ -778,7 +896,7 @@ Config is parsed and **validated at boot** — a missing or malformed required v
 with a clear message rather than surfacing as a broken feed hours later. The base URL is validated
 as absolute with a scheme, since it is baked into every guid.
 
-## 16. Testing
+## 17. Testing
 
 - `internal/llm` ships a `FakeProvider` replaying `testdata/*.json`. **The default test run never
   calls a paid API.** Live-provider tests are gated behind `AFF_LIVE_LLM=1` and excluded from CI.
@@ -801,10 +919,15 @@ as absolute with a scheme, since it is baked into every guid.
   URL in an anchor; a title containing `]]>`; a summary over the cap; an answer leaked into
   `summary_text`; a backdated `published_at`; two items in one run sharing a timestamp.
 - Crash-recovery test: kill mid-run, assert the lock is reclaimed and no partial items exist.
+- Multi-feed tests: 20 feeds on an identical cron spread across the jitter window with no more than
+  `AFF_MAX_CONCURRENT_RUNS` in flight; one feed timing out or panicking without affecting the
+  others; an aggregate feed emitting strictly decreasing unique timestamps when two members share
+  one (the §14.2 tie-break); N feeds sharing an upstream source issuing one fetch; slug rename
+  rejected after first publish; render-cache eviction under the byte ceiling.
 - End-to-end: generate → publish → fetch the feed → assert the validator passes and the item appears
   exactly once across two consecutive polls.
 
-## 17. Milestones
+## 18. Milestones
 
 | # | Milestone | Done when |
 |---|-----------|-----------|
@@ -817,11 +940,12 @@ as absolute with a scheme, since it is baked into every guid.
 | M6 | Bridge + RPC | GoGRPCBridge wired, interceptor auth, Feed/System services, CLI client |
 | M7 | Generative feed | Trivia + fact end-to-end on `FakeProvider`, then one real OpenAI run |
 | M8 | Novelty | Embeddings, dedup, retry; 30-day simulated backfill yields no near-duplicates |
-| M9 | Scheduler | Cron + timezone + DST, single-flight, budgets, run accounting, kill switch |
+| M9 | Scheduler | Cron + timezone + DST, jitter, worker pool, budgets, accounting, kill switch |
 | M10 | Grounded news | Source fetch, candidate set, link-integrity enforcement, ranking prompt |
 | M11 | Sampling | `Sample`/`SampleStream`, sample persistence, promote, cost reporting |
 | M12 | Admin UI | Five GWC pages against real RPCs, responsive, empty/error states |
 | M13 | Slack proof | Private workspace subscribes to staging; items post, no dupes, no spoilers |
+| M13a | Multi-feed | Aggregate feeds, feed index page, shared source cache, bounded cache, per-feed identity |
 | M14 | Ops | Backups + tested restore, staleness watchdog, graceful shutdown, crash recovery |
 | M15 | Deploy | Caddy, systemd hardening, IP allowlist, `.wasm.gz`, feeds live |
 | M16 | Integration | ArticleFlux subscribes; verify rendering, dedup, refresh behavior |
@@ -830,7 +954,7 @@ M1–M4 are plumbing and should land fast. M8 and M10 are the actual engineering
 anything is exposed, because that is where mistakes are expensive. M13 is deliberately before
 deploy: discovering Slack drops your items after go-live is the expensive ordering.
 
-## 18. Definition of done (v1)
+## 19. Definition of done (v1)
 
 1. Three feeds live: `anime-trivia-daily`, `anime-fact-daily`, `anime-news-daily`.
 2. All three validate clean, in all three formats, with zero validator warnings.
@@ -844,7 +968,7 @@ deploy: discovering Slack drops your items after go-live is the expensive orderi
 7. Total monthly spend under the configured ceiling, with per-feed attribution in `runs`.
 8. A backup has been restored into a scratch instance and serves identical feeds.
 
-## 19. Risks
+## 20. Risks
 
 - **Repetition** in daily generative feeds. M8 mitigates, but embeddings only catch surface
   similarity; expect to add a topic-coverage ledger (series, decade, genre already used) later.
@@ -865,7 +989,7 @@ deploy: discovering Slack drops your items after go-live is the expensive orderi
 - **Single point of failure.** One droplet, one SQLite file. Accepted for a personal project; the
   mitigation is backups that have actually been restored.
 
-## 20. Open questions
+## 21. Open questions
 
 1. **Which feeds ship first?** Assumption: `anime-trivia-daily`, `anime-fact-daily`,
    `anime-news-daily` (grounded). Confirm or swap.
