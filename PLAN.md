@@ -165,7 +165,8 @@ Standard earlcameron shape, so the ops story is boring:
   wazero-backed driver that JIT-compiles to executable pages — but the deployment is a container
   now, so that setting is moot and recorded only so the reasoning is not lost. Revisit only if a
   measured query-performance problem appears; correctness and image shape come first.
-- **LLM:** **SchemaFlux** (`github.com/monstercameron/schemaflux`, v1.1.0) — the in-house typed-LLM
+- **LLM:** **SchemaFlux** — pinned at `github.com/monstercameron/schemaflux v1.1.0`, added 2026-08-10
+  (A0-03), which pulls `sashabaranov/go-openai v1.20.4` transitively — the in-house typed-LLM
   library. Feeds are generated with `Generating[T]`, which returns a typed Go value instead of text
   to parse, with retries, structured-output contracts, cost tracking, and telemetry centralized in
   the library. Provider is OpenAI. See §8 for what it does and does not remove from this design.

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en-us">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sample Item 00</title>
+<meta name="description" content="Summary text for sample item 00.">
+<meta property="og:title" content="Sample Item 00">
+<meta property="og:description" content="Summary text for sample item 00.">
+<meta property="og:image" content="https://feeds.example.com/trivia-daily/og.png">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://feeds.example.com/trivia-daily/items/00">
+<meta property="article:published_time" content="2026-08-09T12:00:00Z">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+<article>
+<h1>Sample Item 00</h1>
+<time datetime="2026-08-09T12:00:00Z">2026-08-09T12:00:00Z</time>
+<p>Body HTML for sample item 00.</p>
+</article>
+</body>
+</html>

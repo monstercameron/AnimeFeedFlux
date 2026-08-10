@@ -97,7 +97,6 @@ func TestRSS_ExactDocument(t *testing.T) {
 		// even though it is second in c.Items.
 		"    <item>\n" +
 		"      <title>Anime News: Tom &#x26; Jerry &#x3C;crossover&#x3E;?</title>\n" +
-		"      <link></link>\n" +
 		"      <description>This weeks anime news, summarized.</description>\n" +
 		"      <content:encoded><![CDATA[<p>Full roundup here.</p>]]></content:encoded>\n" +
 		fmt.Sprintf(`      <guid isPermaLink="false">%s</guid>`+"\n", guidB) +
@@ -264,19 +263,23 @@ func TestRSS_TitleHexEscaped(t *testing.T) {
 	}
 }
 
-// TestRSS_EmptyLinkRenders is the "at least title/description present"
-// tolerance from §5.1 applied to link specifically: an item with no link
-// (plausible for a pure-generative item with no permalink source) must
-// still render a well-formed, empty <link> rather than being skipped or
-// breaking the document.
-func TestRSS_EmptyLinkRenders(t *testing.T) {
+// An item with no link must still render, and must NOT emit an empty
+// <link></link>. Every RSS item element is optional provided title or
+// description is present (§5.1), and an empty link is worse than none: a
+// reader that follows it resolves "" against the feed URL and navigates to the
+// feed document instead of the item.
+func TestRSS_EmptyLinkIsOmittedNotEmpty(t *testing.T) {
 	got, err := RSS(rssTestChannel())
 	if err != nil {
 		t.Fatalf("RSS() error = %v", err)
 	}
 	doc := string(got)
 
-	if !strings.Contains(doc, "      <link></link>\n") {
-		t.Errorf("expected an empty <link></link> element for the linkless item, got:\n%s", doc)
+	if strings.Contains(doc, "<link></link>") {
+		t.Errorf("emitted an empty <link></link>; it should be omitted entirely:\n%s", doc)
+	}
+	// The document must still be well formed and still contain the item.
+	if !strings.Contains(doc, "<item>") {
+		t.Error("the linkless item did not render at all")
 	}
 }

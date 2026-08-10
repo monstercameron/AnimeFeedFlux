@@ -89,7 +89,14 @@ func writeItem(b *bytes.Buffer, c model.Channel, it model.Item) {
 	b.WriteString("    <item>\n")
 
 	writeElem(b, "      ", "title", it.Title)
-	writeElem(b, "      ", "link", it.Link)
+
+	// Omitted rather than emitted empty when the item has no URL. Every RSS
+	// item element is optional provided title or description is present (§5.1),
+	// and an empty <link></link> is worse than none: a reader that follows it
+	// resolves the empty string against the feed URL and navigates to the feed.
+	if it.Link != "" {
+		writeElem(b, "      ", "link", it.Link)
+	}
 
 	// description is the PLAIN-TEXT summary and NEVER the HTML body or the
 	// trivia answer — Slack renders exactly this field verbatim with no

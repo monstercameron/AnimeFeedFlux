@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Trivia Daily</title>
+    <link>https://feeds.example.com/trivia-daily</link>
+    <description>One anime trivia question a day, generated fresh.</description>
+    <language>en-us</language>
+    <pubDate>Sun, 09 Aug 2026 12:00:02 +0000</pubDate>
+    <lastBuildDate>Sun, 09 Aug 2026 12:00:00 +0000</lastBuildDate>
+    <generator>AnimeFeedFlux v0.0.2-dev</generator>
+    <docs>https://www.rssboard.org/rss-specification</docs>
+    <ttl>60</ttl>
+    <atom:link rel="self" type="application/rss+xml" href="https://feeds.example.com/trivia-daily.xml"/>
+    <item>
+      <title>Sample Item 02</title>
+      <link>https://feeds.example.com/trivia-daily/items/02</link>
+      <description>Summary text for sample item 02.</description>
+      <content:encoded><![CDATA[<p>Body HTML for sample item 02.</p>]]></content:encoded>
+      <guid isPermaLink="false">tag:feeds.example.com,2026:trivia-daily/00000000000000000000000002</guid>
+      <pubDate>Sun, 09 Aug 2026 12:00:02 +0000</pubDate>
+    </item>
+    <item>
+      <title>Sample Item 01</title>
+      <link>https://feeds.example.com/trivia-daily/items/01</link>
+      <description>Summary text for sample item 01.</description>
+      <content:encoded><![CDATA[<p>Body HTML for sample item 01.</p>]]></content:encoded>
+      <guid isPermaLink="false">tag:feeds.example.com,2026:trivia-daily/00000000000000000000000001</guid>
+      <pubDate>Sun, 09 Aug 2026 12:00:01 +0000</pubDate>
+    </item>
+    <item>
+      <title>Sample Item 00</title>
+      <link>https://feeds.example.com/trivia-daily/items/00</link>
+      <description>Summary text for sample item 00.</description>
+      <content:encoded><![CDATA[<p>Body HTML for sample item 00.</p>]]></content:encoded>
+      <guid isPermaLink="false">tag:feeds.example.com,2026:trivia-daily/00000000000000000000000000</guid>
+      <pubDate>Sun, 09 Aug 2026 12:00:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>

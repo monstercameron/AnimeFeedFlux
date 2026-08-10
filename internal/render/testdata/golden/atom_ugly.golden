@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>tag:feeds.example.com,2026:ugly-feed</id>
+  <title>Ugly Feed &#x26; &#x3C;Edge Cases&#x3E;</title>
+  <updated>2026-08-09T12:00:00Z</updated>
+  <author>
+    <name>AnimeFeedFlux Bot</name>
+  </author>
+  <link rel="self" href="https://feeds.example.com/ugly-feed.xml"/>
+  <link rel="alternate" href="https://feeds.example.com/ugly-feed"/>
+  <subtitle>Adversarial inputs for renderer goldens (§5.6).</subtitle>
+  <rights>Copyright 2026 AnimeFeedFlux</rights>
+  <generator>AnimeFeedFlux v0.0.2-dev</generator>
+  <entry>
+    <id>tag:feeds.example.com,2026:ugly-feed/UGLYUGLYUGLYUGLYUGLYUGLY01</id>
+    <title>Ugly &#x26; &#x3C;Weird&#x3E; 日本語タイトル 🎌 Title</title>
+    <updated>2026-08-09T12:00:00Z</updated>
+    <summary type="text">xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxend</summary>
+    <content type="html">&#x3C;p&#x3E;Body containing a raw ]]&#x3E; sequence, an &#x26; ampersand, and a &#x3C;b&#x3E;bold&#x3C;/b&#x3E; tag with 日本語 and 🎌.&#x3C;/p&#x3E;</content>
+  </entry>
+</feed>

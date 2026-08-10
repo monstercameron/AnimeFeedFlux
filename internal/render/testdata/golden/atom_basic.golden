@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>tag:feeds.example.com,2026:trivia-daily</id>
+  <title>Trivia Daily</title>
+  <updated>2026-08-09T12:00:00Z</updated>
+  <author>
+    <name>AnimeFeedFlux Bot</name>
+  </author>
+  <link rel="self" href="https://feeds.example.com/trivia-daily.xml"/>
+  <link rel="alternate" href="https://feeds.example.com/trivia-daily"/>
+  <subtitle>One anime trivia question a day, generated fresh.</subtitle>
+  <rights>Copyright 2026 AnimeFeedFlux</rights>
+  <generator>AnimeFeedFlux v0.0.2-dev</generator>
+  <entry>
+    <id>tag:feeds.example.com,2026:trivia-daily/00000000000000000000000002</id>
+    <title>Sample Item 02</title>
+    <updated>2026-08-09T12:00:02Z</updated>
+    <link rel="alternate" href="https://feeds.example.com/trivia-daily/items/02"/>
+    <summary type="text">Summary text for sample item 02.</summary>
+    <content type="html">&#x3C;p&#x3E;Body HTML for sample item 02.&#x3C;/p&#x3E;</content>
+  </entry>
+  <entry>
+    <id>tag:feeds.example.com,2026:trivia-daily/00000000000000000000000001</id>
+    <title>Sample Item 01</title>
+    <updated>2026-08-09T12:00:01Z</updated>
+    <link rel="alternate" href="https://feeds.example.com/trivia-daily/items/01"/>
+    <summary type="text">Summary text for sample item 01.</summary>
+    <content type="html">&#x3C;p&#x3E;Body HTML for sample item 01.&#x3C;/p&#x3E;</content>
+  </entry>
+  <entry>
+    <id>tag:feeds.example.com,2026:trivia-daily/00000000000000000000000000</id>
+    <title>Sample Item 00</title>
+    <updated>2026-08-09T12:00:00Z</updated>
+    <link rel="alternate" href="https://feeds.example.com/trivia-daily/items/00"/>
+    <summary type="text">Summary text for sample item 00.</summary>
+    <content type="html">&#x3C;p&#x3E;Body HTML for sample item 00.&#x3C;/p&#x3E;</content>
+  </entry>
+</feed>

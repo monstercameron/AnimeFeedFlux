@@ -1,0 +1,27 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Ugly Feed & <Edge Cases>",
+  "home_page_url": "https://feeds.example.com/ugly-feed",
+  "feed_url": "https://feeds.example.com/ugly-feed.xml",
+  "description": "Adversarial inputs for renderer goldens (§5.6).",
+  "language": "en-us",
+  "icon": "https://feeds.example.com/ugly-feed/og.png",
+  "authors": [
+    {
+      "name": "AnimeFeedFlux Bot"
+    }
+  ],
+  "items": [
+    {
+      "id": "tag:feeds.example.com,2026:ugly-feed/UGLYUGLYUGLYUGLYUGLYUGLY01",
+      "title": "Ugly & <Weird> 日本語タイトル 🎌 Title",
+      "content_html": "<p>Body containing a raw ]]> sequence, an & ampersand, and a <b>bold</b> tag with 日本語 and 🎌.</p>",
+      "summary": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxend",
+      "date_published": "2026-08-09T12:00:00Z",
+      "tags": [
+        "ugly",
+        "edge-case"
+      ]
+    }
+  ]
+}

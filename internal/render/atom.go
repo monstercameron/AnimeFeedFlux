@@ -101,11 +101,17 @@ func writeAtomEntry(b *bytes.Buffer, c model.Channel, it model.Item) {
 	b.WriteString("    <id>" + EscapeText(id) + "</id>\n")
 	b.WriteString("    <title>" + EscapeText(it.Title) + "</title>\n")
 	b.WriteString("    <updated>" + RFC3339(it.PublishedAt) + "</updated>\n")
-	// §5.2: an entry with no content MUST carry link rel="alternate". We
-	// always emit content too, but the link costs nothing and keeps every
-	// entry independently spec-compliant rather than compliant only in
-	// combination with the content element below.
-	b.WriteString(`    <link rel="alternate" href="` + EscapeText(it.Link) + `"/>` + "\n")
+	// §5.2: an entry with no content MUST carry link rel="alternate". We always
+	// emit content below, so the link is optional — and it is OMITTED when the
+	// item has no URL rather than emitted with href="".
+	//
+	// RFC 4287 requires href to be an IRI reference, and the empty string is
+	// not one. An empty href is also worse than no link at all in practice: a
+	// reader that follows it navigates to the feed document itself. Skipping it
+	// keeps the entry valid, because content is present.
+	if it.Link != "" {
+		b.WriteString(`    <link rel="alternate" href="` + EscapeText(it.Link) + `"/>` + "\n")
+	}
 	b.WriteString(`    <summary type="text">` + EscapeText(it.SummaryText) + "</summary>\n")
 
 	// type="html" means the value is escaped character data whose content

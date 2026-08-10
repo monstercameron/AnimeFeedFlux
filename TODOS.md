@@ -34,7 +34,7 @@ No network surface, no auth, no UI. Everything here is proven by tests and, from
 
 - [x] `A0-01` Create `go.mod` as `github.com/monstercameron/AnimeFeedFlux`, Go 1.26. §3
 - [ ] `A0-02` Create the directory layout exactly as listed in §3, with a doc comment per package.
-- [ ] `A0-03` Add `github.com/monstercameron/schemaflux` as a dependency; record the version. §8
+- [x] `A0-03` Add `github.com/monstercameron/schemaflux` as a dependency; record the version. §8
 - [x] `A0-04` Write `internal/config`: one struct, parsed from env, no globals. §16
 - [x] `A0-05` Validate config at boot; fail fast with one clear message per bad variable. §16
 - [x] `A0-06` Validate `AFF_PUBLIC_BASE_URL` is absolute with a scheme — it is baked into guids. §16
@@ -157,20 +157,20 @@ an incident — which is exactly when it is switched on.
 - [x] `A2-15` Permalink HTML page with OpenGraph and `twitter:card` tags. §5.5
 - [x] `A2-16` Trivia permalink renders the answer behind a spoiler break. §5.5
 - [x] `A2-17` **`og:description` is the question, never the answer** — enforced at the renderer. §5.5
-- [ ] `A2-18` Feed index page at `/` with `<link rel="alternate">` autodiscovery. §6
-- [ ] `A2-19` Golden files for all three formats plus the permalink page.
-- [ ] `A2-20` Goldens include: ampersands, `<` in a title, CJK, emoji, `]]>` in body, 500-char summary.
-- [ ] `A2-21` Golden for an item with no link (generative) and one with an external link (grounded).
+- [x] `A2-18` Feed index page at `/` with `<link rel="alternate">` autodiscovery. §6
+- [x] `A2-19` Golden files for all three formats plus the permalink page.
+- [x] `A2-20` Goldens include: ampersands, `<` in a title, CJK, emoji, `]]>` in body, 500-char summary.
+- [x] `A2-21` Golden for an item with no link (generative) and one with an external link (grounded).
 
 ## A3 — Compliance
 
 - [ ] `A3-01` `make validate` renders goldens and runs the W3C / RSS Advisory Board validator. §5.6
 - [ ] `A3-02` CI fails on validator **warnings**, not only errors. §5.6
-- [ ] `A3-03` Slack test: `pubDate`s strictly descending and unique across the feed. §5.5
-- [ ] `A3-04` Slack test: every item has a present, parseable date. §5.5
-- [ ] `A3-05` Slack test: `description` is plain text and under the hard cap. §5.5
-- [ ] `A3-06` Slack test: no answer text appears in `description` or `og:description`. §5.5
-- [ ] `A3-07` Slack test: OG tags present and populated on the permalink page. §5.5
+- [x] `A3-03` Slack test: `pubDate`s strictly descending and unique across the feed. §5.5
+- [x] `A3-04` Slack test: every item has a present, parseable date. §5.5
+- [x] `A3-05` Slack test: `description` is plain text and under the hard cap. §5.5
+- [x] `A3-06` Slack test: no answer text appears in `description` or `og:description`. §5.5
+- [x] `A3-07` Slack test: OG tags present and populated on the permalink page. §5.5
 - [ ] `A3-08` Document in-repo which validator version CI pins, so a green run is reproducible.
 
 ## A4 — Generation with SchemaFlux
@@ -285,24 +285,24 @@ an incident — which is exactly when it is switched on.
 
 ## A9 — Publish plane
 
-- [ ] `A9-01` Dedicated listener with explicit read/write/idle timeouts and `MaxHeaderBytes`. §6
-- [ ] `A9-02` Route set exactly as §6 — nothing else exists.
-- [ ] `A9-03` In-memory render cache: body, gzip body, ETag, Last-Modified, keyed slug+format. §6
-- [ ] `A9-04` A cache hit never touches SQLite. §6
-- [ ] `A9-05` Strong `ETag` from a hash of the exact rendered body. §5.4
-- [ ] `A9-06` Honor `If-None-Match` and `If-Modified-Since` with `304`. §5.4
-- [ ] `A9-07` `HEAD` behaves as `GET` minus body, validators included. §5.4
-- [ ] `A9-08` Correct content types; never `text/xml`. §5.4
-- [ ] `A9-09` **`Vary: Accept-Encoding` on every feed response.** §5.4
-- [ ] `A9-10` `Cache-Control: max-age=900` consistent with `<ttl>15</ttl>`. §5.4
+- [x] `A9-01` Dedicated listener with explicit read/write/idle timeouts and `MaxHeaderBytes`. §6
+- [x] `A9-02` Route set exactly as §6 — nothing else exists.
+- [x] `A9-03` In-memory render cache: body, gzip body, ETag, Last-Modified, keyed slug+format. §6
+- [x] `A9-04` A cache hit never touches SQLite. §6
+- [x] `A9-05` Strong `ETag` from a hash of the exact rendered body. §5.4
+- [x] `A9-06` Honor `If-None-Match` and `If-Modified-Since` with `304`. §5.4
+- [x] `A9-07` `HEAD` behaves as `GET` minus body, validators included. §5.4
+- [x] `A9-08` Correct content types; never `text/xml`. §5.4
+- [x] `A9-09` **`Vary: Accept-Encoding` on every feed response.** §5.4
+- [x] `A9-10` `Cache-Control: max-age=900` consistent with `<ttl>15</ttl>`. §5.4
 - [ ] `A9-11` Feed window cap: 50 items / 512 KB ceiling. §5.4
-- [ ] `A9-12` Per-IP token-bucket rate limit; `429` with `Retry-After`. §6
-- [ ] `A9-13` `405` with `Allow` for any method beyond GET/HEAD. §6
-- [ ] `A9-14` `404` unknown slug; **`410 Gone`** for a soft-deleted item. §6
+- [x] `A9-12` Per-IP token-bucket rate limit; `429` with `Retry-After`. §6
+- [x] `A9-13` `405` with `Allow` for any method beyond GET/HEAD. §6
+- [x] `A9-14` `404` unknown slug; **`410 Gone`** for a soft-deleted item. §6
 - [ ] `A9-15` A disabled feed still serves its last built content; a deleted feed `410`s. §6
-- [ ] `A9-16` No stack traces, no version banner, no directory listing. §6
-- [ ] `A9-17` `robots.txt`. §6
-- [ ] `A9-18` Test: 304 on both validators; 405; 410; gzip correctness; `Vary` present. §17
+- [x] `A9-16` No stack traces, no version banner, no directory listing. §6
+- [x] `A9-17` `robots.txt`. §6
+- [x] `A9-18` Test: 304 on both validators; 405; 410; gzip correctness; `Vary` present. §17
 - [ ] `A9-19` End-to-end: generate → fetch → validator passes → item appears once over two polls. §17
 - [ ] `A9-20` Span `http.request` with route, status, and cache result (hit|miss|304). §15.0a
 - [ ] `A9-21` Child span `render.feed` on a cache miss only — a hit must stay cheap. §15.0a

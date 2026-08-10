@@ -1,0 +1,52 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Trivia Daily",
+  "home_page_url": "https://feeds.example.com/trivia-daily",
+  "feed_url": "https://feeds.example.com/trivia-daily.xml",
+  "description": "One anime trivia question a day, generated fresh.",
+  "language": "en-us",
+  "icon": "https://feeds.example.com/trivia-daily/og.png",
+  "authors": [
+    {
+      "name": "AnimeFeedFlux Bot"
+    }
+  ],
+  "items": [
+    {
+      "id": "tag:feeds.example.com,2026:trivia-daily/00000000000000000000000002",
+      "url": "https://feeds.example.com/trivia-daily/items/02",
+      "title": "Sample Item 02",
+      "content_html": "<p>Body HTML for sample item 02.</p>",
+      "summary": "Summary text for sample item 02.",
+      "date_published": "2026-08-09T12:00:02Z",
+      "tags": [
+        "anime",
+        "trivia"
+      ]
+    },
+    {
+      "id": "tag:feeds.example.com,2026:trivia-daily/00000000000000000000000001",
+      "url": "https://feeds.example.com/trivia-daily/items/01",
+      "title": "Sample Item 01",
+      "content_html": "<p>Body HTML for sample item 01.</p>",
+      "summary": "Summary text for sample item 01.",
+      "date_published": "2026-08-09T12:00:01Z",
+      "tags": [
+        "anime",
+        "trivia"
+      ]
+    },
+    {
+      "id": "tag:feeds.example.com,2026:trivia-daily/00000000000000000000000000",
+      "url": "https://feeds.example.com/trivia-daily/items/00",
+      "title": "Sample Item 00",
+      "content_html": "<p>Body HTML for sample item 00.</p>",
+      "summary": "Summary text for sample item 00.",
+      "date_published": "2026-08-09T12:00:00Z",
+      "tags": [
+        "anime",
+        "trivia"
+      ]
+    }
+  ]
+}

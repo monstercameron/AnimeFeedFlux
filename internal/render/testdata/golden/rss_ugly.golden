@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Ugly Feed &#x26; &#x3C;Edge Cases&#x3E;</title>
+    <link>https://feeds.example.com/ugly-feed</link>
+    <description>Adversarial inputs for renderer goldens (§5.6).</description>
+    <language>en-us</language>
+    <pubDate>Sun, 09 Aug 2026 12:00:00 +0000</pubDate>
+    <lastBuildDate>Sun, 09 Aug 2026 12:00:00 +0000</lastBuildDate>
+    <generator>AnimeFeedFlux v0.0.2-dev</generator>
+    <docs>https://www.rssboard.org/rss-specification</docs>
+    <ttl>60</ttl>
+    <atom:link rel="self" type="application/rss+xml" href="https://feeds.example.com/ugly-feed.xml"/>
+    <item>
+      <title>Ugly &#x26; &#x3C;Weird&#x3E; 日本語タイトル 🎌 Title</title>
+      <description>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxend</description>
+      <content:encoded><![CDATA[<p>Body containing a raw ]]]]><![CDATA[> sequence, an & ampersand, and a <b>bold</b> tag with 日本語 and 🎌.</p>]]></content:encoded>
+      <guid isPermaLink="false">tag:feeds.example.com,2026:ugly-feed/UGLYUGLYUGLYUGLYUGLYUGLY01</guid>
+      <pubDate>Sun, 09 Aug 2026 12:00:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>
