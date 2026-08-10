@@ -208,7 +208,7 @@ That makes authentication the entire defense, so it gets built properly rather t
   a cross-site WebSocket handshake at all — and gRPC-over-WS is not form-submittable. The `Origin`
   check is defense in depth for older browsers, non-browser clients, and a future misconfiguration
   of the cookie flags. Both are non-optional; neither is presented as the whole answer.
-- **Network:** the admin listener binds its own port behind Caddy with an IP allowlist (home IP,
+- **Network:** the admin listener binds 127.0.0.1 behind nginx with an IP allowlist (home IP,
   same pattern as the droplet SSH rule). The publish listener is the only thing open to the world,
   and it is read-only and unauthenticated by design.
 - **Login hardening:** per-IP and per-account exponential backoff, one generic failure message,
@@ -296,7 +296,7 @@ JSON Feed 1.1. These are implementation requirements, not aspirations, and each 
   `application/rss+xml` is only a de facto convention with no registration; it is still the right
   thing to emit, but the two are not on equal spec footing.
 - **`Vary: Accept-Encoding` on every feed response.** Encoding is negotiated per request from a
-  cache holding both bodies, so without `Vary` any intermediary — Caddy, a corporate proxy in front
+  cache holding both bodies, so without `Vary` any intermediary — nginx, a corporate proxy in front
   of a reader, a CDN later — can cache one encoding and serve it to a client that cannot read it.
 - XML declaration with explicit `encoding="utf-8"`; UTF-8 output; **no BOM**.
 - **Conditional GET is mandatory.** Strong `ETag` (hash of the exact rendered body) plus
@@ -592,7 +592,9 @@ item_embeddings(item_id, model, dim, vec BLOB)
 corrections(item_id, corrects_item_id)      -- links a correction to what it corrects
 runs(id, feed_id, started_at, finished_at, status, error_kind, error, items_added,
      items_rejected, reject_reasons_json, tokens_in, tokens_out, est_cost_usd,
-     trigger, lock_holder, heartbeat_at)    -- trigger: cron | manual | sample | backfill
+     trigger, lock_holder, heartbeat_at)    -- trigger: cron | manual  (the only two producers:
+                                            -- the scheduler and RunNow. Sampling writes a samples
+                                            -- row, never a run; there is no backfill entry point.)
 samples(id, feed_id, created_at, expires_at, payload_json, tokens_in, tokens_out, cost_usd)
 sources(id, feed_id, url, kind, last_fetched_at, last_etag, last_modified, last_status)
 ```
@@ -615,7 +617,7 @@ what would actually happen.
 - `SampleService`: `Sample` (unary dry run), `SampleStream` (server-stream), `ListSamples`,
   `DiscardSample`.
 - `ItemService`: `List` (search/filter/paginate), `Get`, `Create`, `Update`, `Delete`, `Restore`,
-  `PurgeDeleted`, `PromoteSample`, `PublishCorrection`.
+  `PromoteSample`, `PublishCorrection`. **There is no hard delete** — see §12.4.
 - `RunService`: `History`, `Get`, `Watch` (server-stream of live progress), `Delete`.
 - `SystemService`: `Stats`, `SetGenerationEnabled`, `GetSettings`, `UpdateSettings`, `Version`,
   `Backup`.
@@ -625,9 +627,15 @@ must not silently clobber a recipe — a lesson already paid for in CashFlux); l
 an opaque cursor; errors use gRPC status codes with a machine-readable detail so the UI can render
 against the offending field.
 
-Two invariants hold for **every** write path that touches `items` — generation, `PromoteSample`,
-`Create`, `Update`, `Delete`, `Restore`, `PublishCorrection` — stated once here rather than
-repeated per surface, because stating them per surface is how one gets missed:
+Two invariants hold for **every write path that changes a feed's published representation** — not
+merely those touching `items`. That includes generation, `PromoteSample`, `ItemService.Create`,
+`Update`, `Delete`, `Restore`, `PublishCorrection`, **and the feed-level writes
+`FeedService.Update`, `SetEnabled`, and `SetMembers`**. The feed-level ones matter precisely because
+they write no item at all, yet change rendered output: a feed's title, `og:image`, or TTL is baked
+into every channel element, and an aggregate's membership determines what it renders. Scoping the
+rule to "item writes" would leave an admin retitling a feed and seeing nothing change until an
+unrelated write happened to touch that slug. Stated once here rather than per surface, because per
+surface is how one gets missed:
 
 - **Invalidate that feed's render cache and bump `lastBuildDate`.** Any aggregate containing the
   feed is invalidated too. A promoted sample that sits in the database behind a stale cached feed is
@@ -740,9 +748,16 @@ that happened, and editing it would make the cost and drift numbers lie.
   a duplicate in every subscriber's inbox. Edits are recorded in `item_revisions` (with a diff view
   and revert) and bump `lastBuildDate`. Changing `published_at` is guarded by the no-backdating rule
   (§5.5).
-- **Delete** — soft delete. The item leaves the feed window, its permalink returns **410 Gone**, and
-  the guid is never reused. `Restore` undoes it; `PurgeDeleted` hard-deletes behind typed
-  confirmation.
+- **Delete** — soft delete, and **only** soft delete. The item leaves the feed window, its permalink
+  returns **410 Gone**, and the guid is never reused. `Restore` undoes it.
+
+  An earlier draft had a `PurgeDeleted` hard delete. It is cut, because it contradicted three things
+  this design actually promises: §7's "only `runs` rows and stale embeddings are ever pruned",
+  §5.1's guid that is "never freed", and the permalink that 410s *forever* — purging leaves nothing
+  to 410 on, so the route falls through to a generic 404 and quietly breaks the promise that Slack
+  messages and old guids keep resolving. It would also dangle or silently cascade `item_revisions`
+  and `corrections`. No definition-of-done item needed it. If a genuine hard delete is ever
+  required, it should arrive as a documented exception to §7, not as a contradiction of it.
 - **Publish a correction** — creates a new item linked to the original via `corrections`, stamped
   now, prefixed "Correction:", and rendered with a pointer back. This is the only mechanism that
   actually reaches subscribers.
@@ -930,18 +945,59 @@ feed's last successful run against its schedule plus a grace factor and marks it
 in the rail, red on `/healthz`, and (if configured) posted to a Slack webhook. Alerting on absence
 of work, not just presence of errors, is the point.
 
-**Backups.** The SQLite file is the only copy of everything ever generated. Nightly
-`VACUUM INTO` snapshot to a timestamped file, retained 14 days, plus `SystemService.Backup` for an
-on-demand download before anything risky. Restore is documented and **tested once during M14** —
-an untested backup is not a backup. Local-only, consistent with how this box is treated.
+**Backups.** The SQLite file is the only copy of everything ever generated. Nightly `VACUUM INTO`
+snapshot **plus an integrity check on the copy** — not a file copy, because in WAL mode an unknown
+amount of committed data lives in `-wal` at any instant and copying the three files copies them at
+three different moments, producing a backup that opens cleanly and is missing a transaction. Kept 14
+days, plus `SystemService.Backup` for an on-demand download before anything risky.
 
-**Deploy.** Built on the droplet (same pattern as ArticleFlux), which avoids cross-compilation
-surprises. The WASM build runs in an isolated scratch directory to dodge the known concurrent-build
-race, emits `.wasm.gz`, and the binary and assets are published by atomic move into the serve
-directory so no request ever sees a half-written file. systemd unit with `Restart=always`,
-`EnvironmentFile` at 0600, `NoNewPrivileges`, `ProtectSystem=strict`, and a writable path only for
-the DB and backups. Caddy terminates TLS, serves both hosts, and applies the IP allowlist to the
-admin host. Logs go to journald with rotation.
+The copy is then **shipped off the box, encrypted**, following the lesson already paid for on this
+droplet: fourteen verified ArticleFlux backups, their source database, and the key that decrypts
+them all lived on one DigitalOcean volume, so the single event they insured against took all of them
+at once. A backup on the same disk defends against `rm`, not against loss. Restore is documented and
+**tested once during M14** — an untested backup is not a backup.
+
+**Deploy — matching what is already on the box, verified 2026-08-09.** The target is
+`Earl-Cameron-dot-com` (167.99.232.99, Ubuntu 24.04, 2 GB / 2 vCPU, 4 GB swap already configured,
+38 GB free, Go 1.26.5 installed). It already runs `articleflux`, `cashflux`, and `earlcameron` as
+**systemd units behind nginx** — five nginx sites, per-app `-backup`, `-health`, and `-retention`
+sibling units on timers, and a `deployhook` service. AnimeFeedFlux joins that pattern rather than
+inventing a second one:
+
+- `aff.service` binds **127.0.0.1** so only nginx can reach it; nginx terminates TLS and applies the
+  admin-host IP allowlist. No app port is exposed directly.
+- `aff-health.timer` clears a failed unit and retries, because `StartLimitBurst` on an unattended box
+  otherwise turns a crash loop into a grave. Note the hard-won detail from `articleflux.service`:
+  `StartLimitIntervalSec`/`StartLimitBurst` are **`[Unit]` keys, not `[Service]`** — placed wrongly
+  they are silently ignored and the limit does not exist.
+- `aff-backup.timer` runs the nightly job above; `OnFailure=` alerts, because a backup's failure is
+  invisible until the moment it is needed.
+- `Restart=always` (not `on-failure`: a clean exit nobody asked for still means the feed is down),
+  `KillSignal=SIGTERM`, `EnvironmentFile` at 0600.
+- Hardening mirrors the existing units: `NoNewPrivileges`, `PrivateTmp`, `PrivateDevices`,
+  `ProtectSystem=strict`, `ProtectHome`, `ProtectKernelTunables/Modules/Logs`,
+  `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `ProtectProc=invisible`,
+  `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `RemoveIPC`,
+  `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`, `SystemCallFilter=@system-service`,
+  `SystemCallArchitectures=native`, with `ReadWritePaths` naming only the DB and backup directories.
+  This process fetches arbitrary URLs off the internet and parses what comes back — the sandbox is
+  not ceremony.
+- **`MemoryDenyWriteExecute` depends on the SQLite driver** and must be decided at M1, not
+  discovered at M15: a wasm-based driver (wazero) JIT-compiles to executable pages and dies on first
+  query with `MemoryDenyWriteExecute=yes`, which is exactly why ArticleFlux sets it to `no`. A cgo
+  driver can keep it `yes`.
+- Built on the droplet, as the other apps are, which avoids cross-compilation surprises. The 4 GB
+  swap already present is what makes the WASM link survivable at 2 GB RAM. The WASM build runs in an
+  isolated scratch directory to dodge the known concurrent-build race, emits `.wasm.gz`, and
+  artifacts are published by atomic move so no request sees a half-written file. Logs to journald.
+
+**Docker: no.** It was considered and rejected on evidence, not preference. The box has no Docker
+installed and runs three Go services plus seven sibling units entirely under systemd behind nginx;
+containerizing one service would add a second deployment model, a second log destination, and a
+second restart policy to maintain forever. The daemon would also cost 100–200 MB RSS of the 2 GB —
+against a static Go binary that needs none of it, next to a systemd sandbox that already provides
+comparable confinement. Docker for the *build* remains reasonable if toolchain drift ever becomes a
+problem; Docker at runtime buys nothing here.
 
 **Graceful shutdown.** SIGTERM stops the scheduler from starting new runs, lets in-flight runs
 finish within a timeout (a partially-charged LLM call should not be wasted), drains HTTP and gRPC
@@ -1043,10 +1099,10 @@ as absolute with a scheme, since it is baked into every guid.
 | M10 | Grounded news | Source fetch, candidate set, link-integrity enforcement, ranking prompt |
 | M11 | Sampling | `Sample`/`SampleStream`, sample persistence, promote, cost reporting |
 | M12 | Admin UI | Five GWC pages against real RPCs, responsive, empty/error states |
-| M12a | Staging host | `staging.anime.earlcameron.com`: subdomain, Caddy, TLS, publish plane reachable |
+| M12a | Staging host | `staging.anime.earlcameron.com`: subdomain, nginx vhost, TLS, publish plane reachable |
 | M13 | Slack proof | Private workspace subscribes to staging; items post, no dupes, no spoilers |
 | M14 | Ops | Backups + tested restore, staleness watchdog, graceful shutdown, crash recovery |
-| M15 | Deploy | Production host, systemd hardening, IP allowlist on admin, `.wasm.gz`, feeds live |
+| M15 | Deploy | Production nginx vhosts, systemd + sibling timers, admin IP allowlist, `.wasm.gz`, live |
 | M16 | Integration | ArticleFlux subscribes; verify rendering, dedup, refresh behavior |
 | M17 | Multi-feed | **Deferred.** Aggregates, feed index, shared source cache, LRU eviction |
 
@@ -1056,7 +1112,7 @@ deploy: discovering Slack drops your items after go-live is the expensive orderi
 
 M12a exists because M13 was otherwise unsatisfiable. Slack is an external service that polls over
 public TLS, so "subscribe to staging" needs a real reachable HTTPS host — which the milestone table
-did not deliver until M15. M12a is the *minimum* to be reachable (subdomain, Caddy, certificate,
+did not deliver until M15. M12a is the *minimum* to be reachable (subdomain, nginx vhost, certificate,
 publish plane only); the systemd hardening, admin IP allowlist, and production cutover stay in M15.
 The staging host serves throwaway content and is torn down or repointed after M16.
 
@@ -1098,9 +1154,15 @@ else in §14 waits.
 - **Hallucinated links** — structurally prevented (§9, step 6), not prompted away.
 - **Slack's silent failure mode.** It does not error; it simply stops posting. Hence the dedicated
   test suite, the Slack preview in the sampler, and M13 before deploy.
-- **Bridge fragility.** gRPC-over-WS through Caddy is the least standard piece, and the
+- **Bridge fragility.** gRPC-over-WS through nginx is the least standard piece, and the
   keepalive/GOAWAY flap is a known failure. Budget real time for M6 and keep the CLI working as an
-  independent check when the browser path misbehaves.
+  independent check when the browser path misbehaves. Three nginx settings are load-bearing for the
+  admin vhost and are the first thing to check when it misbehaves: `proxy_http_version 1.1` with the
+  `Upgrade`/`Connection` headers (without them the WebSocket upgrade never happens), a
+  `proxy_read_timeout` long enough to outlive an idle session (the default will drop the socket
+  mid-session and look like a bridge bug), and **`proxy_buffering off`** — with buffering on, nginx
+  holds server-streamed frames until its buffer fills, so `SampleStream` and `RunService.Watch`
+  arrive in one lump at the end and the streaming UI silently degrades to a spinner.
 - **Model or pricing drift.** A model deprecation or price change silently degrades output quality
   or cost accuracy. Model id is pinned per recipe and recorded per item; the price table is editable.
 - **Upstream ToS and fragility.** Summarize-and-link only, never republish full text; a source that
