@@ -27,8 +27,6 @@ package wsconn
 
 import (
 	"context"
-
-	"github.com/monstercameron/AnimeFeedFlux/web/appstate"
 	"time"
 
 	"google.golang.org/grpc"
@@ -126,21 +124,6 @@ func guardUnary[T any](conn *Conn, ctx context.Context, timeout time.Duration, c
 	}()
 	select {
 	case r := <-done:
-		if r.err == nil {
-			// A call that just succeeded is proof the socket is up. The state
-			// machine only learns about reconnection from the connectivity
-			// watcher, and if it misses the transition — a socket replaced
-			// during startup, an Idle→Ready hop it does not treat as a
-			// reconnect — the app sits in DISCONNECTED forever: every page
-			// showing "Reconnecting to the server", every Save button
-			// disabled, while its data loads perfectly. Observed on a cold
-			// load of /settings, permanent across 30 seconds.
-			//
-			// EvWSReconnected is a no-op from any state except DISCONNECTED
-			// (see appstate.Next), so this is a correction, never a
-			// transition on its own.
-			conn.emit(appstate.EvWSReconnected)
-		}
 		return r.val, r.err
 	case <-time.After(timeout):
 		var zero T

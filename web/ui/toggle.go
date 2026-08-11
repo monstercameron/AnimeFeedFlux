@@ -85,7 +85,7 @@ func Toggle(p ToggleProps) Node {
 		html.Aria("checked", boolStr(p.Checked)),
 		html.DisabledIf(p.Disabled),
 	}
-	if p.DisabledReasonKey != "" {
+	if p.DisabledReasonKey != "" && p.Disabled {
 		opts = append(opts, html.Aria("describedby", reasonID))
 	}
 	// Registered every render regardless of p.Disabled — see button.go's
@@ -110,7 +110,15 @@ func Toggle(p ToggleProps) Node {
 		css.Class([]css.Rule{css.Display.Flex, css.Items.Center, css.Gap(tokens.Space(3))}),
 		switchNode, labelNode,
 	)
-	if p.DisabledReasonKey == "" {
+	// The reason is shown only while the control is ACTUALLY disabled.
+	//
+	// It used to render whenever the key was set, regardless of Disabled — so
+	// every screen with a toggle carried a permanent, false "Reconnecting to
+	// the server — these controls are unavailable until it comes back" under
+	// a control that was working. It cost an afternoon of chasing a
+	// disconnection that never happened, and any operator reading it would
+	// have believed the app was broken.
+	if p.DisabledReasonKey == "" || !p.Disabled {
 		return row
 	}
 	return h.Div(
