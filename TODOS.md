@@ -723,7 +723,7 @@ closing note).
 Second pass, widening past the credential path itself into what a session can
 reach and what untrusted input can reach:
 
-- [ ] `A8-40` **`SystemService.Backup` hands the entire credential database to anyone holding a live
+- [x] `A8-40` **FIXED 2026-08-11.** — original report: **`SystemService.Backup` hands the entire credential database to anyone holding a live
       session, with no password or TOTP re-proof.** It `VACUUM INTO`s the whole SQLite file and
       returns it as bytes: `admin.password_hash` and its KDF params, the encrypted TOTP secret,
       every `sessions.token_hash`, every `recovery_codes.code_hash`, and every stored provider
@@ -734,6 +734,13 @@ reach and what untrusted input can reach:
       Second-order, worth deciding separately: the response travels the bridge into the WASM client,
       so the whole hash database lands in browser memory. §4 works hard to keep the session token
       out of WASM while the file every hash lives in goes straight through it.
+      Fixed: `SystemServiceBackupRequest` gained `current_password`/`totp_code`; `SystemServer` takes
+      a `CredentialVerifier` (`WithCredentialVerifier`, satisfied by `AuthServer.VerifyCurrentCredentials`)
+      and `Backup` now fails `PermissionDenied` on a bad re-proof and `FailedPrecondition` when no
+      verifier is wired — fail-closed, so a missing option in `wire.go` cannot silently reopen it.
+      Both callers collect the two fields: `aff system backup --password --totp` (refused client-side
+      before the round trip) and the settings → Data backup form, which clears the fields after use.
+      The second-order WASM question is deliberately left open — it is a design decision, not a defect.
 - [x] `A8-41` **FIXED 2026-08-11.** — original report: **`sources.Fetcher` has no scheme allowlist, no private/link-local address block, and
       follows redirects — server-side request forgery.** `fetchOnce` builds a request straight from
       the target string and calls `f.Client.Do`, so nothing stops the fetch reaching

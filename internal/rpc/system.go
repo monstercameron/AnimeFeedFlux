@@ -110,6 +110,9 @@ type SystemServer struct {
 	// (TODOS.md RULE-1).
 	modelLister llm.ModelLister
 
+	// verifier gates Backup. See CredentialVerifier.
+	verifier CredentialVerifier
+
 	// modelsCache holds the last successful provider model list. Guarded by
 	// modelsMu because SystemServer is shared across concurrent RPCs.
 	// See models.go's cachedModels/staleModels for the two ways it is read.
@@ -134,6 +137,28 @@ func WithPublishingSink(apply func(*affv1.Settings_Publishing)) SystemServerOpti
 
 func WithModelLister(l llm.ModelLister) SystemServerOption {
 	return func(s *SystemServer) { s.modelLister = l }
+}
+
+// CredentialVerifier re-proves the operator's password and TOTP.
+//
+// Backup returns the entire SQLite file — the admin password hash, the
+// encrypted TOTP secret, every session and recovery-code hash — and was
+// reachable by anyone holding a live session, which is strictly less
+// protection than ChangePassword or RegenerateRecoveryCodes, both of which
+// re-prove first because §4 says a stolen-but-still-live session must not be
+// enough on its own (A8-40).
+//
+// An interface, not the AuthServer itself, so the two services do not depend
+// on each other. nil means no verifier is wired, and Backup then REFUSES
+// rather than falling open: a missing dependency must not silently downgrade
+// the most damaging read in the system.
+type CredentialVerifier interface {
+	VerifyCurrentCredentials(ctx context.Context, password, totpCode string, now time.Time) error
+}
+
+// WithCredentialVerifier wires the re-proof Backup requires.
+func WithCredentialVerifier(v CredentialVerifier) SystemServerOption {
+	return func(s *SystemServer) { s.verifier = v }
 }
 
 // SystemServerOption configures NewSystemServer.
@@ -764,7 +789,17 @@ func (s *SystemServer) Stats(ctx context.Context, _ *affv1.SystemServiceStatsReq
 // concurrent WAL writer: it folds the WAL into a single self-contained file
 // rather than risking a copy that misses recent commits still sitting in
 // `-wal` (§3, §12.5 Data section: "on-demand backup download").
-func (s *SystemServer) Backup(ctx context.Context, _ *affv1.SystemServiceBackupRequest) (*affv1.SystemServiceBackupResponse, error) {
+func (s *SystemServer) Backup(ctx context.Context, req *affv1.SystemServiceBackupRequest) (*affv1.SystemServiceBackupResponse, error) {
+	// Re-proof first, before anything is read or written. See
+	// CredentialVerifier for why this is not merely session-authenticated.
+	if s.verifier == nil {
+		return nil, status.Error(codes.FailedPrecondition,
+			"rpc: backup is unavailable because no credential verifier is wired")
+	}
+	if err := s.verifier.VerifyCurrentCredentials(ctx, req.GetCurrentPassword(), req.GetTotpCode(), time.Now()); err != nil {
+		return nil, status.Error(codes.PermissionDenied, "rpc: backup requires the current password and TOTP code")
+	}
+
 	filename := fmt.Sprintf("animefeedflux-%s.db", time.Now().UTC().Format("20060102-150405"))
 
 	dir, err := os.MkdirTemp("", "aff-backup-")

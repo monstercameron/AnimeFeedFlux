@@ -133,11 +133,21 @@ func (a *app) cmdSystemKillSwitch(args []string) int {
 func (a *app) cmdSystemBackup(args []string) int {
 	fs := a.newFlagSet("aff system backup")
 	out := fs.String("out", "", "write the backup to this file (required — the DB file is binary, not printable)")
+	// The backup contains every hash in the database, so the server re-proves
+	// the operator's credentials rather than trusting a live session (A8-40).
+	password := fs.String("password", "", "current admin password (required — the backup contains every credential hash)")
+	totp := fs.String("totp", "", "current TOTP code (required — see --password)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
 	if *out == "" {
 		fmt.Fprintln(a.Stderr, "aff system backup: --out is required")
+		return exitUsage
+	}
+	if *password == "" || *totp == "" {
+		fmt.Fprintln(a.Stderr, "aff system backup: --password and --totp are required; the backup "+
+			"contains the admin password hash, the encrypted TOTP secret and every session and "+
+			"recovery-code hash, so it is gated on the same re-proof as changing the password")
 		return exitUsage
 	}
 
@@ -147,7 +157,10 @@ func (a *app) cmdSystemBackup(args []string) int {
 		fmt.Fprintf(a.Stderr, "aff system backup: %v\n", err)
 		return exitFail
 	}
-	resp, err := cb.System.Backup(ctx, &affv1.SystemServiceBackupRequest{})
+	resp, err := cb.System.Backup(ctx, &affv1.SystemServiceBackupRequest{
+		CurrentPassword: *password,
+		TotpCode:        *totp,
+	})
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "aff system backup: %v\n", err)
 		return exitFail

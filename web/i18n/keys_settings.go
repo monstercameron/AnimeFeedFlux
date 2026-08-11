@@ -33,6 +33,7 @@ var settingsMessages = gwci18n.NamespaceCatalog{
 	"settings.nav.generation":   {Text: "Generation"},
 	"settings.nav.publishing":   {Text: "Publishing"},
 	"settings.nav.data":         {Text: "Data"},
+	"settings.nav.appearance":   {Text: "Appearance"},
 	"settings.nav.about":        {Text: "About"},
 	"settings.nav.unknown":      {Text: "Unknown section"},
 
@@ -232,10 +233,21 @@ var settingsMessages = gwci18n.NamespaceCatalog{
 			gwci18n.PluralOther: "{arg1} items",
 		},
 	},
-	"settings.data.stats.dbSize":  {Text: "Database size: {arg1}"},
-	"settings.data.recipe.title":  {Text: "Feed recipe"},
-	"settings.data.recipe.feed":   {Text: "Feed"},
-	"settings.data.recipe.export": {Text: "Export"},
+	"settings.data.stats.dbSize": {Text: "Database size: {arg1}"},
+	// The stat strip's labels. Bare nouns under a figure, not sentences: the
+	// number says how many, the label says of what.
+	"settings.data.stats.feeds": {Text: "Feeds"},
+	"settings.data.stats.items": {Text: "Items"},
+	"settings.data.stats.size":  {Text: "Database size"},
+
+	"settings.data.recipe.title": {Text: "Export a recipe"},
+	"settings.data.recipe.help":  {Text: "Download one feed's configuration — prompts, schedule, budgets — as a file you can keep or hand to another deployment."},
+	// Say what it overwrites, because that is the part that cannot be undone.
+	"settings.data.recipe.import.help":        {Text: "Replace a feed's configuration with the one below. The feed keeps its items and its URL; everything else is overwritten."},
+	"settings.data.recipe.import.placeholder": {Text: "Paste an exported recipe here"},
+	"settings.data.backup.help":               {Text: "A snapshot of the whole database — every feed, item and run — as a single downloadable file."},
+	"settings.data.recipe.feed":               {Text: "Feed"},
+	"settings.data.recipe.export":             {Text: "Export"},
 	// The accessible name for the read-only export output box.
 	"settings.data.recipe.exportTitle":         {Text: "Exported recipe"},
 	"settings.data.recipe.exportError":         {Text: "Couldn't export the recipe."},
@@ -250,6 +262,9 @@ var settingsMessages = gwci18n.NamespaceCatalog{
 	"settings.data.backup.generate":            {Text: "Generate backup"},
 	"settings.data.backup.error":               {Text: "Couldn't generate a backup."},
 	"settings.data.backup.download":            {Text: "Download"},
+	"settings.data.backup.currentPassword":     {Text: "Current password"},
+	"settings.data.backup.totp":                {Text: "Authenticator code"},
+	"settings.data.backup.credentialsWarning":  {Text: "The backup file contains every credential in this database, including the admin password hash and the encrypted authenticator secret. Confirm it's you before one is generated."},
 	"settings.data.vacuum.title":               {Text: "Vacuum"},
 	// Orphan, kept: `settings.data.vacuum.unavailable` has no call site.
 	// It predates the wired vacuum control below and describes a state the
@@ -298,6 +313,40 @@ var settingsMessages = gwci18n.NamespaceCatalog{
 	// states that it is reconnecting, so this does not repeat that.
 	"settings.common.disconnectedReason": {Text: "Reconnecting to the server — these controls are unavailable until it comes back."},
 
+	// Appearance section (render_appearance.go): the language selector, and
+	// the theme control that moved here from the header on 2026-08-11.
+	//
+	// The help text says "stored in this browser only" because that is the
+	// single most likely wrong assumption about these two controls. They are
+	// localStorage preferences (web/shell/locale.go, theme.go), not account
+	// settings — sign in from a different machine and they are back to the
+	// defaults, which is surprising precisely because everything else on
+	// /settings IS server state.
+	"settings.appearance.title": {Text: "Appearance"},
+	"settings.appearance.help":  {Text: "How this app looks and reads on this device. Both settings are stored in this browser only — they travel with the browser, not with your account, and they change nothing about what your feeds publish."},
+
+	// The language help text has one job beyond describing the control: to
+	// separate interface language from FEED language, which are unrelated and
+	// which an operator has every reason to conflate on a page that says
+	// "Language" next to a list of feeds elsewhere in the app.
+	"settings.appearance.language.title": {Text: "Language"},
+	"settings.appearance.language.label": {Text: "Interface language"},
+	"settings.appearance.language.help":  {Text: "Changes every screen and control immediately. Feed content is unaffected: each feed publishes in the language its own recipe specifies."},
+	// Shown under the selector whenever a non-English language is active.
+	// This is an honesty disclosure, not decoration: the translations were
+	// produced by a model, and an operator relying on a security warning
+	// deserves to know that before they rely on it. It is stated in the
+	// language being disclaimed (a machine-translation warning nobody can
+	// read is theatre), which is why every catalogue carries its own.
+	"settings.appearance.language.machineNote": {Text: "Non-English translations were written by the model that built this feature and have not been reviewed by a native speaker."},
+
+	"settings.appearance.theme.title":  {Text: "Theme"},
+	"settings.appearance.theme.label":  {Text: "Colour theme"},
+	"settings.appearance.theme.help":   {Text: "Match system follows your operating system's light/dark setting, including a switch scheduled for a particular time of day."},
+	"settings.appearance.theme.system": {Text: "Match system"},
+	"settings.appearance.theme.light":  {Text: "Light"},
+	"settings.appearance.theme.dark":   {Text: "Dark"},
+
 	// The three settings.security.signOut.* keys were removed 2026-08-10
 	// with the control they labelled: the sign-out button at the foot of
 	// Settings is gone, since web/shell/header.go carries one on every
@@ -305,15 +354,36 @@ var settingsMessages = gwci18n.NamespaceCatalog{
 	// app is one too many. Left as a note rather than silently deleted so
 	// the next person to grep for them finds out where sign-out went.
 
-	// About section (render_about.go).
-	"settings.about.title":               {Text: "About"},
-	"settings.about.version":             {Text: "Version {arg1}"},
-	"settings.about.build":               {Text: "Build {arg1}"},
-	"settings.about.uptime":              {Text: "Uptime: {arg1}"},
-	"settings.about.uptime.parts":        {Text: "{arg1}d {arg2}h {arg3}m"},
-	"settings.about.feed.neverBuilt":     {Text: "Never built"},
-	"settings.about.feed.lastBuildTitle": {Text: "Last successful build per feed"},
-	"settings.about.feed.caption":        {Text: "Last successful build per feed"},
-	"settings.about.feed.col.slug":       {Text: "Slug"},
-	"settings.about.feed.col.lastBuild":  {Text: "Last build"},
+	// About section (render_about.go). The copy here is deliberately written
+	// for someone who did not build this app: every technical readout is
+	// stated in plain language and says what it is *for*, since the raw
+	// "Version / Build / Uptime / Slug" labels this section used to carry
+	// meant nothing to a reader who had not seen the code.
+	"settings.about.title": {Text: "About"},
+
+	"settings.about.what.title":    {Text: "What this app does"},
+	"settings.about.what.body":     {Text: "It publishes feeds that write themselves. You describe what a feed should contain and how often it should update; the app writes each new entry for you and publishes it as a feed, so a reader app or a Slack channel can subscribe to it and receive entries as they appear."},
+	"settings.about.what.generate": {Text: "Generate — describe a feed, preview what it would produce, and run it."},
+	"settings.about.what.history":  {Text: "History — every run the app has made, what it produced, and what it cost."},
+	"settings.about.what.settings": {Text: "Settings — which AI service writes the entries, how often feeds update, where they are published, sign-in, and your stored data."},
+
+	"settings.about.built.title":   {Text: "What it runs on"},
+	"settings.about.built.server":  {Text: "The server is a single program that keeps everything — feeds, entries, settings, history — in one database file on the machine it runs on. There is nothing else to install or connect."},
+	"settings.about.built.client":  {Text: "This page is the app's own interface, talking to that server over a live connection. If the connection drops, a banner says so and the controls go inactive until it returns."},
+	"settings.about.built.ai":      {Text: "The text in each entry is written by an AI service that you choose and pay for yourself, configured under Provider. Nothing is generated until you set one up."},
+	"settings.about.built.formats": {Text: "Every feed is published in the three standard feed formats at once, so whichever reader you use can subscribe to it."},
+
+	"settings.about.install.title": {Text: "This installation"},
+	"settings.about.install.help":  {Text: "These three lines identify the copy of the app you are looking at. They are worth quoting if you ever report a problem."},
+	"settings.about.version":       {Text: "Version {arg1} — which release of the app is running."},
+	"settings.about.build":         {Text: "Build {arg1} — the exact code this copy was compiled from."},
+	"settings.about.uptime":        {Text: "Running for {arg1} — time since the server last started. It resets whenever the server restarts, and says nothing about your feeds."},
+	"settings.about.uptime.parts":  {Text: "{arg1}d {arg2}h {arg3}m"},
+
+	"settings.about.feed.neverBuilt":     {Text: "Not published yet"},
+	"settings.about.feed.lastBuildTitle": {Text: "Your feeds"},
+	"settings.about.feed.help":           {Text: "One row per feed you have set up. The name shown is the short name that appears in the feed's web address, and the time beside it is when that feed last published a new version."},
+	"settings.about.feed.caption":        {Text: "Each feed and when it last published"},
+	"settings.about.feed.col.slug":       {Text: "Feed"},
+	"settings.about.feed.col.lastBuild":  {Text: "Last published"},
 }

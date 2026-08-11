@@ -42,6 +42,12 @@ func renderData() ui.Node {
 	backupFilename := ui.UseState("")
 	backupErr := ui.UseState(error(nil))
 	backupLoading := ui.UseState(false)
+	// The backup is a copy of the whole database — admin password hash,
+	// encrypted TOTP secret, every session and recovery-code hash — so the
+	// server re-proves credentials rather than trusting the live session
+	// (A8-40). Same two fields as the change-password form.
+	backupPassword := ui.UseState("")
+	backupTOTP := ui.UseState("")
 
 	vacuumVisible := ui.UseState(false)
 	vacuumRunning := ui.UseState(false)
@@ -144,15 +150,28 @@ func renderData() ui.Node {
 		if disconnected {
 			return
 		}
+		if backupPassword.Get() == "" || backupTOTP.Get() == "" {
+			return
+		}
 		backupLoading.Set(true)
 		backupErr.Set(nil)
+		// A stale URL alongside a fresh failure reads as success; drop it
+		// before the round trip so only one of the two can be on screen.
+		backupURL.Set("")
 		go func() {
-			resp, err := deps.System.Backup(bgContext(), &affv1.SystemServiceBackupRequest{})
+			resp, err := deps.System.Backup(bgContext(), &affv1.SystemServiceBackupRequest{
+				CurrentPassword: backupPassword.Get(),
+				TotpCode:        backupTOTP.Get(),
+			})
 			backupLoading.Set(false)
 			if err != nil {
 				backupErr.Set(err)
 				return
 			}
+			// Never leave the re-proof sitting in the DOM after it has been
+			// spent — the codes are single-use and the password is not.
+			backupPassword.Set("")
+			backupTOTP.Set("")
 			backupFilename.Set(resp.GetFilename())
 			backupURL.Set("data:application/octet-stream;base64," + base64.StdEncoding.EncodeToString(resp.GetDbFile()))
 		}()
@@ -193,99 +212,126 @@ func renderData() ui.Node {
 
 	var statsBody ui.Node
 	if s := stats.Get(); s != nil {
+		// The three figures are what this page is ABOUT — how much there is
+		// and how big it has become — and they were three muted sentences at
+		// the top that read like a caption on something else. Now they are the
+		// first thing the eye lands on: the number large and in the data face,
+		// its name small underneath.
 		statsBody = h.Div(
-			h.P(h.Text(t("settings.data.stats.feedCount", s.GetFeedCount()))),
-			h.P(h.Text(t("settings.data.stats.itemCount", s.GetItemCount()))),
-			h.P(h.Text(t("settings.data.stats.dbSize", fmts().ByteSize(s.GetDbSizeBytes())))),
+			h.ClassStr("af-data-stats"),
+			renderDataStat(int64ToStr(int64(s.GetFeedCount())), t("settings.data.stats.feeds")),
+			renderDataStat(int64ToStr(s.GetItemCount()), t("settings.data.stats.items")),
+			renderDataStat(fmts().ByteSize(s.GetDbSizeBytes()), t("settings.data.stats.size")),
 		)
 	} else {
 		statsBody = h.Fragment()
 	}
-
-	importItem := disconnectedKebabItem(affui.KebabItem{
-		ID: "settings-recipe-import", LabelKey: "settings.data.recipe.import.action",
-		Danger: true, OnSelect: func() { importVisible.Set(true) },
-	}, disconnected)
 
 	body := h.Div(
 		h.ClassStr("af-settings-section"),
 		h.H2(h.Text(t("settings.data.title"))),
 		statsBody,
 
-		h.Section(
-			h.ClassStr("af-settings-card"),
-			h.H3(h.Text(t("settings.data.recipe.title"))),
-			// NOTE (adoption gap — see the ticket report): affui.Select's
-			// SelectOption.LabelKey is resolved through T as an i18n KEY
-			// (web/ui/select.go), but a feed's slug is DATA — an operator
-			// identifier from the database, not translatable interface
-			// text (the same "identifiers and operator surface, not
-			// prose" distinction TODOS.md D6-19 and web/i18n/adapter.go's
-			// FormatByteSize comment both draw for unit abbreviations).
-			// Passing a slug as LabelKey would have T's resolve() treat it
-			// as a lookup key, rendering the slug back out unchanged only
-			// by coincidence of the fallback translator's "no entry ->
-			// return the key" behavior — the real catalogue's OnMissing
-			// hook would then log every feed slug as a "missing i18n key"
-			// (web/i18n/catalog.go's logMissingKey), which is exactly
-			// wrong for something that was never supposed to be looked up
-			// at all. Select has no "pass this value through literally"
-			// escape hatch, so the feed picker stays a plain <select> with
-			// literal option values (not i18n-lint literals — h.Text/
-			// resolve() only see i18n keys and RPC data here, no hardcoded
-			// English prose) instead.
-			h.Label(h.Text(t("settings.data.recipe.feed")),
-				h.Select(h.Value(int64ToStr(selectedFeedID.Get())),
+		// Export: pick a feed, press the button. The picker and the button sit
+		// on one line at the same height, instead of a labelled select beside
+		// a 333px-wide slab on a different baseline.
+		renderDataOp(dataOpProps{
+			TitleKey: "settings.data.recipe.title",
+			HelpKey:  "settings.data.recipe.help",
+			Controls: h.Fragment(
+				// NOTE (adoption gap): affui.Select resolves SelectOption.LabelKey
+				// through T as an i18n KEY, but a feed slug is DATA. Passing a slug
+				// there would make the real catalogue log every slug as a missing
+				// key, so the feed picker stays a plain <select>.
+				h.Select(h.ClassStr("af-data-op__select"),
+					h.Aria("label", t("settings.data.recipe.feed")),
+					h.Value(int64ToStr(selectedFeedID.Get())),
 					h.OnChange(func(e ui.ChangeEvent) { selectedFeedID.Set(parseInt64(e.GetValue())) }),
 					feedSelectOptions(feeds.Get()),
-				)),
-			affui.Button(affui.ButtonProps{
-				T: t, LabelKey: "settings.data.recipe.export", Variant: affui.ButtonSecondary,
-				Disabled: disconnected, OnClick: doExport,
-			}),
-			h.Show(exportErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.data.recipe.exportError")))),
-			h.Show(exportedTOML.Get() != "", h.Textarea(
-				h.ID("settings-recipe-export"), h.Rows(10),
-				h.Aria("label", t("settings.data.recipe.exportTitle")),
-				// Output, not a field: it looked editable and edits to it went
-				// nowhere.
-				h.Attr("readonly", "readonly"),
-				h.Value(exportedTOML.Get()))),
+				),
+				affui.Button(affui.ButtonProps{
+					T: t, LabelKey: "settings.data.recipe.export", Variant: affui.ButtonSecondary,
+					Disabled: disconnected, OnClick: doExport,
+				}),
+			),
+			Body: h.Fragment(
+				h.Show(exportErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.data.recipe.exportError")))),
+				h.Show(exportedTOML.Get() != "", h.Textarea(
+					h.ID("settings-recipe-export"), h.Rows(10),
+					h.ClassStr("af-data-op__field"),
+					h.Aria("label", t("settings.data.recipe.exportTitle")),
+					// Output, not a field: it looked editable and edits to it
+					// went nowhere.
+					h.Attr("readonly", "readonly"),
+					h.Value(exportedTOML.Get()))),
+			),
+		}),
 
-			h.H4(h.Text(t("settings.data.recipe.importTitle"))),
-			h.Textarea(
-				h.ID("settings-recipe-import"), h.Rows(10),
-				h.Aria("label", t("settings.data.recipe.importTitle")),
-				h.Value(importTOML.Get()), h.DisabledIf(disconnected),
-				h.OnInput(func(e ui.InputEvent) { importTOML.Set(e.GetValue()) })),
-			kebabUI(kebabUIProps{
-				ID: "settings-recipe-kebab", LabelKey: "kebab.actionsFor",
-				LabelArgs: []any{t("settings.data.recipe.title")},
-				Items:     []affui.KebabItem{importItem},
+		// Import: the action is a labelled button, not an unexplained glyph.
+		//
+		// The kebab rule (§12.6 / D0-15) is about destructive actions inside a
+		// LIST OF ROWS, where a row full of buttons invites a mis-click. Here
+		// the operation IS the card, and hiding its only control behind an
+		// unlabeled dot-dot-dot is why this page looked like it could not do
+		// anything. The safety is the typed confirmation, which is unchanged.
+		renderDataOp(dataOpProps{
+			TitleKey: "settings.data.recipe.importTitle",
+			HelpKey:  "settings.data.recipe.import.help",
+			Controls: affui.Button(affui.ButtonProps{
+				T: t, LabelKey: "settings.data.recipe.import.action", Variant: affui.ButtonDanger,
+				Disabled: disconnected || importTOML.Get() == "", Busy: importSubmitting.Get(),
+				OnClick: func() { importVisible.Set(true) },
 			}),
-			confirmUI(confirmUIProps{
-				ID: "settings-recipe-import-confirm", TitleKey: "settings.data.recipe.import.confirmTitle",
-				MessageKey:     "settings.data.recipe.import.prompt",
-				RequiredPhrase: t(ConfirmationWordKey(ActionImportTOML)),
-				Open:           importVisible.Get(), Busy: importSubmitting.Get(),
-				OnConfirm: func() { importVisible.Set(false); doImport() },
-				OnCancel:  func() { importVisible.Set(false) },
-			}),
-			h.Show(importErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.data.recipe.importError")))),
-			h.Show(importOK.Get(), h.P(h.Role("status"), h.Aria("live", "polite"), h.ClassStr("af-success"), h.Text(t("settings.data.recipe.importSuccess")))),
-		),
+			Body: h.Fragment(
+				h.Textarea(
+					h.ID("settings-recipe-import"), h.Rows(10),
+					h.ClassStr("af-data-op__field"),
+					h.Aria("label", t("settings.data.recipe.importTitle")),
+					h.Attr("placeholder", t("settings.data.recipe.import.placeholder")),
+					h.Value(importTOML.Get()), h.DisabledIf(disconnected),
+					h.OnInput(func(e ui.InputEvent) { importTOML.Set(e.GetValue()) })),
+				confirmUI(confirmUIProps{
+					ID: "settings-recipe-import-confirm", TitleKey: "settings.data.recipe.import.confirmTitle",
+					MessageKey:     "settings.data.recipe.import.prompt",
+					RequiredPhrase: t(ConfirmationWordKey(ActionImportTOML)),
+					Open:           importVisible.Get(), Busy: importSubmitting.Get(),
+					OnConfirm: func() { importVisible.Set(false); doImport() },
+					OnCancel:  func() { importVisible.Set(false) },
+				}),
+				h.Show(importErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.data.recipe.importError")))),
+				h.Show(importOK.Get(), h.P(h.Role("status"), h.Aria("live", "polite"), h.ClassStr("af-success"), h.Text(t("settings.data.recipe.importSuccess")))),
+			),
+		}),
 
-		h.Section(
-			h.ClassStr("af-settings-card"),
-			h.H3(h.Text(t("settings.data.backup.title"))),
-			affui.Button(affui.ButtonProps{
-				T: t, LabelKey: "settings.data.backup.generate", Variant: affui.ButtonSecondary,
-				Disabled: disconnected, Busy: backupLoading.Get(), OnClick: doBackup,
-			}),
-			h.Show(disconnected, h.P(h.Role("status"), h.ClassStr("af-warning"), h.Text(t("settings.common.disconnectedReason")))),
-			h.Show(backupErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.data.backup.error")))),
-			h.Show(backupURL.Get() != "", h.A(h.Href(backupURL.Get()), h.Attr("download", backupFilename.Get()), h.Text(t("settings.data.backup.download")))),
-		),
+		renderDataOp(dataOpProps{
+			TitleKey: "settings.data.backup.title",
+			HelpKey:  "settings.data.backup.help",
+			Body: h.Fragment(
+				h.Show(disconnected, h.P(h.Role("status"), h.ClassStr("af-warning"), h.Text(t("settings.common.disconnectedReason")))),
+				h.P(h.Role("status"), h.ClassStr("af-warning"), h.Text(t("settings.data.backup.credentialsWarning"))),
+				h.Form(
+					h.OnSubmit(func(e ui.FormEvent) { e.PreventDefault(); doBackup() }),
+					affui.Input(affui.InputProps{
+						T: t, ID: "settings-backup-password", LabelKey: "settings.data.backup.currentPassword",
+						Type: "password", Value: backupPassword.Get(), Disabled: backupLoading.Get(),
+						AutoComplete: "current-password", OnChange: func(v string) { backupPassword.Set(v) },
+					}),
+					affui.Input(affui.InputProps{
+						T: t, ID: "settings-backup-totp", LabelKey: "settings.data.backup.totp",
+						Value: backupTOTP.Get(), Disabled: backupLoading.Get(), Mono: true,
+						OnChange: func(v string) { backupTOTP.Set(v) },
+					}),
+					affui.Button(affui.ButtonProps{
+						T: t, LabelKey: "settings.data.backup.generate", Variant: affui.ButtonSecondary,
+						Type: "submit", Disabled: disconnected, Busy: backupLoading.Get(),
+					}),
+				),
+				h.Show(backupErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.data.backup.error")))),
+				h.Show(backupURL.Get() != "", h.A(h.ClassStr("af-data-op__download"),
+					h.Href(backupURL.Get()), h.Attr("download", backupFilename.Get()),
+					h.Text(t("settings.data.backup.download")))),
+			),
+		}),
 
 		renderVacuumSection(vacuumSectionState{
 			disconnected: disconnected,
@@ -352,10 +398,6 @@ type vacuumSectionState struct {
 // screenWrapper's settings.common.state.errorDetail already uses, rather
 // than a generic "vacuum failed".
 func renderVacuumSection(st vacuumSectionState) ui.Node {
-	vacuumItem := disconnectedKebabItem(affui.KebabItem{
-		ID: "settings-vacuum", LabelKey: "settings.data.vacuum.action",
-		Danger: true, OnSelect: func() { st.setVisible(true) },
-	}, st.disconnected)
 
 	var resultBody ui.Node = h.Fragment()
 	if r := st.result; r != nil {
@@ -368,28 +410,69 @@ func renderVacuumSection(st vacuumSectionState) ui.Node {
 		)
 	}
 
+	return renderDataOp(dataOpProps{
+		TitleKey: "settings.data.vacuum.title",
+		HelpKey:  "settings.data.vacuum.description",
+		Controls: affui.Button(affui.ButtonProps{
+			T: t, LabelKey: "settings.data.vacuum.action", Variant: affui.ButtonDanger,
+			Disabled: st.disconnected, Busy: st.running,
+			OnClick: func() { st.setVisible(true) },
+		}),
+		Body: h.Fragment(
+			h.P(h.ClassStr("af-warning"), h.Text(t(vacuumEstimateKey(st.currentSize)))),
+			confirmUI(confirmUIProps{
+				ID: "settings-vacuum-confirm", TitleKey: "settings.data.vacuum.confirmTitle",
+				MessageKey:     "settings.data.vacuum.confirmPrompt",
+				MessageArgs:    []any{t(vacuumEstimateKey(st.currentSize))},
+				RequiredPhrase: t(ConfirmationWordKey(ActionVacuum)),
+				Open:           st.visible, Busy: st.running,
+				OnConfirm: func() { st.setVisible(false); st.onConfirm() },
+				OnCancel:  func() { st.setVisible(false) },
+			}),
+			h.Show(st.running, h.P(h.Role("status"), h.Aria("live", "polite"), h.Text(t("settings.data.vacuum.running")))),
+			h.Show(st.err != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.data.vacuum.error", vacuumErrMessage(st.err))))),
+			resultBody,
+		),
+	})
+}
+
+// dataOpProps is one database operation: what it is, what it costs, the
+// control that runs it, and whatever it needs or produces.
+type dataOpProps struct {
+	TitleKey string
+	HelpKey  string
+	// Controls sit on the title's line, right-aligned. Body sits underneath at
+	// full width — inputs, output, errors, results.
+	Controls ui.Node
+	Body     ui.Node
+}
+
+// renderDataOp draws one operation row.
+//
+// Every operation on this page has the same shape — a name, a consequence and
+// one action — and each was laid out differently: a select beside a full-width
+// button, a bare textarea beside an unlabeled glyph, a lone button, and two
+// paragraphs beside another glyph. One shape repeated is what lets an operator
+// look at this page and see that it does four things.
+func renderDataOp(p dataOpProps) ui.Node {
 	return h.Section(
-		h.ClassStr("af-settings-card"),
-		h.H3(h.Text(t("settings.data.vacuum.title"))),
-		h.P(h.Text(t("settings.data.vacuum.description"))),
-		h.P(h.ClassStr("af-warning"), h.Text(t(vacuumEstimateKey(st.currentSize)))),
-		kebabUI(kebabUIProps{
-			ID: "settings-vacuum-kebab", LabelKey: "kebab.actionsFor",
-			LabelArgs: []any{t("settings.data.vacuum.title")},
-			Items:     []affui.KebabItem{vacuumItem},
-		}),
-		confirmUI(confirmUIProps{
-			ID: "settings-vacuum-confirm", TitleKey: "settings.data.vacuum.confirmTitle",
-			MessageKey:     "settings.data.vacuum.confirmPrompt",
-			MessageArgs:    []any{t(vacuumEstimateKey(st.currentSize))},
-			RequiredPhrase: t(ConfirmationWordKey(ActionVacuum)),
-			Open:           st.visible, Busy: st.running,
-			OnConfirm: func() { st.setVisible(false); st.onConfirm() },
-			OnCancel:  func() { st.setVisible(false) },
-		}),
-		h.Show(st.running, h.P(h.Role("status"), h.Aria("live", "polite"), h.Text(t("settings.data.vacuum.running")))),
-		h.Show(st.err != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.data.vacuum.error", vacuumErrMessage(st.err))))),
-		resultBody,
+		h.ClassStr("af-data-op"),
+		h.Div(h.ClassStr("af-data-op__head"),
+			h.Div(h.ClassStr("af-data-op__label"),
+				h.H3(h.Text(t(p.TitleKey))),
+				h.P(h.ClassStr("af-field-help"), h.Text(t(p.HelpKey))),
+			),
+			h.Div(h.ClassStr("af-data-op__action"), p.Controls),
+		),
+		p.Body,
+	)
+}
+
+// renderDataStat is one figure in the stat strip.
+func renderDataStat(value, label string) ui.Node {
+	return h.Div(h.ClassStr("af-data-stat"),
+		h.Div(h.ClassStr("af-data-stat__value"), h.Text(value)),
+		h.Div(h.ClassStr("af-data-stat__label"), h.Text(label)),
 	)
 }
 

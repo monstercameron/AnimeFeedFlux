@@ -863,6 +863,17 @@ var errCredentialCheckFailed = errors.New("rpc: credential check failed")
 // session (ChangePassword's non-elevated path, RegenerateRecoveryCodes) —
 // PLAN.md §4: a stolen, still-live session token must not be enough on its
 // own for either of those.
+// VerifyCurrentCredentials is verifyCurrentCredentials, exported so
+// SystemServer can put Backup behind the same gate as ChangePassword and
+// RegenerateRecoveryCodes (A8-40).
+//
+// An interface satisfied by this method — rather than SystemServer importing
+// AuthServer — is what keeps the two services from depending on each other;
+// the composition root supplies it.
+func (s *AuthServer) VerifyCurrentCredentials(ctx context.Context, password, totpCode string, now time.Time) error {
+	return s.verifyCurrentCredentials(ctx, password, totpCode, now)
+}
+
 func (s *AuthServer) verifyCurrentCredentials(ctx context.Context, password, totpCode string, now time.Time) error {
 	admin, err := s.store.GetAdmin(ctx)
 	if err != nil {

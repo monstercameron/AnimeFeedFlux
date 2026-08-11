@@ -165,7 +165,19 @@ message SystemServiceVersionResponse {
   google.protobuf.Timestamp started_at = 3;
 }
 
-message SystemServiceBackupRequest {}
+message SystemServiceBackupRequest {
+  // Re-proof of the operator's credentials, required (PLAN.md §4).
+  //
+  // Backup returns the whole SQLite file: the admin password hash and its KDF
+  // params, the encrypted TOTP secret, every session token hash, every
+  // recovery-code hash, and every stored provider setting. It is the single
+  // most damaging read in the system, and it used to be reachable by anyone
+  // holding a live session — strictly less protection than ChangePassword or
+  // RegenerateRecoveryCodes, both of which re-prove first precisely because a
+  // stolen-but-still-live session must not be enough on its own.
+  string current_password = 1;
+  string totp_code = 2;
+}
 
 message SystemServiceBackupResponse {
   // Raw SQLite file bytes. Fine as a unary response — DB backups are not

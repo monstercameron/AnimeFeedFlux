@@ -1408,6 +1408,10 @@ func buildControlPlane(
 	runSrv := rpc.NewRunServer(st, log)
 	sysSrv := rpc.NewSystemServer(st, log,
 		rpc.WithVersionInfo(version, commit, time.Now()),
+		// Backup returns the whole database — every hash in it — so it is
+		// gated on the same password + TOTP re-proof as ChangePassword,
+		// rather than on merely holding a live session (A8-40).
+		rpc.WithCredentialVerifier(authSrv),
 		rpc.WithPriceSink(func(entries []*affv1.PriceEntry) { applyPriceTable(prices, entries) }),
 		rpc.WithPublishingSink(func(p *affv1.Settings_Publishing) {
 			if baseURL != nil {

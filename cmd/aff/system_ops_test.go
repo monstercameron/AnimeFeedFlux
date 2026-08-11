@@ -143,7 +143,7 @@ func TestSystemBackupWritesTheBytesItWasGiven(t *testing.T) {
 			return &affv1.SystemServiceBackupResponse{DbFile: payload, Filename: "aff-2026-08-11.db"}, nil
 		},
 	}
-	if code := a.cmdSystemBackup([]string{"--out", out}); code != exitOK {
+	if code := a.cmdSystemBackup([]string{"--out", out, "--password", "pw", "--totp", "123456"}); code != exitOK {
 		t.Fatalf("exit code = %d", code)
 	}
 	written, err := os.ReadFile(out)
@@ -197,7 +197,7 @@ func TestSystemBackupReportsAnUnwritablePath(t *testing.T) {
 	// A directory that does not exist: a silent success here would leave an
 	// operator believing they have a backup.
 	bad := filepath.Join(t.TempDir(), "no-such-dir", "backup.db")
-	if code := a.cmdSystemBackup([]string{"--out", bad}); code != exitFail {
+	if code := a.cmdSystemBackup([]string{"--out", bad, "--password", "pw", "--totp", "123456"}); code != exitFail {
 		t.Errorf("exit code = %d, want exitFail", code)
 	}
 	if stderr.Len() == 0 {
@@ -226,4 +226,33 @@ func TestFormatOrEmptyLeavesAZeroTimeBlank(t *testing.T) {
 // fail for a reason that has nothing to do with this code.
 func runtimeIsUnix() bool {
 	return os.PathSeparator == '/'
+}
+
+// The backup contains every credential hash in the database, so the CLI
+// refuses to even send the request without the re-proof the server now
+// requires — a clearer failure than a PermissionDenied round trip (A8-40).
+func TestSystemBackupRequiresCredentials(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "backup.db")
+	called := false
+
+	a, _, _ := newTestApp()
+	a.clients.System = &cmdSystemClient{
+		backupRPC: func(context.Context, *affv1.SystemServiceBackupRequest, ...grpc.CallOption) (*affv1.SystemServiceBackupResponse, error) {
+			called = true
+			return &affv1.SystemServiceBackupResponse{}, nil
+		},
+	}
+
+	for _, args := range [][]string{
+		{"--out", out},
+		{"--out", out, "--password", "pw"},
+		{"--out", out, "--totp", "123456"},
+	} {
+		if code := a.cmdSystemBackup(args); code != exitUsage {
+			t.Errorf("cmdSystemBackup(%v) = %d, want exitUsage", args, code)
+		}
+	}
+	if called {
+		t.Error("the CLI sent a backup request with no credentials")
+	}
 }

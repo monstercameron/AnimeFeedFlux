@@ -630,9 +630,20 @@ func (x *SystemServiceVersionResponse) GetStartedAt() *timestamppb.Timestamp {
 }
 
 type SystemServiceBackupRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Re-proof of the operator's credentials, required (PLAN.md §4).
+	//
+	// Backup returns the whole SQLite file: the admin password hash and its KDF
+	// params, the encrypted TOTP secret, every session token hash, every
+	// recovery-code hash, and every stored provider setting. It is the single
+	// most damaging read in the system, and it used to be reachable by anyone
+	// holding a live session — strictly less protection than ChangePassword or
+	// RegenerateRecoveryCodes, both of which re-prove first precisely because a
+	// stolen-but-still-live session must not be enough on its own.
+	CurrentPassword string `protobuf:"bytes,1,opt,name=current_password,json=currentPassword,proto3" json:"current_password,omitempty"`
+	TotpCode        string `protobuf:"bytes,2,opt,name=totp_code,json=totpCode,proto3" json:"totp_code,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *SystemServiceBackupRequest) Reset() {
@@ -663,6 +674,20 @@ func (x *SystemServiceBackupRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use SystemServiceBackupRequest.ProtoReflect.Descriptor instead.
 func (*SystemServiceBackupRequest) Descriptor() ([]byte, []int) {
 	return file_aff_v1_system_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *SystemServiceBackupRequest) GetCurrentPassword() string {
+	if x != nil {
+		return x.CurrentPassword
+	}
+	return ""
+}
+
+func (x *SystemServiceBackupRequest) GetTotpCode() string {
+	if x != nil {
+		return x.TotpCode
+	}
+	return ""
 }
 
 type SystemServiceBackupResponse struct {
@@ -1857,8 +1882,10 @@ const file_aff_v1_system_proto_rawDesc = "" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12\x14\n" +
 	"\x05build\x18\x02 \x01(\tR\x05build\x129\n" +
 	"\n" +
-	"started_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\"\x1c\n" +
-	"\x1aSystemServiceBackupRequest\"R\n" +
+	"started_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\"d\n" +
+	"\x1aSystemServiceBackupRequest\x12)\n" +
+	"\x10current_password\x18\x01 \x01(\tR\x0fcurrentPassword\x12\x1b\n" +
+	"\ttotp_code\x18\x02 \x01(\tR\btotpCode\"R\n" +
 	"\x1bSystemServiceBackupResponse\x12\x17\n" +
 	"\adb_file\x18\x01 \x01(\fR\x06dbFile\x12\x1a\n" +
 	"\bfilename\x18\x02 \x01(\tR\bfilename\"|\n" +

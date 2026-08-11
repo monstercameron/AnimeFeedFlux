@@ -45,13 +45,11 @@ var allDeclaredCommonKeys = []string{
 var allDeclaredShellKeys = []string{
 	KeyShellBannerDisconnected, KeyShellBannerReconnectingIn,
 	KeyShellExpiryTitle, KeyShellExpiryBody, KeyShellExpiryLogin,
-	KeyShellGuardRedirectNotice, KeyShellNotImplemented,
+	KeyShellGuardRedirectNotice, KeyShellSessionExpiredNotice, KeyShellNotImplemented,
 	KeyShellHeaderNavLabel, KeyShellHeaderNavGenerate,
 	KeyShellHeaderNavHistory, KeyShellHeaderNavSettings,
 	KeyShellHeaderSignOut, KeyShellHeaderSignOutBusy, KeyShellHeaderSignOutError,
 	KeyShellHeaderBrandLabel, KeyShellHeaderBrandHomeLabel,
-	KeyShellHeaderThemeLabel, KeyShellHeaderThemeSystem,
-	KeyShellHeaderThemeLight, KeyShellHeaderThemeDark,
 }
 
 // TestEveryDeclaredKeyResolves is the D6-22 half ("every key referenced by

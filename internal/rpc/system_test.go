@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -332,12 +333,33 @@ func TestSystemVersionReportsConfiguredInfo(t *testing.T) {
 	}
 }
 
+// fakeCredentialVerifier accepts exactly one password/code pair and records
+// what it was asked, so the tests below can tell "the gate ran and passed"
+// apart from "the gate was never consulted".
+type fakeCredentialVerifier struct {
+	wantPassword string
+	wantCode     string
+	calls        int
+}
+
+func (f *fakeCredentialVerifier) VerifyCurrentCredentials(_ context.Context, password, totpCode string, _ time.Time) error {
+	f.calls++
+	if password != f.wantPassword || totpCode != f.wantCode {
+		return status.Error(codes.PermissionDenied, "rpc: bad credentials")
+	}
+	return nil
+}
+
 func TestSystemBackupProducesAValidSQLiteFile(t *testing.T) {
 	s := sysTestStore(t)
 	ctx := t.Context()
-	srv := NewSystemServer(s, nil)
+	v := &fakeCredentialVerifier{wantPassword: "correct horse battery staple", wantCode: "123456"}
+	srv := NewSystemServer(s, nil, WithCredentialVerifier(v))
 
-	resp, err := srv.Backup(ctx, &affv1.SystemServiceBackupRequest{})
+	resp, err := srv.Backup(ctx, &affv1.SystemServiceBackupRequest{
+		CurrentPassword: v.wantPassword,
+		TotpCode:        v.wantCode,
+	})
 	if err != nil {
 		t.Fatalf("backup: %v", err)
 	}
@@ -348,6 +370,59 @@ func TestSystemBackupProducesAValidSQLiteFile(t *testing.T) {
 	const sqliteMagic = "SQLite format 3\x00"
 	if len(resp.GetDbFile()) < len(sqliteMagic) || string(resp.GetDbFile()[:len(sqliteMagic)]) != sqliteMagic {
 		t.Fatal("backup file does not start with the SQLite header")
+	}
+}
+
+// The backup file is every credential in the database in one download, so a
+// live session alone must not produce one: a stolen-but-not-yet-expired
+// session would otherwise be a full credential exfiltration (A8-40).
+func TestSystemBackupRefusesWithoutCredentialReproof(t *testing.T) {
+	s := sysTestStore(t)
+	ctx := t.Context()
+	v := &fakeCredentialVerifier{wantPassword: "correct horse battery staple", wantCode: "123456"}
+	srv := NewSystemServer(s, nil, WithCredentialVerifier(v))
+
+	for _, tc := range []struct {
+		name     string
+		password string
+		code     string
+	}{
+		{"nothing at all", "", ""},
+		{"right password, wrong code", "correct horse battery staple", "000000"},
+		{"wrong password, right code", "hunter2hunter2hunter2", "123456"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := srv.Backup(ctx, &affv1.SystemServiceBackupRequest{
+				CurrentPassword: tc.password,
+				TotpCode:        tc.code,
+			})
+			if status.Code(err) != codes.PermissionDenied {
+				t.Fatalf("backup = %v, want PermissionDenied", err)
+			}
+			// Not merely "an error": no bytes may come back alongside one.
+			if len(resp.GetDbFile()) != 0 {
+				t.Fatalf("a denied backup still returned %d bytes", len(resp.GetDbFile()))
+			}
+		})
+	}
+	if v.calls != 3 {
+		t.Fatalf("verifier consulted %d times, want 3 — a case skipped the gate", v.calls)
+	}
+}
+
+// With no verifier wired at all, Backup must fail closed. Defaulting to
+// "allow" here would mean one missing option in wire.go silently reopens
+// exactly the hole the gate exists to close.
+func TestSystemBackupFailsClosedWithNoVerifier(t *testing.T) {
+	s := sysTestStore(t)
+	srv := NewSystemServer(s, nil)
+
+	_, err := srv.Backup(t.Context(), &affv1.SystemServiceBackupRequest{
+		CurrentPassword: "correct horse battery staple",
+		TotpCode:        "123456",
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("backup with no verifier = %v, want FailedPrecondition", err)
 	}
 }
 
