@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/monstercameron/AnimeFeedFlux/internal/auth"
+	"github.com/monstercameron/AnimeFeedFlux/internal/rpc"
 	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 )
 
@@ -25,11 +26,14 @@ const (
 	totpIssuer      = "AnimeFeedFlux"
 )
 
-// cmdAdmin dispatches `aff admin init|reset` — see admin_cmd.go's package
-// doc comment (app.go) for why these two, alone, bypass gRPC entirely.
+// cmdAdmin dispatches `aff admin init|reset|reset-password` — see
+// admin_cmd.go's package doc comment (app.go) for why these three, alone,
+// bypass gRPC entirely. `reset-password` is the newest: see the "Reachability
+// decision" comment on internal/rpc/auth.go's IssuePasswordResetToken for why
+// it is local-only rather than a proto RPC.
 func (a *app) cmdAdmin(args []string) int {
 	if len(args) == 0 {
-		return a.missingSubcommand("admin", "init", "reset")
+		return a.missingSubcommand("admin", "init", "reset", "reset-password")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -37,8 +41,10 @@ func (a *app) cmdAdmin(args []string) int {
 		return a.cmdAdminInit(rest)
 	case "reset":
 		return a.cmdAdminReset(rest)
+	case "reset-password":
+		return a.cmdAdminResetPassword(rest)
 	default:
-		return a.unknownSubcommand("admin", sub, "init", "reset")
+		return a.unknownSubcommand("admin", sub, "init", "reset", "reset-password")
 	}
 }
 
@@ -312,5 +318,107 @@ func (a *app) cmdAdminReset(args []string) int {
 		ProvisioningURI: provisioningURI,
 		RecoveryCodes:   plainCodes,
 	})
+	return exitOK
+}
+
+// cmdAdminResetPassword implements `aff admin reset-password`: the narrower
+// break-glass path for "forgot the password but TOTP and the recovery codes
+// are still fine" — as opposed to `aff admin reset`, which is for "every
+// factor is gone" and deliberately blows away TOTP enrollment and the
+// recovery-code set too. Forcing a full re-enrollment when only the password
+// was forgotten is real, avoidable cost (a fresh QR scan on every device,
+// and a full set of recovery codes burned for nothing).
+//
+// This is local-only, requiring the same direct filesystem access to the
+// SQLite file that `aff admin init`/`aff admin reset` require — see
+// internal/rpc/auth.go's "Reachability decision" comment on
+// IssuePasswordResetToken for the full reasoning: neither that method nor
+// CompletePasswordReset is safe to expose as an unauthenticated network RPC
+// (an unauthenticated "mint a reset token for the only account" call is a
+// full account takeover primitive), and there is no channel in this system
+// to deliver a freshly minted token anywhere the CLI's own machine hasn't
+// already touched. So this command calls both as ordinary Go methods on an
+// AuthServer built around the locally opened store, in the same process, and
+// consumes the token before it ever needs to be displayed, logged, or
+// carried anywhere.
+func (a *app) cmdAdminResetPassword(args []string) int {
+	fs := a.newFlagSet("aff admin reset-password")
+	fs.StringVar(&a.DBPath, "db", a.DBPath, "path to the SQLite database file (local-only)")
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(a.Stderr, "aff admin reset-password: takes no positional arguments")
+		return exitUsage
+	}
+
+	ctx := context.Background()
+
+	// See cmdAdminInit's identical ordering comment: the local-DB-access gate
+	// must be the first thing checked.
+	st, err := a.openLocalStore(ctx)
+	if err != nil {
+		fmt.Fprintln(a.Stderr, err)
+		return exitFail
+	}
+	defer func() { _ = st.Close() }()
+
+	key, err := secretKey()
+	if err != nil {
+		fmt.Fprintln(a.Stderr, err)
+		return exitFail
+	}
+
+	if _, err := st.GetAdmin(ctx); errors.Is(err, store.ErrNotFound) {
+		fmt.Fprintln(a.Stderr, "aff admin reset-password: no admin account exists yet; run `aff admin init` instead")
+		return exitFail
+	} else if err != nil {
+		fmt.Fprintf(a.Stderr, "aff admin reset-password: checking for an existing admin: %v\n", err)
+		return exitFail
+	}
+
+	password, err := a.readPassword("New admin password: ")
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "aff admin reset-password: reading password: %v\n", err)
+		return exitFail
+	}
+
+	srv, err := rpc.NewAuthServer(st, key)
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "aff admin reset-password: %v\n", err)
+		return exitFail
+	}
+
+	// Mint and immediately consume the reset token in the same call, through
+	// the exact single-use/expiry/session-revocation codepath SEC-31/33/34
+	// test — never displayed, logged, or persisted anywhere beyond that.
+	rawToken, err := srv.IssuePasswordResetToken(ctx)
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "aff admin reset-password: issuing reset token: %v\n", err)
+		return exitFail
+	}
+	if err := srv.CompletePasswordReset(ctx, rawToken, password); err != nil {
+		// srv.CompletePasswordReset also rejects a weak new password
+		// (auth.IsWeak) with a distinct, non-generic error — that is fine to
+		// surface here as-is: the anti-oracle requirement (PLAN.md §4/§12.1)
+		// is about not distinguishing WHY a token was rejected to an
+		// attacker who doesn't hold it, not about hiding password-policy
+		// feedback from the operator who is, by construction, running this
+		// command with local database access.
+		fmt.Fprintf(a.Stderr, "aff admin reset-password: %v\n", err)
+		return exitFail
+	}
+
+	// The local session file, if any, refers to a session just revoked
+	// server-side by CompletePasswordReset — see cmdAdminReset's identical
+	// comment.
+	_ = clearSession(a.SessionFile)
+
+	if a.JSON {
+		_ = a.printJSON(map[string]any{"password_reset": true, "sessions_revoked": true})
+	} else {
+		fmt.Fprintln(a.Stdout, "Password reset. TOTP enrollment and recovery codes are unchanged. "+
+			"All existing sessions were revoked.")
+	}
 	return exitOK
 }

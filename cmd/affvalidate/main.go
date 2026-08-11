@@ -15,6 +15,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,7 +27,9 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func run(args []string, stdout, stderr *os.File) int {
+// run takes io.Writer rather than *os.File so tests can capture output
+// without redirecting real file descriptors.
+func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: affvalidate <file>...")
 		return 2
@@ -100,9 +103,18 @@ func validateByExtension(path string, doc []byte) ([]feedvalidate.Finding, error
 			return feedvalidate.Atom(doc), nil
 		case strings.HasPrefix(base, "jsonfeed_"):
 			return feedvalidate.JSONFeed(doc), nil
-		case strings.HasPrefix(base, "permalink_"), strings.HasPrefix(base, "index_"):
-			// HTML pages, not feeds. Skipped rather than treated as an error:
-			// they legitimately live alongside the feed goldens.
+		case strings.HasPrefix(base, "permalink_"):
+			// The item permalink page — the one thing Slack's unfurl actually
+			// fetches (§5.5 "Link unfurling"). Validated against the OG/
+			// unfurl-tag contract rather than skipped: skipping it left
+			// `make validate` blind to the entire unfurl surface.
+			return feedvalidate.Permalink(doc), nil
+		case strings.HasPrefix(base, "index_"):
+			// The feed index HTML page, not a feed and not a per-item
+			// permalink — §5.5's OG/unfurl contract is a per-item
+			// requirement, so this has nothing to check against yet. Skipped
+			// rather than treated as an error: it legitimately lives
+			// alongside the feed goldens.
 			return nil, errSkip
 		}
 	}
@@ -114,6 +126,8 @@ func validateByExtension(path string, doc []byte) ([]feedvalidate.Finding, error
 		return feedvalidate.Atom(doc), nil
 	case ".json":
 		return feedvalidate.JSONFeed(doc), nil
+	case ".html", ".htm":
+		return feedvalidate.Permalink(doc), nil
 	default:
 		return nil, fmt.Errorf("unrecognized feed %q (expected .xml/.rss, .atom, .json, or a <format>_*.golden)", filepath.Base(path))
 	}

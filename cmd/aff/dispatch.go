@@ -20,6 +20,9 @@ Usage:
 
 Commands:
   login                              authenticate and store a local session
+  recover                            use a recovery code to reset password OR re-enroll TOTP
+  auth change-password               change password (requires current password + TOTP)
+  auth reenroll-totp                 replace the TOTP secret (requires current password)
   feed list|get|create|update|enable|disable|delete
   recipe export|import
   sample <slug> [--size N]           dry-run candidates, novelty, cost estimate
@@ -27,7 +30,13 @@ Commands:
   run <slug>                         trigger a manual run and stream progress
   runs [--feed ID] [--status S]
   item list|get|create|update|delete|restore|correct
-  system stats|kill-switch|backup|version
+  system stats|kill-switch|backup|settings|version
+  system settings get                sections: provider, generation, publishing
+  system settings set [flags]        --base-url --author --contact --copyright
+                                      --ttl-minutes --cache-control --og-image
+                                      --spend-ceiling-usd --token-ceiling
+                                      --default-token-budget --default-run-budget
+                                      --default-feed-window --staleness-minutes
   admin init|reset                   LOCAL-ONLY, requires filesystem DB access
 
 The following are also LOCAL-ONLY (deploy/RUNBOOK.md, PLAN.md §15): direct
@@ -65,6 +74,10 @@ func (a *app) run(args []string) int {
 		return exitOK
 	case "login":
 		return a.cmdLogin(rest)
+	case "recover":
+		return a.cmdRecover(rest)
+	case "auth":
+		return a.cmdAuth(rest)
 	case "feed":
 		return a.cmdFeed(rest)
 	case "recipe":
