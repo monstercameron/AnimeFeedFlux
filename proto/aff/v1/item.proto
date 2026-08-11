@@ -130,6 +130,10 @@ enum DeletedFilter {
 message ItemServiceListResponse {
   repeated Item items = 1;
   string next_page_token = 2;
+  // total_count matches RunServiceHistoryResponse.total_count: how many items
+  // match the filters, ignoring paging, so the pager can say which page of
+  // how many rather than only whether another exists.
+  int64 total_count = 3;
 }
 
 message ItemServiceGetRequest {

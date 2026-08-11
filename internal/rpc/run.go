@@ -538,10 +538,38 @@ func (s *RunServer) History(ctx context.Context, req *affv1.RunServiceHistoryReq
 		pageSize = runMaxPageSize
 	}
 
+	// The FILTERS are collected apart from the cursor, because total_count
+	// answers "how many match" and the cursor answers "where am I" — counting
+	// with `id < cursor` folded in would return the number of rows remaining
+	// AFTER the current page, so the total would shrink as the operator paged
+	// and "page 3 of 9" would become "page 3 of 6".
 	var (
-		conds []string
-		args  []any
+		filterConds []string
+		filterArgs  []any
 	)
+	if fid := req.GetFeedId(); fid != 0 {
+		filterConds = append(filterConds, "feed_id = ?")
+		filterArgs = append(filterArgs, fid)
+	}
+	if statuses := runProtoStatusToStore(req.GetStatus()); statuses != nil {
+		placeholders := make([]string, len(statuses))
+		for i, st := range statuses {
+			placeholders[i] = "?"
+			filterArgs = append(filterArgs, st)
+		}
+		filterConds = append(filterConds, "status IN ("+strings.Join(placeholders, ",")+")")
+	}
+	if req.GetStartedAfter() != nil {
+		filterConds = append(filterConds, "started_at >= ?")
+		filterArgs = append(filterArgs, runFormatTime(req.GetStartedAfter().AsTime()))
+	}
+	if req.GetStartedBefore() != nil {
+		filterConds = append(filterConds, "started_at <= ?")
+		filterArgs = append(filterArgs, runFormatTime(req.GetStartedBefore().AsTime()))
+	}
+
+	conds := append([]string(nil), filterConds...)
+	args := append([]any(nil), filterArgs...)
 	if tok := req.GetPageToken(); tok != "" {
 		cursor, err := runDecodeCursor(tok)
 		if err != nil {
@@ -550,25 +578,10 @@ func (s *RunServer) History(ctx context.Context, req *affv1.RunServiceHistoryReq
 		conds = append(conds, "id < ?")
 		args = append(args, cursor)
 	}
-	if fid := req.GetFeedId(); fid != 0 {
-		conds = append(conds, "feed_id = ?")
-		args = append(args, fid)
-	}
-	if statuses := runProtoStatusToStore(req.GetStatus()); statuses != nil {
-		placeholders := make([]string, len(statuses))
-		for i, st := range statuses {
-			placeholders[i] = "?"
-			args = append(args, st)
-		}
-		conds = append(conds, "status IN ("+strings.Join(placeholders, ",")+")")
-	}
-	if req.GetStartedAfter() != nil {
-		conds = append(conds, "started_at >= ?")
-		args = append(args, runFormatTime(req.GetStartedAfter().AsTime()))
-	}
-	if req.GetStartedBefore() != nil {
-		conds = append(conds, "started_at <= ?")
-		args = append(args, runFormatTime(req.GetStartedBefore().AsTime()))
+
+	total, err := runCountMatching(ctx, s.st.Reader(), filterConds, filterArgs)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "rpc: counting run history: %v", err)
 	}
 
 	query := "SELECT " + runColumnsSQL + " FROM runs"
@@ -605,6 +618,7 @@ func (s *RunServer) History(ctx context.Context, req *affv1.RunServiceHistoryReq
 			return &affv1.RunServiceHistoryResponse{
 				Runs:          out,
 				NextPageToken: runEncodeCursor(lastIncludedID),
+				TotalCount:    total,
 			}, nil
 		}
 		p, err := runToProto(r)
@@ -617,7 +631,28 @@ func (s *RunServer) History(ctx context.Context, req *affv1.RunServiceHistoryReq
 	if err := rows.Err(); err != nil {
 		return nil, status.Errorf(codes.Internal, "rpc: iterating run history: %v", err)
 	}
-	return &affv1.RunServiceHistoryResponse{Runs: out}, nil
+	return &affv1.RunServiceHistoryResponse{Runs: out, TotalCount: total}, nil
+}
+
+// runCountMatching counts every run matching the FILTERS, ignoring paging.
+//
+// Cursor paging cannot answer "how many pages are there": next_page_token
+// says only whether one more page exists, so the pager could offer Next and
+// never "page 3 of 9". This is the count that makes the second form possible.
+//
+// It deliberately takes the filter conditions WITHOUT the cursor. Counting
+// with `id < cursor` folded in would return how many rows remain after the
+// current page, so the total would shrink as the operator paged forward.
+func runCountMatching(ctx context.Context, r store.Reader, conds []string, args []any) (int64, error) {
+	query := "SELECT COUNT(*) FROM runs"
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ")
+	}
+	var n int64
+	if err := r.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // runGetByID reads a single run row, or codes.NotFound if it does not exist.

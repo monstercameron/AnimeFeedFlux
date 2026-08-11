@@ -369,6 +369,10 @@ type ItemServiceListResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Items         []*Item                `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
 	NextPageToken string                 `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	// total_count matches RunServiceHistoryResponse.total_count: how many items
+	// match the filters, ignoring paging, so the pager can say which page of
+	// how many rather than only whether another exists.
+	TotalCount    int64 `protobuf:"varint,3,opt,name=total_count,json=totalCount,proto3" json:"total_count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -415,6 +419,13 @@ func (x *ItemServiceListResponse) GetNextPageToken() string {
 		return x.NextPageToken
 	}
 	return ""
+}
+
+func (x *ItemServiceListResponse) GetTotalCount() int64 {
+	if x != nil {
+		return x.TotalCount
+	}
+	return 0
 }
 
 type ItemServiceGetRequest struct {
@@ -1482,10 +1493,12 @@ const file_aff_v1_item_proto_rawDesc = "" +
 	"\x06origin\x18\f \x01(\x0e2\x0e.aff.v1.OriginR\x06origin\x12C\n" +
 	"\x0fpublished_after\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\x0epublishedAfter\x12E\n" +
 	"\x10published_before\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\x0fpublishedBefore\x12<\n" +
-	"\x0edeleted_filter\x18\x0f \x01(\x0e2\x15.aff.v1.DeletedFilterR\rdeletedFilter\"e\n" +
+	"\x0edeleted_filter\x18\x0f \x01(\x0e2\x15.aff.v1.DeletedFilterR\rdeletedFilter\"\x86\x01\n" +
 	"\x17ItemServiceListResponse\x12\"\n" +
 	"\x05items\x18\x01 \x03(\v2\f.aff.v1.ItemR\x05items\x12&\n" +
-	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"'\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\x12\x1f\n" +
+	"\vtotal_count\x18\x03 \x01(\x03R\n" +
+	"totalCount\"'\n" +
 	"\x15ItemServiceGetRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\":\n" +
 	"\x16ItemServiceGetResponse\x12 \n" +

@@ -278,6 +278,13 @@ type RunServiceHistoryResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Runs          []*Run                 `protobuf:"bytes,1,rep,name=runs,proto3" json:"runs,omitempty"`
 	NextPageToken string                 `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	// total_count is how many runs match the request's filters, ignoring
+	// paging. Cursor paging alone cannot answer "how many pages are there" —
+	// a next_page_token says only whether one MORE page exists — so the UI
+	// could show "Next" and never "page 3 of 9". Counted with the same filters
+	// as the page itself, so the number describes what is being paged through
+	// rather than the table as a whole.
+	TotalCount    int64 `protobuf:"varint,3,opt,name=total_count,json=totalCount,proto3" json:"total_count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -324,6 +331,13 @@ func (x *RunServiceHistoryResponse) GetNextPageToken() string {
 		return x.NextPageToken
 	}
 	return ""
+}
+
+func (x *RunServiceHistoryResponse) GetTotalCount() int64 {
+	if x != nil {
+		return x.TotalCount
+	}
+	return 0
 }
 
 type RunServiceGetRequest struct {
@@ -742,10 +756,12 @@ const file_aff_v1_run_proto_rawDesc = "" +
 	" \x01(\x03R\x06feedId\x12)\n" +
 	"\x06status\x18\v \x01(\x0e2\x11.aff.v1.RunStatusR\x06status\x12?\n" +
 	"\rstarted_after\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\fstartedAfter\x12A\n" +
-	"\x0estarted_before\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\rstartedBefore\"d\n" +
+	"\x0estarted_before\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\rstartedBefore\"\x85\x01\n" +
 	"\x19RunServiceHistoryResponse\x12\x1f\n" +
 	"\x04runs\x18\x01 \x03(\v2\v.aff.v1.RunR\x04runs\x12&\n" +
-	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"-\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\x12\x1f\n" +
+	"\vtotal_count\x18\x03 \x01(\x03R\n" +
+	"totalCount\"-\n" +
 	"\x14RunServiceGetRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\x03R\x05runId\"H\n" +
 	"\x15RunServiceGetResponse\x12\x1d\n" +

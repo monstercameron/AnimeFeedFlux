@@ -71,6 +71,13 @@ message RunServiceHistoryRequest {
 message RunServiceHistoryResponse {
   repeated Run runs = 1;
   string next_page_token = 2;
+  // total_count is how many runs match the request's filters, ignoring
+  // paging. Cursor paging alone cannot answer "how many pages are there" —
+  // a next_page_token says only whether one MORE page exists — so the UI
+  // could show "Next" and never "page 3 of 9". Counted with the same filters
+  // as the page itself, so the number describes what is being paged through
+  // rather than the table as a whole.
+  int64 total_count = 3;
 }
 
 message RunServiceGetRequest {
