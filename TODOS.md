@@ -449,6 +449,68 @@ an incident — which is exactly when it is switched on.
       option only while unselected, so option indices shifted and the browser's index-based
       selection displayed the wrong feed; and the preview pane carried a duplicate set of the
       strip's controls.
+### GWC markup performance review 2026-08-11 (A8-44 onward)
+
+A read of the render paths: `web/ui`'s primitives, the three page packages' markup, how styles are
+emitted, what recomputes per render, and what the framework actually charges for each construct
+(checked against the pinned GWC v5.0.1 source, not assumed). Ranked by cost over effort.
+
+- [ ] `A8-44` **`Kebab` builds its entire menu on every render, open or closed.** `web/ui/kebab.go`
+      constructs `itemNodes` unconditionally: per item a ~12-entry `[]css.Rule` plus two more slices
+      from the `Hover(...)`/`focusVisible()` appends, a `css.Class(...)`, a `resolve(...)` lookup and
+      a closure — then hands the lot to `AccessibleOverlay` as `Children` regardless of `p.Open`.
+      On `/history/items` that is 25 rows × ~5 items ≈ 125 menu buttons rebuilt on every render of
+      the table — every selection toggle, every debounced search keystroke, every filter change —
+      and discarded, because the menus are closed. Callers pay again ahead of it:
+      `itemKebabItems(...)` allocates its `[]KebabItem` and five closures per row per render before
+      `Kebab` is even called.
+      Fix: wrap the item loop in `if p.Open`. This is hook-safe — the loop contains no hooks, and
+      the three that exist (`UseRef`, `UseState`, `UseEffect`) sit above it and stay unconditional,
+      so positional slots do not move. Same treatment for the caller's `itemKebabItems`, which can
+      be built inside the same guard.
+- [ ] `A8-45` **`h.Show(false, …)` costs MORE than rendering the subtree and saves only paint — 48
+      call sites.** Three charges, and the first two are easy to miss: Go evaluates arguments
+      eagerly, so the hidden subtree is fully constructed before `Show` is called; `html.Show` then
+      CLONES the node and its props map (`cloneAnyMap`, sugar.go:1369) to set `hidden`; and the
+      subtree then stays mounted, so the browser styles and lays it out and GWC diffs it on every
+      later render. A hidden panel is therefore construction + a clone + permanent diff cost,
+      against a saved paint.
+      Fix: `h.If` for the heavy subtrees — the settings sections, the sampler panel, the workbench's
+      collapsed regions. Keep `h.Show` only where retention is the point: uncommitted input that
+      must survive a toggle, scroll position, focus, or a remount that would refetch. Audit the 48
+      by weight, not wholesale.
+- [ ] `A8-46` **`UseMemo`/`UseMemoOf` exist in v5.0.1 and this app uses them exactly zero times.**
+      Every derived value is recomputed on every render — the per-row `originLabel`/`formatTimestamp`
+      formatting, the filter comparisons, the ordered kebab partition, the visible-ID sets. Most are
+      individually cheap; the point is that the framework ships the tool and no render path in
+      27k lines of UI reaches for it. Start with the ones inside the row loops.
+- [ ] `A8-47` **The token helpers allocate a string on every call.** `tokens.Color(role)` is
+      `css.Var("color-" + role)` and `Space(n)` runs `strconv.Itoa` — a concatenation per call, and
+      the per-render rule slices in `web/ui` call them dozens of times per element. Precompute the
+      common roles/steps as package-level vars so the hot paths reference rather than rebuild them.
+- [ ] `A8-48` **The pump re-renders the entire page ~7×/second for the duration of every mutation.**
+      `web/ui/pump.go` ticks at 150ms for up to 600 ticks plus a 2s grace, and each tick is a full
+      render pass. It is the correct trade — without it a save sits on "Saving…" forever (`A7-06`)
+      — but it is the single largest scheduled render load in the app, and it is the concrete cost
+      of not having `A7-07` (report the async-inbox wedge upstream) resolved. Worth raising the
+      priority of `A7-07` on those grounds, and worth revisiting the 150ms once it is fixed.
+
+Verified as already right, recorded so nobody "optimises" them into something worse:
+
+- **Page styles are emitted once**, from `init()` via `css.Global`, which dedupes by content. They
+  are not per-render. `web/pages/*/styles.go` is the correct pattern and needs no change.
+- **`css.New`/`css.Class` is cached two levels deep** (a fast-fold `sync.Map` keyed without string
+  building, then a canonical-text `sync.Map` — `css/fastfold.go`, `css/css.go`), so a repeated
+  identical rule set does NOT re-canonicalize or re-emit a stylesheet rule. The per-render cost of
+  `css.Class([]css.Rule{...})` is the slice construction and a map lookup, not CSS generation. Do
+  not rewrite `web/ui` to `ClassStr` believing it saves stylesheet work — it does not. `A8-47` is
+  the real reason to touch that code, and it is a smaller reason.
+- **History's tables are paged at 25** (`DefaultPageSize`, capped at 200), so the plain `Table` there
+  is correct and virtualization would be dead weight. `VirtualTable` is used in the one place that
+  actually grows without bound — the active-sessions list, which gains a row per sign-in.
+- **`MapKeyedComponent` keyed on `it.Id`, with per-row fibers**, is the right construct for rows
+  that own local state, and the row-expansion panels already use `h.If` rather than `h.Show`.
+
 ### Security review of the auth system 2026-08-11 (A8-31 onward)
 
 A read of the whole authenticated path — `internal/auth` (argon2id, pepper, sessions, TOTP,
@@ -491,12 +553,18 @@ closing note).
       not me?" — the question that table exists to answer — cannot be answered.
       Fix: trust `X-Forwarded-For`'s rightmost hop ONLY when the peer is the known proxy, and carry
       it into the RPC context; never trust the header on a direct connection.
-- [ ] `A8-33` **`AFF_SECRET_KEY` has no minimum length**, and neither does `AFF_PASSWORD_PEPPER`.
-      `config.required()` accepts any non-blank string, and `auth.deriveKey` SHA-256s whatever it
-      gets into a 32-byte AES key — so `AFF_SECRET_KEY=x` boots cleanly and encrypts the TOTP secret
-      at rest under a key with a few bits of entropy. §4's "a stolen DB file alone is not a second
-      factor" is then false, and nothing says so at boot. Fix: a length floor in the validator (the
-      same place that already rejects a pepper version with no pepper), failing loud at startup.
+- [x] `A8-33` **FIXED 2026-08-11.** `AFF_SECRET_KEY` had no minimum length, and neither did
+      `AFF_PASSWORD_PEPPER`. `config.required()` accepted any non-blank string and `auth.deriveKey`
+      SHA-256s whatever it gets into a 32-byte AES key, so `AFF_SECRET_KEY=x` booted cleanly and
+      encrypted the TOTP secret at rest under a key with a few bits of entropy — §4's "a stolen DB file
+      alone is not a second factor" was then false, silently.
+      `validator.secret` enforces a 16-character floor and fails at startup, where a weak key can still
+      be changed before it has encrypted anything. The pepper is checked only when set: absent is a
+      supported configuration, too short is not.
+      Applied in `cmd/aff` too. That path reads the variable directly and deliberately bypasses
+      `config.Load` (admin init/reset must work before the rest of the environment exists), and it is
+      where a weak key FIRST encrypts something — catching it only on the server's next boot would be
+      catching it after the damage.
 - [ ] `A8-34` **The admin vhost has no HSTS, no CSP, and no request rate limit.** The publish vhost
       has `limit_req_zone` and the admin one does not, which is backwards — the publish plane serves
       cached XML, the admin plane serves the login. `Strict-Transport-Security` is absent from both,

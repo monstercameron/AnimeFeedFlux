@@ -18,7 +18,7 @@ func valid() map[string]string {
 		"AFF_PUBLISH_ADDR":    "127.0.0.1:9310",
 		"AFF_ADMIN_ADDR":      "127.0.0.1:9311",
 		"AFF_ALLOWED_ORIGINS": "https://admin.anime.example.com",
-		"AFF_SECRET_KEY":      "not-a-real-key",
+		"AFF_SECRET_KEY":      "not-a-real-key-but-long-enough-for-the-floor",
 		"SCHEMAFLUX_API_KEY":  "not-a-real-key",
 	}
 }
@@ -439,5 +439,34 @@ func TestConfigStructDoesNotLeakSecrets(t *testing.T) {
 	}
 	if strings.Contains(out, "a-real-256-bit-secret-from-the-environment") {
 		t.Fatalf("printing the whole Config leaked the password pepper:\n%s", out)
+	}
+}
+
+// AFF_SECRET_KEY is SHA-256'd into a 32-byte AES key that encrypts the TOTP
+// secret at rest, and config.required() accepted any non-blank string — so
+// AFF_SECRET_KEY=x booted cleanly and §4's "a stolen DB file alone is not a
+// second factor" was quietly false (A8-33).
+func TestSecretsHaveALengthFloor(t *testing.T) {
+	base := valid()
+
+	base["AFF_SECRET_KEY"] = "x"
+	if _, err := Load(env(base)); err == nil {
+		t.Error("a one-character AFF_SECRET_KEY was accepted")
+	}
+
+	base["AFF_SECRET_KEY"] = strings.Repeat("k", SecretMinLength)
+	if _, err := Load(env(base)); err != nil {
+		t.Errorf("a secret exactly at the floor was refused: %v", err)
+	}
+
+	// The pepper is OPTIONAL: absent is supported, too short is not.
+	base["AFF_PASSWORD_PEPPER"] = ""
+	if _, err := Load(env(base)); err != nil {
+		t.Errorf("an absent pepper was refused: %v", err)
+	}
+	base["AFF_PASSWORD_PEPPER"] = "short"
+	base["AFF_PASSWORD_PEPPER_VERSION"] = "1"
+	if _, err := Load(env(base)); err == nil {
+		t.Error("a five-character AFF_PASSWORD_PEPPER was accepted")
 	}
 }

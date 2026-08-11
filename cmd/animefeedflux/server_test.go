@@ -45,7 +45,7 @@ func testConfig(t *testing.T) *config.Config {
 		case "AFF_ALLOWED_ORIGINS":
 			return "https://admin.example.com"
 		case "AFF_SECRET_KEY":
-			return "test-secret-key"
+			return "test-secret-key-0123456789"
 		case "SCHEMAFLUX_API_KEY":
 			return "test-provider-key"
 		default:

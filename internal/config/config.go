@@ -182,7 +182,7 @@ func Load(env Getenv) (*Config, error) {
 		DBPath:         v.required("AFF_DB_PATH"),
 		PublishAddr:    v.required("AFF_PUBLISH_ADDR"),
 		AdminAddr:      v.required("AFF_ADMIN_ADDR"),
-		SecretKey:      Secret(v.required("AFF_SECRET_KEY")),
+		SecretKey:      Secret(v.secret("AFF_SECRET_KEY", true)),
 		ProviderAPIKey: Secret(v.required("SCHEMAFLUX_API_KEY")),
 
 		BackupDir:       env("AFF_BACKUP_DIR"),
@@ -208,7 +208,7 @@ func Load(env Getenv) (*Config, error) {
 	c.PublicBaseURL = v.baseURL("AFF_PUBLIC_BASE_URL")
 	c.AllowedOrigins = v.originList("AFF_ALLOWED_ORIGINS")
 
-	c.PasswordPepper = Secret(strings.TrimSpace(env("AFF_PASSWORD_PEPPER")))
+	c.PasswordPepper = Secret(v.secret("AFF_PASSWORD_PEPPER", false))
 	c.PasswordPepperVersion = v.pepperVersion("AFF_PASSWORD_PEPPER_VERSION", c.PasswordPepper != "")
 
 	if err := v.err(); err != nil {
@@ -233,6 +233,43 @@ func (v *validator) err() error {
 	}
 	sort.Strings(v.problems)
 	return fmt.Errorf("invalid configuration:\n  %s", strings.Join(v.problems, "\n  "))
+}
+
+// SecretMinLength is the floor for a value used as key material.
+//
+// 16 bytes is the smallest length at which a passphrase is not trivially
+// guessable, and it is a floor rather than a target — the intended input is
+// a generated random string, not a typed word.
+// SecretMinLength is exported so cmd/aff can apply the same floor on the
+// path that deliberately bypasses Load.
+const SecretMinLength = 16
+
+// secret reads a value that becomes key material, enforcing a length floor.
+//
+// required() accepted any non-blank string, and auth.deriveKey SHA-256s
+// whatever it gets into a 32-byte AES key — so AFF_SECRET_KEY=x booted
+// cleanly and encrypted the TOTP secret at rest under a key with a few bits
+// of entropy. §4's claim that "a stolen DB file alone is not a second
+// factor" was then false, and nothing said so at boot (A8-33).
+//
+// Failing at startup is the point: a weak key that boots is a weak key that
+// encrypts real secrets, and every later check would be measuring the wrong
+// thing. An OPTIONAL secret (the pepper) is only checked when set — absent
+// is a supported configuration, too short is not.
+func (v *validator) secret(name string, required bool) string {
+	raw := strings.TrimSpace(v.env(name))
+	if raw == "" {
+		if required {
+			v.bad(name, "is required but not set")
+		}
+		return ""
+	}
+	if len(raw) < SecretMinLength {
+		v.bad(name, fmt.Sprintf(
+			"must be at least %d characters — it is hashed into an encryption key, so a short value means a low-entropy key protecting the TOTP secret at rest (got %d)",
+			SecretMinLength, len(raw)))
+	}
+	return raw
 }
 
 func (v *validator) required(name string) string {

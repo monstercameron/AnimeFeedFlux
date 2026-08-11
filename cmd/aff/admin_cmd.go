@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/monstercameron/AnimeFeedFlux/internal/auth"
+	"github.com/monstercameron/AnimeFeedFlux/internal/config"
 	"github.com/monstercameron/AnimeFeedFlux/internal/rpc"
 	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 )
@@ -77,10 +79,19 @@ func (a *app) openLocalStore(ctx context.Context) (*store.Store, error) {
 // is not configured at all yet — that is the whole point of these two
 // commands being local-only recovery paths (PLAN.md §12.2).
 func secretKey() ([]byte, error) {
-	v := os.Getenv("AFF_SECRET_KEY")
+	v := strings.TrimSpace(os.Getenv("AFF_SECRET_KEY"))
 	if v == "" {
 		return nil, errors.New("aff admin: AFF_SECRET_KEY is not set; it is required to encrypt the " +
 			"TOTP secret at rest (PLAN.md §4)")
+	}
+	// The same floor internal/config enforces, applied here too because this
+	// path deliberately bypasses config.Load — and `aff admin init` is where a
+	// weak key FIRST encrypts something, so catching it only on the server's
+	// next boot would be catching it after the damage (A8-33).
+	if len(v) < config.SecretMinLength {
+		return nil, fmt.Errorf("aff admin: AFF_SECRET_KEY must be at least %d characters — it is "+
+			"hashed into the key that encrypts the TOTP secret at rest, so a short value means a "+
+			"low-entropy key (got %d)", config.SecretMinLength, len(v))
 	}
 	return []byte(v), nil
 }
