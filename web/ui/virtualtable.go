@@ -116,7 +116,10 @@ func VirtualTable(p VirtualTableProps) Node {
 		headerCells = append(headerCells, h.Div(
 			html.Attr("role", "columnheader"),
 			virtualHeaderCell(),
-			resolve(p.T, col.LabelKey),
+			// Same inner element as a body cell: a header long enough to
+			// overflow its track has to clip the same way, or the header and
+			// the rows under it disagree about where a column ends.
+			h.Div(virtualCellContent(), resolve(p.T, col.LabelKey)),
 		))
 	}
 
@@ -138,7 +141,15 @@ func VirtualTable(p VirtualTableProps) Node {
 				cells = append(cells, h.Div(
 					html.Attr("role", "cell"),
 					virtualBodyCell(col.Mono),
-					p.Rows[i][col.ID],
+					// The content sits in its own element so it can be
+					// ellipsised. text-overflow applies to a block container
+					// with overflow:hidden, and does NOT apply to a flex
+					// container — the cell is display:flex to centre a row
+					// that may hold a button, so the ellipsis it declared was
+					// silently inert and long values were cut mid-character
+					// with no "…". Everything a cell can hold (text, a
+					// button, a span) is fine inside a block.
+					h.Div(virtualCellContent(), p.Rows[i][col.ID]),
 				))
 			}
 			args := make([]any, 0, len(cells)+2)
@@ -180,26 +191,6 @@ func VirtualTable(p VirtualTableProps) Node {
 	)
 }
 
-// gridTemplate lays every column out on one shared grid track list so the
-// header and every body row line up — the alignment a real <table> gives for
-// free and a div list has to be told.
-func gridTemplate(cols []TableColumn) string {
-	if len(cols) == 0 {
-		return "1fr"
-	}
-	out := ""
-	for range cols {
-		if out != "" {
-			out += " "
-		}
-		// minmax(0, 1fr) rather than 1fr: a bare fr track has an `auto`
-		// minimum, so one long user-agent string would widen its column and
-		// push the rest out of the row instead of being ellipsised.
-		out += "minmax(0, 1fr)"
-	}
-	return out
-}
-
 func virtualRow(template string, height float64) html.PropOption {
 	return css.Class(virtualRowRules(template, height))
 }
@@ -227,6 +218,22 @@ func virtualHeaderCell() html.PropOption {
 		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
 		css.FontSize(tokens.FontSize(tokens.TextXs)),
 		bodyFont(),
+	})
+}
+
+// virtualCellContent is the inner element that actually ellipsises. It has to
+// be a separate element from the cell: text-overflow works on a block
+// container with overflow:hidden and does nothing on a flex container, and the
+// cell is flex so a row holding a button centres properly. min-width:0 keeps
+// it from refusing to shrink inside its flex parent, which is the other half
+// of why a long value would otherwise overflow rather than clip.
+func virtualCellContent() html.PropOption {
+	return css.Class([]css.Rule{
+		css.Raw("min-width", "0"),
+		css.W(css.Length("100%")),
+		css.Raw("overflow", "hidden"),
+		css.Raw("text-overflow", "ellipsis"),
+		css.Raw("white-space", "nowrap"),
 	})
 }
 

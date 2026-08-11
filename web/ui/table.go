@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"math"
+	"strconv"
+
 	"github.com/monstercameron/GoWebComponents/v5/css"
 	"github.com/monstercameron/GoWebComponents/v5/html"
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
@@ -13,6 +16,22 @@ type TableColumn struct {
 	ID       string
 	LabelKey string
 	Mono     bool // render this column's cells in the data/mono font (costs, tokens, ids)
+
+	// Weight is this column's share of the row, relative to its siblings.
+	// Zero means 1 — every column equal, which is what every table did
+	// before this field existed.
+	//
+	// It exists because equal shares are wrong whenever the columns hold
+	// wildly different amounts of text. The sessions table is the case that
+	// forced it: a full user-agent string and a "Yes"/"No" each got a fifth
+	// of the row, so the device was unreadably clipped while three columns
+	// sat mostly empty.
+	//
+	// A float rather than a CSS length on purpose. It is interpolated into
+	// an emitted stylesheet, and a string field would put arbitrary CSS one
+	// careless caller away from the emitter; a number cannot carry a brace.
+	// Non-finite and negative values fall back to 1 for the same reason.
+	Weight float64
 }
 
 // TableProps configures Table. CaptionKey is required — a table with no
@@ -142,4 +161,39 @@ func srOnlyClass() html.PropOption {
 		css.Raw("white-space", "nowrap"),
 		css.Raw("border", "0"),
 	})
+}
+
+// gridTemplate lays every column out on one shared grid track list so the
+// header and every body row line up — the alignment a real <table> gives for
+// free and a div list has to be told.
+func gridTemplate(cols []TableColumn) string {
+	if len(cols) == 0 {
+		return "1fr"
+	}
+	out := ""
+	for _, col := range cols {
+		if out != "" {
+			out += " "
+		}
+		// minmax(0, Nfr) rather than a bare fr track: a bare one has an
+		// `auto` minimum, so one long user-agent string would widen its
+		// column and push the rest out of the row instead of being clipped.
+		out += "minmax(0, " + columnFraction(col.Weight) + "fr)"
+	}
+	return out
+}
+
+// columnFraction renders a column's weight as a grid fr multiplier.
+//
+// Anything that is not a usable positive number becomes "1" — both the
+// documented default for a zero Weight and the only safe answer for the rest.
+// This string is interpolated straight into an emitted stylesheet, and NaN or
+// ±Inf would format as a token that makes the whole grid-template-columns
+// declaration invalid, taking every column's alignment with it rather than
+// just this one's.
+func columnFraction(weight float64) string {
+	if math.IsNaN(weight) || math.IsInf(weight, 0) || weight <= 0 {
+		return "1"
+	}
+	return strconv.FormatFloat(weight, 'f', -1, 64)
 }

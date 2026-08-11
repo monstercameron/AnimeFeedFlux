@@ -369,12 +369,18 @@ func renderSecurity() ui.Node {
 				func() { loadSessions(sessions, sessionsLoading, sessionsErr) },
 				affui.VirtualTable(affui.VirtualTableProps{
 					T: t, ID: "settings-sessions-table", CaptionKey: "settings.security.sessions.caption",
+					// Weighted, because these five columns hold very
+					// different amounts of text and equal fifths served none
+					// of them: a full user-agent string got the same width as
+					// a "Yes"/"No" and was cut mid-word, while Current and
+					// Last seen sat mostly empty. Device gets the room it
+					// needs; the rest get what their content actually is.
 					Columns: []affui.TableColumn{
-						{ID: "device", LabelKey: "settings.security.sessions.col.device"},
-						{ID: "ip", LabelKey: "settings.security.sessions.col.ip", Mono: true},
-						{ID: "lastSeen", LabelKey: "settings.security.sessions.col.lastSeen"},
-						{ID: "current", LabelKey: "settings.security.sessions.col.current"},
-						{ID: "actions", LabelKey: "settings.security.sessions.col.actions"},
+						{ID: "device", LabelKey: "settings.security.sessions.col.device", Weight: 4},
+						{ID: "ip", LabelKey: "settings.security.sessions.col.ip", Mono: true, Weight: 2},
+						{ID: "lastSeen", LabelKey: "settings.security.sessions.col.lastSeen", Weight: 2},
+						{ID: "current", LabelKey: "settings.security.sessions.col.current", Weight: 1.2},
+						{ID: "actions", LabelKey: "settings.security.sessions.col.actions", Weight: 1.6},
 					},
 					Rows: sessionRows, RowKeys: sessionRowKeys,
 					// The revoke button is taller than a line of text, so the row
