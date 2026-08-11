@@ -45,6 +45,12 @@ const (
 
 	ReasonItemsPerRunRange = "items_per_run_out_of_range"
 	ReasonFeedWindowRange  = "feed_window_out_of_range"
+
+	// Novelty had no validation at all, despite max_retries directly
+	// multiplying provider calls within one run. See the bounds' own comments.
+	ReasonNoveltyMaxRetriesRange  = "novelty_max_retries_out_of_range"
+	ReasonNoveltyExcludeLastRange = "novelty_exclude_last_out_of_range"
+	ReasonNoveltyThresholdRange   = "novelty_threshold_out_of_range"
 )
 
 // slugPattern is PLAN.md §14.1's namespace rule.
@@ -71,6 +77,36 @@ const (
 	itemsPerRunMax = 50
 	feedWindowMin  = 1
 	feedWindowMax  = 200
+
+	// novelty.max_retries multiplies PROVIDER CALLS inside a single run:
+	// generate.Run does `maxAttempts = 1 + MaxNoveltyRetries` and calls the
+	// model once per attempt. Nothing re-checks the budget mid-run — §13's
+	// gate is consulted before dispatch, deliberately, so "a refusal costs
+	// nothing" — which means whatever this number says is spent by a run the
+	// gate has already waved through. Unvalidated, a typo of 300 for 3 was a
+	// run that could exhaust a daily ceiling on its own.
+	//
+	// 10 is generous against a default of 3: enough that a feed with a
+	// genuinely repetitive corpus can keep trying, far short of a number that
+	// turns one dispatch into a spending spree.
+	noveltyMaxRetriesMin = 0
+	noveltyMaxRetriesMax = 10
+
+	// novelty.exclude_last is how many recent titles are put in the prompt to
+	// steer away from (generate.Spec.RecentTitlesN), so it is paid for in
+	// input tokens on every single call. Capped at the novelty comparison
+	// window §8 names, which is the largest number that could mean anything
+	// here.
+	noveltyExcludeLastMin = 0
+	noveltyExcludeLastMax = 500
+
+	// novelty.threshold is a cosine similarity, so [0,1] is the whole
+	// meaningful range. Outside it the gate degenerates: above 1 nothing is
+	// ever a repeat, at or below 0 everything is, and the second case burns
+	// every retry on every run and then skips — a feed that spends daily and
+	// publishes nothing.
+	noveltyThresholdMin = 0.0
+	noveltyThresholdMax = 1.0
 )
 
 // Validate checks s against every rule PLAN.md §7 and §14.1/§14.2 assign to
@@ -200,6 +236,24 @@ func validateRanges(s Spec) []Problem {
 	}
 	if s.FeedWindow < feedWindowMin || s.FeedWindow > feedWindowMax {
 		problems = append(problems, Problem{Field: "feed_window", Reason: ReasonFeedWindowRange})
+	}
+
+	// Novelty was not range-checked at all. max_retries is the one that
+	// costs: it sets how many times a single run may call the provider, and
+	// the budget gate runs before dispatch, never during — see the bounds.
+	if s.Novelty.MaxRetries < noveltyMaxRetriesMin || s.Novelty.MaxRetries > noveltyMaxRetriesMax {
+		problems = append(problems, Problem{Field: "novelty.max_retries", Reason: ReasonNoveltyMaxRetriesRange})
+	}
+	if s.Novelty.ExcludeLast < noveltyExcludeLastMin || s.Novelty.ExcludeLast > noveltyExcludeLastMax {
+		problems = append(problems, Problem{Field: "novelty.exclude_last", Reason: ReasonNoveltyExcludeLastRange})
+	}
+	// A zero threshold is the unset case, not a configured one: a recipe with
+	// no novelty section decodes to 0, and cmd/animefeedflux substitutes
+	// defaultNoveltyThreshold for it rather than treating everything as a
+	// repeat. Only a value someone actually wrote is range-checked.
+	if s.Novelty.Threshold != 0 &&
+		(s.Novelty.Threshold < noveltyThresholdMin || s.Novelty.Threshold > noveltyThresholdMax) {
+		problems = append(problems, Problem{Field: "novelty.threshold", Reason: ReasonNoveltyThresholdRange})
 	}
 	return problems
 }
