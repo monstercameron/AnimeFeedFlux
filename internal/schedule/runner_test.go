@@ -114,6 +114,11 @@ type recordingExecutor struct {
 	panicOn map[int64]bool
 	failOn  map[int64]bool
 	delay   time.Duration // real (wall-clock) delay inside Execute, for concurrency tests
+
+	// changed is signalled (non-blocking) whenever Execute is entered or
+	// returns, so tests can wait on real, observable progress from the
+	// runner goroutine instead of guessing how long a Sleep needs to be.
+	changed chan struct{}
 }
 
 func newRecordingExecutor(clock Clock) *recordingExecutor {
@@ -122,10 +127,38 @@ func newRecordingExecutor(clock Clock) *recordingExecutor {
 		block:   make(map[int64]chan struct{}),
 		panicOn: make(map[int64]bool),
 		failOn:  make(map[int64]bool),
+		changed: make(chan struct{}, 1),
+	}
+}
+
+// notify wakes anyone blocked in waitForChange. Non-blocking: a slow or
+// absent receiver must never stall Execute itself.
+func (e *recordingExecutor) notify() {
+	select {
+	case e.changed <- struct{}{}:
+	default:
+	}
+}
+
+// waitForChange blocks until Execute next signals activity or timeout
+// elapses, whichever comes first. It is the blocking counterpart to a
+// polling Sleep: in the common case (the awaited dispatch already
+// happened, or happens shortly) it returns as soon as the goroutine under
+// test actually does something, rather than after a fixed guessed delay.
+func (e *recordingExecutor) waitForChange(timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	select {
+	case <-e.changed:
+	case <-time.After(timeout):
 	}
 }
 
 func (e *recordingExecutor) Execute(ctx context.Context, feedID int64, trigger string) error {
+	defer e.notify()
+	e.notify()
+
 	n := atomic.AddInt32(&e.concurrent, 1)
 	for {
 		old := atomic.LoadInt32(&e.maxObserved)
@@ -212,13 +245,17 @@ func nudgeUntilCalls(t *testing.T, clock *fakeClock, e *recordingExecutor, n int
 			return
 		}
 		clock.Advance(jump)
-		time.Sleep(2 * time.Millisecond)
+		// Block on the executor's own activity signal rather than sleeping a
+		// fixed guess: this returns immediately once Execute actually runs,
+		// and only falls back to a bounded wait when this particular Advance
+		// didn't cross a due time (i.e. genuinely nothing to wait for yet).
+		e.waitForChange(min(2*time.Millisecond, time.Until(deadline)))
 	}
 	t.Fatalf("timed out waiting for %d calls, got %d", n, e.totalCalls())
 }
 
 // nudgeUntil is like nudgeUntilCalls but for an arbitrary condition.
-func nudgeUntil(t *testing.T, clock *fakeClock, jump, timeout time.Duration, cond func() bool) {
+func nudgeUntil(t *testing.T, clock *fakeClock, e *recordingExecutor, jump, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -226,7 +263,7 @@ func nudgeUntil(t *testing.T, clock *fakeClock, jump, timeout time.Duration, con
 			return
 		}
 		clock.Advance(jump)
-		time.Sleep(2 * time.Millisecond)
+		e.waitForChange(min(2*time.Millisecond, time.Until(deadline)))
 	}
 	t.Fatalf("timed out waiting for condition")
 }
@@ -303,7 +340,7 @@ func TestRunner_JitterSpreadsIdenticalSchedule(t *testing.T) {
 		}
 		return true
 	}
-	nudgeUntil(t, clock, window/50, 5*time.Second, allFired)
+	nudgeUntil(t, clock, exec, window/50, 5*time.Second, allFired)
 
 	var min, max time.Time
 	for _, j := range jobs {
@@ -347,11 +384,16 @@ func TestRunner_SingleFlightPerFeed(t *testing.T) {
 	nudgeUntilCalls(t, clock, exec, 1, 3*time.Millisecond, time.Second)
 
 	// Tick the schedule several more times while the single execution is
-	// still blocked; single-flight must prevent a second dispatch.
+	// still blocked; single-flight must prevent a second dispatch. There is
+	// no positive signal to wait FOR (nothing SHOULD happen), so this blocks
+	// on the executor's real activity channel with a short per-tick bound —
+	// still a real wait (robust under load, unlike a bare runtime.Gosched()
+	// spin, which was tried here and proved flaky under a contended CPU),
+	// just one that would return early if the runner wrongly dispatched.
 	for i := 0; i < 5; i++ {
 		clock.Advance(time.Millisecond)
+		exec.waitForChange(5 * time.Millisecond)
 	}
-	time.Sleep(20 * time.Millisecond) // let the scheduler goroutine process ticks
 
 	if got := exec.callCount(1); got != 1 {
 		t.Fatalf("expected exactly 1 in-flight execution while busy, got %d", got)
@@ -380,8 +422,15 @@ func TestRunner_PanicRecoveredAndRecordedAsFailed(t *testing.T) {
 	nudgeUntilCalls(t, clock, exec, 2, 3*time.Millisecond, time.Second)
 
 	// The loop must still be alive: advance to the next nominal firing and
-	// confirm both feeds run again.
-	nudgeUntilCalls(t, clock, exec, 4, 3*time.Millisecond, time.Second)
+	// confirm both feeds run again. This checks each feed's own count,
+	// not just the aggregate totalCalls() >= 4 nudgeUntilCalls would use —
+	// the worker pool can service one job's second dispatch before the
+	// other's, so an aggregate-of-4 can already be true while one feed is
+	// still only at 1; that's the actual thing this assertion cares about,
+	// not merely "4 calls happened somewhere".
+	nudgeUntil(t, clock, exec, 3*time.Millisecond, time.Second, func() bool {
+		return exec.callCount(1) >= 2 && exec.callCount(2) >= 2
+	})
 
 	cancel()
 	<-done
@@ -410,20 +459,29 @@ func TestRunner_AutoDisableAfterConsecutiveFailures(t *testing.T) {
 		nudgeUntilCalls(t, clock, exec, i+1, 2*time.Millisecond, time.Second)
 	}
 
+	// r.Disabled(1) flips inside recordOutcome, which runs synchronously a
+	// few statements after Execute's own return — the last nudgeUntilCalls
+	// above has already observed that dispatch, so there is nothing further
+	// to Advance here, only a very short, already-in-flight tail of the
+	// runner goroutine to wait out. No channel exposes exactly that moment,
+	// so this polls the real Disabled() state with a short bound between
+	// checks rather than a single guessed sleep.
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for !r.Disabled(1) && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+		exec.waitForChange(2 * time.Millisecond)
 	}
 	if !r.Disabled(1) {
 		t.Fatalf("expected feed to be auto-disabled after %d consecutive failures", maxFailures)
 	}
 
 	callsBefore := exec.callCount(1)
-	// Further ticks must not dispatch a disabled feed.
+	// Further ticks must not dispatch a disabled feed. Again there is no
+	// positive signal to wait FOR (dispatch must NOT happen); see the same
+	// reasoning as TestRunner_SingleFlightPerFeed above.
 	for i := 0; i < 3; i++ {
 		clock.Advance(2 * time.Millisecond)
+		exec.waitForChange(5 * time.Millisecond)
 	}
-	time.Sleep(20 * time.Millisecond)
 	if got := exec.callCount(1); got != callsBefore {
 		t.Fatalf("disabled feed dispatched again: before=%d after=%d", callsBefore, got)
 	}
@@ -444,8 +502,18 @@ func TestRunner_GateDenialSkipsWithoutExecute(t *testing.T) {
 	done := make(chan struct{})
 	go func() { r.Run(ctx); close(done) }()
 
-	clock.Advance(3 * time.Millisecond)
-	time.Sleep(50 * time.Millisecond)
+	// No positive signal to wait FOR (Execute must never be called for a
+	// gate-denied feed, so the executor's own activity channel never
+	// fires), so this blocks on it anyway purely for its bounded real wait:
+	// select+timer stays robust under a contended CPU. A bare
+	// runtime.Gosched() spin was tried here first and proved flaky under
+	// load — it yields the P without guaranteeing the target goroutine
+	// actually gets scheduled, whereas a real timer wakeup does not depend
+	// on that race.
+	for i := 0; i < 20; i++ {
+		clock.Advance(3 * time.Millisecond)
+		exec.waitForChange(5 * time.Millisecond)
+	}
 
 	if got := exec.totalCalls(); got != 0 {
 		t.Fatalf("gate-denied feed must not call Execute, got %d calls", got)
@@ -470,7 +538,17 @@ func TestRunner_ShutdownStopsDispatchAndWaitsForInFlight(t *testing.T) {
 	runDone := make(chan struct{})
 	go func() { r.Run(ctx); close(runDone) }()
 
-	nudgeUntilCalls(t, clock, exec, 2, 3*time.Millisecond, time.Second)
+	// jump is deliberately smaller than both jobs' 1ms interval: nudging in
+	// steps no larger than the interval bounds how far this can overshoot
+	// the 2nd firing's exact due instant. That matters for what follows —
+	// if the overshoot were allowed to exceed 1ms, the 3rd nominal firing
+	// (nominal_2nd + interval) could already be due by the time cancel()
+	// below runs, and Run()'s `select { case <-ctx.Done(): ...; case
+	// <-r.clock.After(wait): ... }` would race ctx.Done() against an
+	// already-fired timer — Go picks between two simultaneously-ready select
+	// cases at random, so that race would make this assertion coin-flip
+	// flaky no matter how the post-cancel wait below is implemented.
+	nudgeUntilCalls(t, clock, exec, 2, 200*time.Microsecond, time.Second)
 
 	callsAtCancel := exec.totalCalls()
 	cancel()
@@ -483,11 +561,12 @@ func TestRunner_ShutdownStopsDispatchAndWaitsForInFlight(t *testing.T) {
 	}
 
 	// No further dispatch should occur after cancellation even though the
-	// idle feed's schedule keeps coming due.
+	// idle feed's schedule keeps coming due. No positive signal to wait FOR
+	// (dispatch must NOT happen); see TestRunner_SingleFlightPerFeed above.
 	for i := 0; i < 5; i++ {
 		clock.Advance(time.Millisecond)
+		exec.waitForChange(5 * time.Millisecond)
 	}
-	time.Sleep(20 * time.Millisecond)
 	if got := exec.totalCalls(); got != callsAtCancel {
 		t.Fatalf("dispatch continued after cancellation: before=%d after=%d", callsAtCancel, got)
 	}
@@ -527,7 +606,7 @@ func TestRunner_RunExceedingTimeoutIsCancelled(t *testing.T) {
 	// timeout's own timer (registered inside runOne, via r.clock.After) is
 	// subject to the same start race as the initial dispatch, so nudge here
 	// too rather than a single Advance.
-	nudgeUntil(t, clock, 10*time.Second, time.Second, func() bool { return r.InFlight() == 0 })
+	nudgeUntil(t, clock, exec, 10*time.Second, time.Second, func() bool { return r.InFlight() == 0 })
 
 	cancel()
 	<-done

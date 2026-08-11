@@ -6,9 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/monstercameron/schemaflux"
+
 	"github.com/monstercameron/AnimeFeedFlux/internal/ids"
 	"github.com/monstercameron/AnimeFeedFlux/internal/llm"
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
+	"github.com/monstercameron/AnimeFeedFlux/internal/obs"
 	"github.com/monstercameron/AnimeFeedFlux/internal/sources"
 )
 
@@ -268,6 +271,179 @@ func TestRun_MalformedOutput_OneRepairAttemptThenFails(t *testing.T) {
 	if store.commitCalls != 1 {
 		t.Fatalf("CommitRun called %d times, want 1 (a failed run is still a run row)", store.commitCalls)
 	}
+}
+
+// TestRun_AccountScopedProviderError_SetsRunRecordAccountScoped verifies the
+// PLAN.md §8 kill-switch seam: an account-wide provider failure (a revoked
+// key) is distinguishable, via RunRecord.AccountScoped, from a recipe-scoped
+// one -- the caller-facing contract runner.go's RunRecord.AccountScoped doc
+// comment describes. A revoked key fails on the first Generate call with no
+// repair attempt (runAttempt only repairs when the call itself succeeded but
+// returned zero usable items).
+func TestRun_AccountScopedProviderError_SetsRunRecordAccountScoped(t *testing.T) {
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	provider := llm.NewFake()
+	provider.QueueGenerateError(schemaflux.ErrAuthentication)
+
+	store := &stubStore{}
+	nov := &stubNovelty{}
+	deps := newDeps(store, nov, nil, provider, now)
+
+	result, err := Run(context.Background(), deps, testFeedGenerative(), testSpec())
+	if err == nil {
+		t.Fatal("Run() error = nil, want the classified provider error")
+	}
+	if !llm.IsAccountScoped(err) {
+		t.Errorf("llm.IsAccountScoped(err) = false for a revoked-key error, want true")
+	}
+	if result.Run.Status != StatusFailed {
+		t.Fatalf("Status = %q, want %q", result.Run.Status, StatusFailed)
+	}
+	if !result.Run.AccountScoped {
+		t.Error("RunRecord.AccountScoped = false, want true for an account-scoped provider failure")
+	}
+	if provider.GenerateCallCount() != 1 {
+		t.Fatalf("Generate called %d times, want exactly 1 (no repair attempt on a hard call error)", provider.GenerateCallCount())
+	}
+}
+
+// TestRun_RecipeScopedProviderError_LeavesRunRecordAccountScopedFalse is the
+// contrast case: a recipe-scoped failure (model not found / bad
+// configuration) must NOT trip the same seam -- only that one feed's own
+// recipe is broken, every other feed sharing the credential is unaffected.
+func TestRun_RecipeScopedProviderError_LeavesRunRecordAccountScopedFalse(t *testing.T) {
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	provider := llm.NewFake()
+	provider.QueueGenerateError(schemaflux.ErrConfiguration)
+
+	store := &stubStore{}
+	nov := &stubNovelty{}
+	deps := newDeps(store, nov, nil, provider, now)
+
+	result, err := Run(context.Background(), deps, testFeedGenerative(), testSpec())
+	if err == nil {
+		t.Fatal("Run() error = nil, want the classified provider error")
+	}
+	if llm.IsAccountScoped(err) {
+		t.Errorf("llm.IsAccountScoped(err) = true for a recipe-scoped configuration error, want false")
+	}
+	if result.Run.AccountScoped {
+		t.Error("RunRecord.AccountScoped = true, want false for a recipe-scoped provider failure")
+	}
+}
+
+// TestRun_ProviderError_RecordsProviderErrorMetric_OnlyOnFailure asserts
+// aff_provider_errors_total{kind} fires on a real failed Provider.Generate
+// call, labeled with the §8 taxonomy kind (never the error's free-text
+// message), and does NOT fire on the happy path.
+func TestRun_ProviderError_RecordsProviderErrorMetric_OnlyOnFailure(t *testing.T) {
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+
+	t.Run("failure records the metric with a bounded kind label", func(t *testing.T) {
+		metrics, reader := newTestMetrics(t)
+		provider := llm.NewFake()
+		provider.QueueGenerateError(schemaflux.ErrAuthentication)
+		store := &stubStore{}
+		nov := &stubNovelty{}
+		deps := newDeps(store, nov, nil, provider, now)
+		deps.Metrics = metrics
+
+		if _, err := Run(context.Background(), deps, testFeedGenerative(), testSpec()); err == nil {
+			t.Fatal("Run() error = nil, want the classified provider error")
+		}
+
+		dps := collectIntSum(t, reader, obs.MetricProviderErrorsTotal)
+		if len(dps) == 0 {
+			t.Fatal("aff_provider_errors_total was never recorded on a failed provider call")
+		}
+		var gotKind string
+		for _, dp := range dps {
+			v, _ := dp.Attributes.Value("kind")
+			gotKind = v.AsString()
+		}
+		if gotKind != llm.Fatal.String() {
+			t.Errorf("kind label = %q, want %q (llm.Kind.String(), never free-text)", gotKind, llm.Fatal.String())
+		}
+	})
+
+	t.Run("happy path never records the metric", func(t *testing.T) {
+		metrics, reader := newTestMetrics(t)
+		provider := llm.NewFake()
+		provider.QueueResult(llm.Result{Items: []llm.GeneratedItem{
+			validGeneratedItem("A perfectly reasonable trivia title one"),
+		}})
+		store := &stubStore{}
+		nov := &stubNovelty{}
+		deps := newDeps(store, nov, nil, provider, now)
+		deps.Metrics = metrics
+
+		if _, err := Run(context.Background(), deps, testFeedGenerative(), testSpec()); err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+
+		if dps := collectIntSum(t, reader, obs.MetricProviderErrorsTotal); len(dps) != 0 {
+			t.Errorf("aff_provider_errors_total recorded on the happy path: %+v", dps)
+		}
+	})
+}
+
+// TestRun_Completed_RecordsItemsPublishedMetric asserts aff_items_published_total
+// fires with the actual published count on a successful commit, and does not
+// fire on a skipped or failed run (RunRecord.ItemsAdded is 0 there, so there
+// is nothing to publish).
+func TestRun_Completed_RecordsItemsPublishedMetric(t *testing.T) {
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+
+	t.Run("completed run records the published count", func(t *testing.T) {
+		metrics, reader := newTestMetrics(t)
+		provider := llm.NewFake()
+		provider.QueueResult(llm.Result{Items: []llm.GeneratedItem{
+			validGeneratedItem("A perfectly reasonable trivia title one"),
+			validGeneratedItem("A perfectly reasonable trivia title two"),
+		}})
+		store := &stubStore{}
+		nov := &stubNovelty{}
+		deps := newDeps(store, nov, nil, provider, now)
+		deps.Metrics = metrics
+
+		result, err := Run(context.Background(), deps, testFeedGenerative(), testSpec())
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if result.Run.Status != StatusCompleted {
+			t.Fatalf("Status = %q, want %q", result.Run.Status, StatusCompleted)
+		}
+
+		var total int64
+		for _, dp := range collectIntSum(t, reader, obs.MetricItemsPublishedTotal) {
+			total += dp.Value
+		}
+		if total != int64(result.Run.ItemsAdded) {
+			t.Errorf("aff_items_published_total = %d, want %d (RunRecord.ItemsAdded)", total, result.Run.ItemsAdded)
+		}
+		if total == 0 {
+			t.Fatal("test fixture published 0 items; not exercising the path under test")
+		}
+	})
+
+	t.Run("failed run never records items published", func(t *testing.T) {
+		metrics, reader := newTestMetrics(t)
+		provider := llm.NewFake()
+		provider.QueueGenerateError(errors.New("boom"))
+		provider.QueueGenerateError(errors.New("boom again")) // repair attempt
+		store := &stubStore{}
+		nov := &stubNovelty{}
+		deps := newDeps(store, nov, nil, provider, now)
+		deps.Metrics = metrics
+
+		if _, err := Run(context.Background(), deps, testFeedGenerative(), testSpec()); err == nil {
+			t.Fatal("Run() error = nil, want a failure")
+		}
+
+		if dps := collectIntSum(t, reader, obs.MetricItemsPublishedTotal); len(dps) != 0 {
+			t.Errorf("aff_items_published_total recorded on a failed run: %+v", dps)
+		}
+	})
 }
 
 func TestRun_NoveltyRejection_RetriesThenSkips(t *testing.T) {

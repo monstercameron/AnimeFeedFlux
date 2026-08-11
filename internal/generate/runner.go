@@ -17,15 +17,20 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/monstercameron/AnimeFeedFlux/internal/ids"
 	"github.com/monstercameron/AnimeFeedFlux/internal/llm"
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
 	"github.com/monstercameron/AnimeFeedFlux/internal/novelty"
+	"github.com/monstercameron/AnimeFeedFlux/internal/obs"
 	"github.com/monstercameron/AnimeFeedFlux/internal/sources"
 )
 
@@ -113,6 +118,12 @@ type Deps struct {
 	Provider llm.Provider
 	IDs      ids.Source
 	Now      func() time.Time
+
+	// Metrics is optional (PLAN.md §15.0a): a nil Metrics means "no
+	// MeterProvider configured" (AFF_OTEL_ENABLED=0, the default), and every
+	// RecordXxx call below is skipped rather than panicking on a nil
+	// receiver. Production wiring passes obs.NewMetrics(obs.GetMeterProvider()).
+	Metrics *obs.Metrics
 }
 
 func (d Deps) now() time.Time {
@@ -132,6 +143,11 @@ type Spec struct {
 
 	Model       string
 	Temperature float64 // accepted for forward-compat; llm.Request notes SchemaFlux has no per-call knob for it yet (PLAN.md §8.1)
+
+	// Effort is the SchemaFlux Speed tier — "smart" | "fast" | "quick"
+	// (PLAN.md §8.1). Empty uses the library default. Unlike Temperature
+	// this one IS wired: see llm.Request.Effort.
+	Effort string
 
 	ItemsPerRun int
 
@@ -198,6 +214,23 @@ type RunRecord struct {
 	ErrorKind string
 	Error     string
 
+	// AccountScoped is PLAN.md §8's global-kill-switch seam: true exactly
+	// when Error is a Fatal, ScopeAccount llm.Error (llm.IsAccountScoped) --
+	// a bad or exhausted credential every feed shares, so retrying it is
+	// pointless and every other feed is about to fail the identical way.
+	//
+	// This package computes the distinction and stops here: the kill switch
+	// itself (refusing to schedule further runs, flipping /healthz) lives in
+	// the composition root, outside this package's scope. The contract for
+	// that caller: whenever a RunResult carries RunRecord.AccountScoped ==
+	// true, treat the provider/credential as globally dead immediately --
+	// stop triggering EVERY feed against it (not just this one), surface the
+	// condition on /healthz, and require an operator to clear it before
+	// resuming. Do not let each feed's own scheduler discover the same dead
+	// credential independently by burning its own failure budget; that is
+	// the slow, expensive, confusing outage this field exists to prevent.
+	AccountScoped bool
+
 	ItemsAdded    int
 	ItemsRejected int
 	RejectReasons map[string]int // reason token -> count (§10 reject_reasons_json)
@@ -252,6 +285,18 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 		return RunResult{}, fmt.Errorf("generate: aggregate feeds have no generator to run (PLAN.md §14.2)")
 	}
 
+	// Root span for the whole pipeline (PLAN.md §15.0a): every child span
+	// opened below (runAttempt's "validate", and whatever SchemaFlux emits
+	// for the model call — see llm.go's task report on span naming) nests
+	// under this one because ctx, reassigned here, is what flows into every
+	// call this function makes from here on.
+	ctx, span := obs.Start(ctx, "generation.run", obs.KindRun)
+	span.SetAttributes(
+		attribute.String("feed_slug", feed.Slug),
+		attribute.String("trigger", spec.Trigger),
+	)
+	defer span.End()
+
 	started := deps.now()
 	rejectTotals := map[string]int{}
 	var tokensIn, tokensOut int
@@ -275,10 +320,46 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 			TokensOut:     tokensOut,
 			EstCostUSD:    estimateCostUSD(tokensIn, tokensOut, spec),
 			Trigger:       spec.Trigger,
+			AccountScoped: llm.IsAccountScoped(runErr),
 		}
 		if runErr != nil {
 			run.Error = runErr.Error()
 		}
+
+		// Terminal-state observability (PLAN.md §15.0a, TODOS A7-19/A7-20):
+		// every outcome — completed, skipped, or failed — reaches here
+		// exactly once, so the root span's outcome attribute and the
+		// aff_runs_total/aff_run_duration_seconds counters are set/recorded
+		// unconditionally, not only on the success path.
+		outcome := runOutcome(status)
+		attrs := []attribute.KeyValue{attribute.String("outcome", outcome)}
+		if errorKind != "" {
+			attrs = append(attrs, attribute.String("reason", errorKind))
+		}
+		span.SetAttributes(attrs...)
+		if runErr != nil {
+			span.RecordError(runErr)
+			span.SetStatus(codes.Error, runErr.Error())
+		}
+		recordRunMetrics(ctx, deps.Metrics, feed.Slug, spec.Trigger, spec.Model, outcome, run)
+
+		// The canonical run.finished wide event (PLAN.md §15.0, TODOS
+		// A4-34): one line per run, every field that applies, through
+		// obs.RunFinished so the field names/outcome enum are the ones
+		// obs/fields.go enforces rather than a hand-rolled set that can
+		// drift from it.
+		obs.RunFinished(ctx, slog.Default(), obs.RunFinishedFields{
+			FeedSlug:  feed.Slug,
+			Trigger:   spec.Trigger,
+			Outcome:   obs.Outcome(outcome),
+			Reason:    errorKind,
+			Duration:  run.FinishedAt.Sub(run.StartedAt),
+			Model:     spec.Model,
+			TokensIn:  run.TokensIn,
+			TokensOut: run.TokensOut,
+			CostUSD:   run.EstCostUSD,
+		})
+
 		if cerr := deps.Store.CommitRun(ctx, run, items); cerr != nil {
 			if runErr != nil {
 				return RunResult{Run: run}, fmt.Errorf("generate: run failed (%v) and committing it also failed: %w", runErr, cerr)
@@ -328,7 +409,7 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 		batch := ar.valid
 		var batchVecs []novelty.Vector
 		if feed.Kind == model.KindGenerative {
-			batch, batchVecs = filterNovel(ctx, deps, feed.ID, batch, rejectTotals)
+			batch, batchVecs = filterNovel(ctx, deps, feed.Slug, feed.ID, batch, rejectTotals)
 		}
 		novelItems = append(novelItems, batch...)
 		novelVecs = append(novelVecs, batchVecs...)
@@ -419,7 +500,7 @@ func Sample(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (SampleR
 		// Sample never persists (this function's own doc comment), so the
 		// vector filterNovel may have captured is discarded here — there is
 		// nothing for it to be written against.
-		items, _ = filterNovel(ctx, deps, feed.ID, items, rejectTotals)
+		items, _ = filterNovel(ctx, deps, feed.Slug, feed.ID, items, rejectTotals)
 	}
 	if spec.ItemsPerRun > 0 && len(items) > spec.ItemsPerRun {
 		items = items[:spec.ItemsPerRun]
@@ -532,31 +613,80 @@ func runAttempt(ctx context.Context, deps Deps, spec Spec, opts Options, system,
 			Prompt:    promptText,
 			System:    system,
 			Model:     spec.Model,
+			Effort:    spec.Effort,
 			MaxItems:  spec.ItemsPerRun,
 			RequestID: requestID,
 		}
+		// deps.Provider.Generate is called on ctx UNWRAPPED — TODOS A4-31 is
+		// explicit that SchemaFlux already emits its own span for this call
+		// (see llm.go/task report for the exact name); wrapping it in a
+		// second, hand-rolled span here would produce two overlapping spans
+		// for one operation. ctx already carries generation.run (Run's
+		// obs.Start, above), so SchemaFlux's span nests under it as long as
+		// the host installed SchemaFlux's otel Observer against the same
+		// TracerProvider — see the task report for that startup-time gap.
 		res, err := deps.Provider.Generate(ctx, req)
 		tokensIn := systemTokens + estimateTokens(promptText)
 		if err != nil {
+			recordProviderError(ctx, deps.Metrics, err)
 			return nil, tokensIn, 0, err
 		}
 		tokensOut := estimateTokens(res.Raw)
 
+		// validate span (TODOS A4-32): one per attempt (base call and, if it
+		// happens, the repair call each get their own), recording how many
+		// of this batch's candidates were rejected and by which stable
+		// reason tokens — never the candidate's title or body.
+		_, vspan := obs.Start(ctx, "validate", obs.KindRun)
+		localReasons := map[string]int{}
 		var valid []model.Item
+		linkAccepted, linkRejected := 0, 0
 		for _, gi := range res.Items {
 			item, rej, verr := Validate(toCandidate(gi), opts)
 			if verr != nil {
 				// Only an unrecognized Kind reaches here (contract.go), a
 				// caller/programmer mistake, not an everyday rejection.
+				vspan.RecordError(verr)
+				vspan.SetStatus(codes.Error, verr.Error())
+				vspan.End()
 				return nil, tokensIn, tokensOut, verr
 			}
 			if len(rej) > 0 {
+				linkFailed := false
 				for _, r := range rej {
 					reasons[r.Reason]++
+					localReasons[r.Reason]++
+					if r.Field == "link" {
+						linkFailed = true
+					}
+				}
+				if opts.Kind == model.KindGrounded && linkFailed {
+					linkRejected++
 				}
 				continue
 			}
 			valid = append(valid, item)
+			if opts.Kind == model.KindGrounded {
+				linkAccepted++
+			}
+		}
+		vspan.SetAttributes(
+			attribute.Int("rejected_count", sumReasons(localReasons)),
+			attribute.String("reasons", joinSortedReasons(localReasons)),
+		)
+		vspan.End()
+
+		// link.integrity span (TODOS A6-18, PLAN.md §15.0a): only meaningful
+		// for grounded feeds, where CheckLink (contract.go) is the gate that
+		// decides whether the model's link survives at all.
+		if opts.Kind == model.KindGrounded {
+			_, lspan := obs.Start(ctx, "link.integrity", obs.KindRun)
+			lspan.SetAttributes(
+				attribute.Int("candidates", len(opts.CandidateURLs)),
+				attribute.Int("accepted", linkAccepted),
+				attribute.Int("rejected", linkRejected),
+			)
+			lspan.End()
 		}
 		return valid, tokensIn, tokensOut, nil
 	}
@@ -579,6 +709,19 @@ func runAttempt(ctx context.Context, deps Deps, spec Spec, opts Options, system,
 		return attemptResult{rejectedReasons: reasons, tokensIn: totalTokensIn, tokensOut: totalTokensOut}, err2
 	}
 	if len(valid2) == 0 {
+		// Log WHICH rules rejected it. ErrMalformedOutput on its own says
+		// only that validation failed twice, which is exactly the
+		// unactionable-at-4am shape PLAN.md §8 objects to in "the API
+		// failed": the reasons were already counted here and then thrown
+		// away at the boundary, so the one question an operator has —
+		// which rule, and how many items hit it — had no answer anywhere.
+		// Reasons are the short stable tokens §10's reject_reasons_json
+		// uses, so this line groups and counts rather than printing prose.
+		slog.WarnContext(ctx, "generation rejected every item twice",
+			"reasons", reasons,
+			"tokens_in", totalTokensIn,
+			"tokens_out", totalTokensOut,
+		)
 		return attemptResult{rejectedReasons: reasons, tokensIn: totalTokensIn, tokensOut: totalTokensOut}, ErrMalformedOutput
 	}
 	return attemptResult{valid: valid2, rejectedReasons: reasons, tokensIn: totalTokensIn, tokensOut: totalTokensOut}, nil
@@ -615,7 +758,7 @@ func repairNote(reasons map[string]int) string {
 // or every candidate in items was rejected — callers must not assume its
 // length equals len(items) coming in, only that it lines up with what this
 // function returns as the first value.
-func filterNovel(ctx context.Context, deps Deps, feedID int64, items []model.Item, rejectTotals map[string]int) ([]model.Item, []novelty.Vector) {
+func filterNovel(ctx context.Context, deps Deps, feedSlug string, feedID int64, items []model.Item, rejectTotals map[string]int) ([]model.Item, []novelty.Vector) {
 	if deps.Novelty == nil {
 		return items, nil
 	}
@@ -629,22 +772,46 @@ func filterNovel(ctx context.Context, deps Deps, feedID int64, items []model.Ite
 	for _, it := range items {
 		text := it.Title + " " + it.SummaryText
 
+		// novelty.check span (TODOS A5-11, PLAN.md §15.0a): one per item, so
+		// an incident can see which candidate tripped the gate and how close
+		// it was, not just the run-level reject count.
+		_, nspan := obs.Start(ctx, "novelty.check", obs.KindRun)
+
 		var (
-			dup bool
-			vec novelty.Vector
-			err error
+			dup   bool
+			vec   novelty.Vector
+			err   error
+			score float64
 		)
 		if hasVectors {
-			dup, _, _, vec, err = vn.CheckVector(ctx, feedID, text)
+			dup, _, score, vec, err = vn.CheckVector(ctx, feedID, text)
 		} else {
-			dup, _, _, err = deps.Novelty.Check(ctx, feedID, text)
+			dup, _, score, err = deps.Novelty.Check(ctx, feedID, text)
 		}
+
+		verdict := "novel"
+		switch {
+		case err != nil:
+			verdict = "error"
+			nspan.RecordError(err)
+			nspan.SetStatus(codes.Error, err.Error())
+		case dup:
+			verdict = "duplicate"
+		}
+		nspan.SetAttributes(
+			attribute.Float64("max_cosine", score),
+			attribute.String("verdict", verdict),
+		)
+		nspan.End()
+
 		if err != nil {
 			rejectTotals[ReasonNoveltyCheckFailed]++
+			recordItemRejected(ctx, deps.Metrics, feedSlug, ReasonNoveltyCheckFailed)
 			continue
 		}
 		if dup {
 			rejectTotals[ReasonNoveltyDuplicate]++
+			recordItemRejected(ctx, deps.Metrics, feedSlug, ReasonNoveltyDuplicate)
 			continue
 		}
 		out = append(out, it)
@@ -768,4 +935,122 @@ func sumReasons(reasons map[string]int) int {
 		total += v
 	}
 	return total
+}
+
+// runOutcome maps a RunRecord.Status onto §15.0a's fixed outcome enumeration
+// (obs.NewMetrics' cardinality guard only accepts "success"|"skipped"|
+// "rejected"|"failed"). RunRecord's own status strings predate the metrics
+// work and use "completed" rather than "success", so this is the one place
+// that translation happens rather than every call site re-deriving it.
+func runOutcome(status string) string {
+	if status == StatusCompleted {
+		return "success"
+	}
+	return status
+}
+
+// recordRunMetrics emits aff_runs_total/aff_run_duration_seconds (TODOS
+// A7-19/A7-20) and, when there is a model to attribute them to,
+// aff_tokens_total/aff_cost_usd_total (A4-33) from run — the SAME values
+// Store.CommitRun is about to persist, not a second, possibly-inconsistent
+// estimate. m may be nil (Deps.Metrics' doc comment: no MeterProvider
+// configured), in which case this is a no-op — instrumentation must never be
+// why a run fails.
+//
+// A guard rejection (e.g. an unrecognised trigger) is logged, not returned:
+// a telemetry bug must not fail the generation it is trying to observe.
+func recordRunMetrics(ctx context.Context, m *obs.Metrics, feedSlug, trigger, model, outcome string, run RunRecord) {
+	if m == nil {
+		return
+	}
+	duration := run.FinishedAt.Sub(run.StartedAt).Seconds()
+	if err := m.RecordRun(ctx, feedSlug, trigger, outcome, duration); err != nil {
+		logMetricErr(err)
+	}
+	// aff_items_published_total (A5-xx / §15.0a): only a completed run
+	// actually published anything -- a skipped or failed run's ItemsAdded is
+	// always 0, so the guard here is redundant with that but kept explicit
+	// so this call site reads correctly on its own.
+	if outcome == "success" && run.ItemsAdded > 0 {
+		if err := m.RecordItemsPublished(ctx, feedSlug, int64(run.ItemsAdded)); err != nil {
+			logMetricErr(err)
+		}
+	}
+	if model == "" {
+		return // nothing to attribute token/cost totals to
+	}
+	if run.TokensIn > 0 {
+		if err := m.RecordTokens(ctx, model, "in", int64(run.TokensIn)); err != nil {
+			logMetricErr(err)
+		}
+	}
+	if run.TokensOut > 0 {
+		if err := m.RecordTokens(ctx, model, "out", int64(run.TokensOut)); err != nil {
+			logMetricErr(err)
+		}
+	}
+	if run.EstCostUSD > 0 {
+		if err := m.RecordCost(ctx, feedSlug, model, run.EstCostUSD); err != nil {
+			logMetricErr(err)
+		}
+	}
+}
+
+func logMetricErr(err error) {
+	slog.Default().Warn("obs: metric recording rejected", "error", err)
+}
+
+// recordProviderError increments aff_provider_errors_total{kind} (PLAN.md
+// §15.0a) for a single failed Provider.Generate call. kind is the §8
+// taxonomy token (llm.Kind.String(): "transient"|"invalid"|"fatal") recovered
+// from err via errors.As -- never err.Error() itself, which can carry
+// provider-specific prose with no cardinality bound. err that does not wrap
+// an *llm.Error (a programmer mistake, not a real provider response) falls
+// back to "unclassified" rather than being skipped, so an unclassified
+// failure is still visible on the metric instead of silently vanishing. m may
+// be nil (Deps.Metrics' doc comment: no MeterProvider configured), in which
+// case this is a no-op -- instrumentation must never be why a run fails.
+func recordProviderError(ctx context.Context, m *obs.Metrics, err error) {
+	if m == nil || err == nil {
+		return
+	}
+	kind := "unclassified"
+	var lerr *llm.Error
+	if errors.As(err, &lerr) {
+		kind = lerr.Kind.String()
+	}
+	kind = obs.SanitizeReason(kind)
+	if rerr := m.RecordProviderError(ctx, kind); rerr != nil {
+		logMetricErr(rerr)
+	}
+}
+
+// recordItemRejected increments aff_items_rejected_total{feed_slug,reason}
+// (TODOS A5-12) for a single rejected item. m may be nil (Deps.Metrics' doc
+// comment: no MeterProvider configured), in which case this is a no-op —
+// instrumentation must never be why a run fails.
+func recordItemRejected(ctx context.Context, m *obs.Metrics, feedSlug, reason string) {
+	if m == nil {
+		return
+	}
+	if err := m.RecordItemRejected(ctx, feedSlug, reason); err != nil {
+		logMetricErr(err)
+	}
+}
+
+// joinSortedReasons renders a rejection-reason set as a deterministic,
+// comma-joined string of the stable tokens themselves (never a sentence, per
+// contract.go's Reason discipline) — safe as a span attribute because every
+// value in it is already one of the fixed tokens contract.go/runner.go
+// define, not model output.
+func joinSortedReasons(reasons map[string]int) string {
+	if len(reasons) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(reasons))
+	for k := range reasons {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }

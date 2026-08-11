@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/monstercameron/AnimeFeedFlux/internal/obs"
 )
 
 // Clock abstracts time so tests never sleep on the wall clock (PLAN.md §17).
@@ -157,6 +159,16 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
+// WithMetrics wires the §15.0a metric set into the Runner (TODOS A7-21). A
+// nil m (the default) leaves metric recording a no-op, same as
+// generate.Deps.Metrics — no MeterProvider configured is the common case
+// (AFF_OTEL_ENABLED=0), not an error.
+func WithMetrics(m *obs.Metrics) Option {
+	return func(r *Runner) {
+		r.metrics = m
+	}
+}
+
 // Runner is the scheduler loop. Construct with New and start with Run.
 type Runner struct {
 	clock Clock
@@ -172,6 +184,7 @@ type Runner struct {
 	maxConsecutiveFailures int
 	shutdownTimeout        time.Duration
 	logger                 *slog.Logger
+	metrics                *obs.Metrics
 
 	providerSem *Semaphore
 
@@ -337,9 +350,15 @@ func (r *Runner) maybeDispatch(ctx context.Context, feedID int64) {
 	}
 	r.mu.Unlock()
 
-	// Gate is checked BEFORE dispatch — a refusal must cost nothing (PLAN.md §13).
+	// Gate is checked BEFORE dispatch — a refusal must cost nothing (PLAN.md
+	// §13). A budget/kill-switch refusal is a normal, visible outcome, not a
+	// fault (TODOS A7-21): it lands in aff_runs_total{outcome="skipped"},
+	// never as an error, and generate.Run is never invoked for it — this is
+	// the only site that can count it, since nothing downstream ever sees
+	// this feed for this tick.
 	if ok, reason := r.gate.Allowed(feedID); !ok {
 		r.logOutcome(feedID, "skipped", reason)
+		r.recordSkippedRun(feedID)
 		return
 	}
 
@@ -475,12 +494,39 @@ func (r *Runner) recordOutcome(feedID int64, err error) {
 
 	if r.failures[feedID] >= r.maxConsecutiveFailures && !r.disabled[feedID] {
 		r.disabled[feedID] = true
+		// NOT a run.finished event (this is a feed-state change, not a run
+		// outcome — "disabled" is not one of obs.Outcome's four values), so
+		// it does not go through obs.RunFinished. FieldFeedSlug is reused
+		// since it IS canonical; "consecutive_failures" is NOT in
+		// obs.canonicalFields today and A0-L12 (internal/obs/fields_test.go)
+		// would flag it if that test's coverage reached this call site —
+		// it's a gap for whoever owns internal/obs to resolve (add the
+		// field or drop it here), not something this package can fix by
+		// inventing a new canonical constant.
 		r.logger.Error("feed auto-disabled after consecutive failures",
-			"feed_slug", slug,
-			"outcome", "disabled",
-			"reason", "consecutive_failures",
+			obs.FieldFeedSlug, slug,
 			"consecutive_failures", r.failures[feedID],
 		)
+	}
+}
+
+// recordSkippedRun emits aff_runs_total{outcome="skipped"} for a feed the
+// Gate refused before dispatch (TODOS A7-21). Trigger is always "cron" here
+// — the Runner only ever dispatches cron-driven work (Executor's doc
+// comment) — and duration is passed as -1 because no run actually started:
+// RecordRun only observes aff_run_duration_seconds when duration >= 0
+// (obs/metrics.go), so this correctly counts the skip without inventing a
+// wall-clock time for work that never ran.
+func (r *Runner) recordSkippedRun(feedID int64) {
+	if r.metrics == nil {
+		return
+	}
+	slug := ""
+	if j, ok := r.jobs[feedID]; ok {
+		slug = j.Slug()
+	}
+	if err := r.metrics.RecordRun(context.Background(), slug, "cron", "skipped", -1); err != nil {
+		r.logger.Warn("obs: recording skipped-run metric rejected", "error", err, "feed_slug", slug)
 	}
 }
 
@@ -492,16 +538,33 @@ func (r *Runner) logOutcome(feedID int64, outcome, reason string) {
 	r.logOutcomeLocked(feedID, slug, outcome, reason)
 }
 
+// logOutcomeLocked emits the scheduler-level outcome through obs.RunFinished
+// (§15.0) rather than hand-rolling a second "run.finished" line: a
+// hand-rolled emitter is exactly how two events drift apart, and this one
+// previously logged bare "feed_slug"/"outcome"/"reason" string keys instead
+// of the canonical obs.Field* constants, with a FAILED outcome's reason set
+// to err.Error() directly — an unbounded, unsanitized string (could carry a
+// path, an address, or model-derived text) landing in the one field §15.0
+// requires to be a short stable token because it gets grouped on. Routing
+// through obs.RunFinished gets the canonical fields AND obs.SanitizeReason's
+// enforcement for free, matching internal/generate/runner.go's own call.
+//
+// outcome here is one of "success" or "failed" (recordOutcome, after
+// Execute returns) or "skipped" (logOutcome, a pre-dispatch refusal —
+// disabled or gate-denied — for which generate.Run is never invoked, so
+// this IS the only run.finished-shaped event for it, not a duplicate of
+// one).
 func (r *Runner) logOutcomeLocked(feedID int64, slug, outcome, reason string) {
-	level := slog.LevelInfo
-	if outcome == "failed" {
-		level = slog.LevelWarn
+	o := obs.Outcome(outcome)
+	if !obs.ValidOutcome(o) {
+		o = obs.OutcomeFailed
 	}
-	r.logger.Log(context.Background(), level, "run.finished",
-		"feed_slug", slug,
-		"outcome", outcome,
-		"reason", reason,
-	)
+	obs.RunFinished(context.Background(), r.logger, obs.RunFinishedFields{
+		FeedSlug: slug,
+		Trigger:  "cron",
+		Outcome:  o,
+		Reason:   reason,
+	})
 }
 
 // shutdown waits up to shutdownTimeout for in-flight work to finish on its

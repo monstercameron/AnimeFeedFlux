@@ -5,7 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
+
+	"github.com/monstercameron/AnimeFeedFlux/internal/obs"
 	"github.com/monstercameron/AnimeFeedFlux/internal/urlnorm"
 )
 
@@ -41,10 +47,49 @@ type Result struct {
 // a conditional GET that upstream can answer with a bare 304 costs it
 // nothing, while an unconditional GET forces it to regenerate and resend a
 // body we already have.
-func (f *Fetcher) Fetch(ctx context.Context, url string, prevETag, prevModified string) (Result, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// Fetch's own network call gets a "sources.fetch" span (PLAN.md §15.0a /
+// TODOS A6-17): grounded feeds fetch upstream articles, and that fetch is
+// the one part of a grounded run with no visibility otherwise -- a slow or
+// failing upstream is invisible until a feed goes stale.
+//
+// Attributes are deliberately bounded: "host" (never the full URL, which is
+// unbounded by construction -- a query string or path segment can carry
+// anything an upstream publisher put there), the HTTP status code, and a
+// closed-set outcome via obs.Outcome. The full URL never reaches a span
+// attribute here, matching the cardinality discipline obs.CardinalityGuard
+// enforces for metric labels (see internal/obs/metrics_test.go's
+// TestCardinalityGuardRejectsUnboundedValue and
+// TestLooksUnboundedHeuristics' "url" case) even though span attributes
+// themselves are not run through that guard.
+//
+// Fetch never parses, so its span carries no item count -- item count is
+// FetchCandidates' to report (A6-17: "PARTIAL" note on that ticket). The
+// network work itself lives in fetchOnce so both Fetch and FetchCandidates
+// can wrap it in their own span, each annotated with what that caller
+// actually knows: Fetch closes its span the instant the HTTP round trip
+// (and body read) is done, with no item count, because it has not parsed
+// anything yet; FetchCandidates keeps its span open through Parse so the
+// same "sources.fetch" span carries the item count too, instead of ending
+// before parsing happens and leaving item count permanently unattached.
+func (f *Fetcher) Fetch(ctx context.Context, target string, prevETag, prevModified string) (Result, error) {
+	ctx, span := obs.Start(ctx, "sources.fetch", obs.KindRun)
+	defer span.End()
+
+	result, statusCode, outcome, err := f.fetchOnce(ctx, target, prevETag, prevModified)
+	annotateFetchSpan(span, target, statusCode, outcome, -1, err)
+	return result, err
+}
+
+// fetchOnce performs the conditional-GET network call target, with no span
+// of its own -- span ownership belongs to the caller (Fetch or
+// FetchCandidates), since only the caller knows what else (if anything)
+// happens in the same unit of work before the span should end.
+func (f *Fetcher) fetchOnce(ctx context.Context, target string, prevETag, prevModified string) (result Result, statusCode int, outcome obs.Outcome, err error) {
+	outcome = obs.OutcomeFailed
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return Result{}, fmt.Errorf("sources: building request for %q: %w", url, err)
+		return Result{}, 0, outcome, fmt.Errorf("sources: building request for %q: %w", target, err)
 	}
 	if prevETag != "" {
 		req.Header.Set("If-None-Match", prevETag)
@@ -55,11 +100,12 @@ func (f *Fetcher) Fetch(ctx context.Context, url string, prevETag, prevModified 
 
 	resp, err := f.Client.Do(req)
 	if err != nil {
-		return Result{}, fmt.Errorf("sources: fetching %q: %w", url, err)
+		return Result{}, 0, outcome, fmt.Errorf("sources: fetching %q: %w", target, err)
 	}
 	defer resp.Body.Close()
+	statusCode = resp.StatusCode
 
-	result := Result{
+	result = Result{
 		ETag:         resp.Header.Get("ETag"),
 		LastModified: resp.Header.Get("Last-Modified"),
 		StatusCode:   resp.StatusCode,
@@ -67,7 +113,8 @@ func (f *Fetcher) Fetch(ctx context.Context, url string, prevETag, prevModified 
 
 	if resp.StatusCode == http.StatusNotModified {
 		result.NotModified = true
-		return result, nil
+		outcome = obs.OutcomeSuccess
+		return result, statusCode, outcome, nil
 	}
 
 	max := f.MaxBytes
@@ -79,14 +126,51 @@ func (f *Fetcher) Fetch(ctx context.Context, url string, prevETag, prevModified 
 	limited := io.LimitReader(resp.Body, max+1)
 	body, err := io.ReadAll(limited)
 	if err != nil {
-		return Result{}, fmt.Errorf("sources: reading body of %q: %w", url, err)
+		return Result{}, statusCode, outcome, fmt.Errorf("sources: reading body of %q: %w", target, err)
 	}
 	if int64(len(body)) > max {
-		return Result{}, fmt.Errorf("%w: %q exceeded %d bytes", ErrBodyTooLarge, url, max)
+		err = fmt.Errorf("%w: %q exceeded %d bytes", ErrBodyTooLarge, target, max)
+		return Result{}, statusCode, outcome, err
 	}
 
 	result.Body = body
-	return result, nil
+	outcome = obs.OutcomeSuccess
+	return result, statusCode, outcome, nil
+}
+
+// annotateFetchSpan sets the bounded attributes every sources.fetch span
+// carries. items < 0 means "no count to report" (Fetch's case -- it never
+// parses); items >= 0 attaches the item count FetchCandidates alone knows,
+// which is the whole point of A6-17: a conditional GET that never actually
+// revalidates is invisible without knowing whether it produced items.
+func annotateFetchSpan(span oteltrace.Span, target string, statusCode int, outcome obs.Outcome, items int, err error) {
+	attrs := []attribute.KeyValue{
+		attribute.String("host", fetchHost(target)),
+		attribute.String(obs.FieldOutcome, string(outcome)),
+	}
+	if statusCode != 0 {
+		attrs = append(attrs, attribute.Int(obs.FieldStatus, statusCode))
+	}
+	if items >= 0 {
+		attrs = append(attrs, attribute.Int("items", items))
+	}
+	span.SetAttributes(attrs...)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+}
+
+// fetchHost extracts the bounded host component from target for the
+// sources.fetch span, never the full URL (this file's Fetch doc comment).
+// An unparsable target still gets a stable, bounded token rather than the
+// raw (potentially unbounded) input string leaking through.
+func fetchHost(target string) string {
+	u, err := url.Parse(target)
+	if err != nil || u.Host == "" {
+		return "unknown"
+	}
+	return u.Host
 }
 
 // FetchCandidates fetches url, parses it with Parse, and normalizes every
@@ -102,17 +186,38 @@ func (f *Fetcher) Fetch(ctx context.Context, url string, prevETag, prevModified 
 // once, here, at the single point every candidate URL is minted, makes that
 // asymmetry structurally impossible rather than a discipline to remember at
 // every call site.
+//
+// FetchCandidates keeps its own "sources.fetch" span open through Parse
+// (A6-17), unlike a bare Fetch call: item count is only known once parsing
+// has happened, and Fetch's span closes before that. Using fetchOnce here
+// instead of calling Fetch means exactly one "sources.fetch" span is
+// produced per call, carrying url/status/304-vs-200/item-count together --
+// not two spans with the count permanently missing from either.
 func (f *Fetcher) FetchCandidates(ctx context.Context, url, sourceName, prevETag, prevModified string) ([]Candidate, Result, error) {
-	res, err := f.Fetch(ctx, url, prevETag, prevModified)
+	ctx, span := obs.Start(ctx, "sources.fetch", obs.KindRun)
+	statusCode := 0
+	outcome := obs.OutcomeFailed
+	items := -1 // stays -1 (not reported) unless we reach a count below.
+	var spanErr error
+	defer func() {
+		annotateFetchSpan(span, url, statusCode, outcome, items, spanErr)
+		span.End()
+	}()
+
+	res, sc, oc, err := f.fetchOnce(ctx, url, prevETag, prevModified)
+	statusCode, outcome = sc, oc
 	if err != nil {
+		spanErr = err
 		return nil, res, err
 	}
 	if res.NotModified {
+		items = 0
 		return nil, res, nil
 	}
 
 	cands, err := Parse(res.Body, sourceName)
 	if err != nil {
+		spanErr = err
 		return nil, res, err
 	}
 
@@ -132,6 +237,7 @@ func (f *Fetcher) FetchCandidates(ctx context.Context, url, sourceName, prevETag
 		c.URL = n
 		normalized = append(normalized, c)
 	}
+	items = len(normalized)
 	return normalized, res, nil
 }
 
