@@ -15,6 +15,7 @@ import (
 	"github.com/monstercameron/AnimeFeedFlux/internal/bridge"
 	"github.com/monstercameron/GoGRPCBridge/pkg/grpctunnel"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -85,12 +86,6 @@ func (c *fakeClock) Advance(d time.Duration) {
 	for _, w := range fired {
 		w.ch <- w.fire
 	}
-}
-
-func (c *fakeClock) waiterCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.waiters)
 }
 
 // testValidator is a stub bridge.SessionValidator backed by an in-memory
@@ -181,24 +176,6 @@ func checkHealth(ctx context.Context, conn *grpc.ClientConn) error {
 		return errors.New("bridge_test: health check not serving")
 	}
 	return nil
-}
-
-// waitUntil polls cond every 10ms up to timeout. Used to synchronize on
-// goroutine state (the revalidation loop registering its next wait, or a
-// connection actually going down) without a library-level hook to await
-// directly — the tests still never sleep past what real work requires.
-func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		if cond() {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("condition not met within %s", timeout)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 // TestUpgradeWithoutCookieOrOrigin_Refused proves a bare, non-WebSocket HTTP
@@ -701,16 +678,56 @@ func TestRevalidate_ExpiryClosesSocket(t *testing.T) {
 		t.Fatalf("health check before expiry: %v", err)
 	}
 
-	// Wait for the revalidation loop to actually be parked on its next
-	// tick before advancing, so Advance is guaranteed to reach it.
-	waitUntil(t, 2*time.Second, func() bool { return clock.waiterCount() >= 1 })
-	clock.Advance(cfg.RevalidateInterval)
+	awaitForcedClose(t, conn, clock, cfg.RevalidateInterval)
+}
 
-	waitUntil(t, 3*time.Second, func() bool {
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		defer cancel()
-		return checkHealth(ctx, conn) != nil
-	})
+// awaitForcedClose proves the bridge actually severed the socket, and is the
+// assertion these two revalidation tests need instead of "a health check
+// starts failing".
+//
+// Health failure is not equivalent to a closed socket, because gRPC redials
+// transparently and the bridge accepts the redial ANONYMOUSLY by design — it
+// attaches a session to every request, authenticated or not, which is how a
+// browser whose session just expired reaches ANON and routes itself to
+// /login. The reconnected tunnel then answers the health service (registered
+// here without the auth interceptor), so the old assertion could see a
+// healthy connection moments after a perfectly correct force-close. Captured
+// from a failing run:
+//
+//	tunnel_disconnect  ...54730                    <- correct force-close
+//	WARN discarding an unvalidatable session cookie, continuing anonymously
+//	ws_upgrade_succeeded ...54732                  <- gRPC redialled
+//	server_test.go:709: condition not met within 3s
+//
+// A ClientConn leaving Ready is the direct signal: the transport broke. It
+// fires on the close even if the conn reconnects immediately afterwards, so a
+// legitimate anonymous reconnect can no longer mask the thing under test.
+//
+// The clock is advanced on a ticker rather than once, because waiting for
+// clock.waiterCount() >= 1 says SOME waiter exists, not that the revalidation
+// goroutine has parked on ITS one — losing that race means the single Advance
+// fires nothing and the loop then parks past a clock nothing moves again.
+func awaitForcedClose(t *testing.T, conn *grpc.ClientConn, clock *fakeClock, interval time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(20 * time.Millisecond):
+				clock.Advance(interval)
+			}
+		}
+	}()
+
+	if !conn.WaitForStateChange(ctx, connectivity.Ready) {
+		t.Fatal("the socket was never closed after the session stopped validating")
+	}
 }
 
 // TestRevalidate_RevocationClosesSocket mirrors the expiry test but flips
@@ -743,14 +760,7 @@ func TestRevalidate_RevocationClosesSocket(t *testing.T) {
 
 	validator.revoke("good-token")
 
-	waitUntil(t, 2*time.Second, func() bool { return clock.waiterCount() >= 1 })
-	clock.Advance(cfg.RevalidateInterval)
-
-	waitUntil(t, 3*time.Second, func() bool {
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		defer cancel()
-		return checkHealth(ctx, conn) != nil
-	})
+	awaitForcedClose(t, conn, clock, cfg.RevalidateInterval)
 }
 
 // TestMaxMessageBytes_OversizedRejected proves a message far larger than any
