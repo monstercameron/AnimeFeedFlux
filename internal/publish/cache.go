@@ -101,12 +101,37 @@ func (c *Cache) Put(key string, e Entry) {
 // write to any one feed can change what the index renders, so scoping this
 // to only that feed's own keys would leave a stale index page after an
 // admin edit.
+//
+// # The unprefixed permalink key
+//
+// handleItem caches one permalink under TWO keys: "slug:item:<key>", so this
+// function can find it, and a bare "item:<key>", because the read path has
+// only the item key before it has done the database lookup that would tell it
+// the slug. The bare key matches none of the conditions above — and it is the
+// one the read path checks FIRST — so dropping only the prefixed copy left the
+// stale one serving every subsequent request, permanently.
+//
+// That is not a cosmetic staleness. A soft-deleted item's permalink must
+// return 410 forever (PLAN.md §6, §12.4) — that IS the retraction mechanism,
+// since RSS has none — and a published correction must reach the URL someone
+// already shared. With the bare key surviving, deleting or correcting an item
+// changed the feed documents and left the permalink serving the original
+// content until the process restarted.
+//
+// The two keys are always written together (server.go's handleItem), so
+// deleting the pair together is exact: for every "slug:item:<key>" dropped
+// here, the matching "item:<key>" goes with it. Deleting from a map while
+// ranging over it is defined behaviour in Go.
 func (c *Cache) Invalidate(slug string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	prefix := slug + ":"
+	itemPrefix := prefix + "item:"
 	for k := range c.entries {
 		if k == slug || k == prefix || len(k) > len(prefix) && k[:len(prefix)] == prefix {
+			if len(k) > len(itemPrefix) && k[:len(itemPrefix)] == itemPrefix {
+				delete(c.entries, "item:"+k[len(itemPrefix):])
+			}
 			delete(c.entries, k)
 		}
 	}
