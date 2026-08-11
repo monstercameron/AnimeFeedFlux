@@ -922,9 +922,28 @@ func (s *FeedServer) SetEnabled(ctx context.Context, req *affv1.FeedServiceSetEn
 		return nil, feedVersionConflict(rec.ID, req.GetExpectedVersion(), rec.Version)
 	}
 
+	// Enabling clears consecutive_failures; disabling leaves it.
+	//
+	// The scheduler auto-disables a feed after maxConsecutiveFailures and
+	// persists both the count and the disable so they survive a restart
+	// (internal/schedule's FailureSink). The count outliving the disable
+	// would turn a re-enable into a single-shot: switch the feed back on, it
+	// fails once, and the stored count makes that the sixth failure, so it
+	// auto-disables again immediately instead of getting the five attempts
+	// the threshold promises. Enabling is the operator saying "try again",
+	// and the count that caused the disable must not be what decides the
+	// retry.
+	//
+	// A manual disable keeps the count: nothing is being retried, and the
+	// number is diagnostic history about why the feed was switched off.
+	setFailures := ""
+	if req.GetEnabled() {
+		setFailures = ", consecutive_failures = 0"
+	}
 	now := feedFormatTime(time.Now())
 	res, err := s.store.Writer().ExecContext(ctx,
-		`UPDATE feeds SET enabled = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?`,
+		`UPDATE feeds SET enabled = ?, updated_at = ?, version = version + 1`+setFailures+
+			` WHERE id = ? AND version = ?`,
 		feedBoolToInt(req.GetEnabled()), now, rec.ID, req.GetExpectedVersion())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "setting enabled for feed %d: %v", rec.ID, err)
