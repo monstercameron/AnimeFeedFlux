@@ -445,6 +445,45 @@ func sysValidateBaseURL(raw string) error {
 	return nil
 }
 
+// sysPublishingTTLMax bounds default_ttl_minutes. A TTL is advisory (§5.2)
+// and a week is already far past any value that means anything to an
+// aggregator; the point of the ceiling is to catch a typo, not to ration.
+const sysPublishingTTLMax = 7 * 24 * 60
+
+// sysValidatePublishing checks every field of the publishing section, not
+// just the base URL.
+//
+// It previously checked public_base_url alone, so default_ttl_minutes could
+// be saved NEGATIVE — a value that renders as <ttl>-5</ttl> and tells every
+// aggregator something meaningless — and default_og_image accepted any
+// string at all, including a javascript: URL that would be emitted straight
+// into og:image (A5-28).
+func sysValidatePublishing(p *affv1.Settings_Publishing) error {
+	if err := sysValidateBaseURL(p.GetPublicBaseUrl()); err != nil {
+		return err
+	}
+	if ttl := p.GetDefaultTtlMinutes(); ttl < 0 || ttl > sysPublishingTTLMax {
+		return fmt.Errorf("default_ttl_minutes must be between 0 and %d (got %d)",
+			sysPublishingTTLMax, ttl)
+	}
+	// Optional, but if present it must be a URL a browser will actually
+	// fetch: og:image is emitted into the page head, so a scheme other than
+	// http(s) is either broken or an injection vector.
+	if raw := strings.TrimSpace(p.GetDefaultOgImage()); raw != "" {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return fmt.Errorf("default_og_image: %w", err)
+		}
+		if !u.IsAbs() || u.Host == "" {
+			return errors.New("default_og_image must be an absolute URL")
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("default_og_image: scheme %q must be http or https", u.Scheme)
+		}
+	}
+	return nil
+}
+
 // GetSettings returns the persisted settings, with the provider API key's
 // PRESENCE only — never the key (§12.5, RULE-2).
 func (s *SystemServer) GetSettings(ctx context.Context, _ *affv1.SystemServiceGetSettingsRequest) (*affv1.SystemServiceGetSettingsResponse, error) {
@@ -476,9 +515,20 @@ func (s *SystemServer) UpdateSettings(ctx context.Context, req *affv1.SystemServ
 	// leave every other section, including ones in this same request,
 	// untouched rather than half-applied.
 	if in.GetPublishing() != nil {
-		if err := sysValidateBaseURL(in.GetPublishing().GetPublicBaseUrl()); err != nil {
+		if err := sysValidatePublishing(in.GetPublishing()); err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "rpc: %v", err)
 		}
+		// The trailing slash is stripped HERE, on the way in, so the stored
+		// value is canonical for every reader.
+		//
+		// Neither side stripped it, and now that public_base_url actually
+		// reaches the publish plane (A5-01), a saved "https://example.com/"
+		// would double-slash every guid, atom:link, subscribe URL and JSON
+		// Feed URL at once. Normalising on save rather than on each read
+		// means there is one canonical form in the database instead of every
+		// consumer having to remember to trim.
+		in.GetPublishing().PublicBaseUrl = strings.TrimRight(
+			strings.TrimSpace(in.GetPublishing().GetPublicBaseUrl()), "/")
 	}
 
 	tx, err := s.st.Writer().BeginTx(ctx, nil)

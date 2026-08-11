@@ -973,9 +973,17 @@ worse than a missing feature, because the screen says the setting is in effect.
       strings are all accepted, unlike the effort and profile validation in the same handler.
 - [x] `A5-27` **FIXED (negatives clamp to zero, and "0 means no limit" is now stated on the group).** No negative-value validation on any of the six `/settings/generation` numeric fields,
       client or server; and no help text on any of them.
-- [ ] `A5-28` Server-side publishing validation covers only `public_base_url`: TTL can be saved negative
-      and the og:image scheme is unchecked. Neither side strips a trailing slash from the base URL,
-      which would double-slash every feed URL once `A5-01` wires it up.
+- [x] `A5-28` **FIXED 2026-08-11.** Server-side publishing validation covered only `public_base_url`: TTL
+      could be saved negative and the og:image scheme was unchecked. Neither side stripped a trailing slash
+      from the base URL, which would double-slash every feed URL once `A5-01` wired it up — and `A5-01` has
+      now wired it up, so that one had become live rather than hypothetical.
+      `sysValidatePublishing` replaces the base-URL-only check: TTL bounded to [0, 7 days] (a ceiling to
+      catch a typo, not to ration — a TTL is advisory), and og:image must be an absolute http(s) URL, since
+      it is emitted into the page head and `javascript:` there is an injection vector rather than a broken
+      image. The trailing slash is stripped on save so the database holds one canonical form instead of
+      every consumer remembering to trim.
+      Validation still runs before the transaction opens, and a test proves a rejected publishing section
+      leaves a provider change in the same request unwritten rather than half-applied.
 - [x] `A5-29` **FIXED: the run-row Expand button never relabelled to Collapse**, and the typed-delete
       confirmation input had no accessible name at all.
 - [ ] `A5-30` **STILL OPEN.** The cost chart's per-day hover detail has no keyboard-focusable equivalent.
