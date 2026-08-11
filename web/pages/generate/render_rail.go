@@ -49,6 +49,18 @@ type railProps struct {
 	OnNew           func()
 	OnToggleEnabled func(*affv1.Feed)
 	OnRunNow        func(*affv1.Feed)
+	// OnDelete removes a feed. It exists because FeedService.Delete has been
+	// implemented, version-checked and tested on the server since the RPC
+	// layer was written, and no UI anywhere ever called it: a feed created by
+	// mistake, or one whose subject died, could be disabled but never removed.
+	// The server's delete is a soft one (deleted_at), but there is no Restore
+	// RPC for feeds, so from this screen it is irreversible — hence the typed
+	// confirmation at the call site.
+	OnDelete func(*affv1.Feed)
+	// KebabOpen/OnKebabOpen track which row's overflow menu is open, by slug.
+	// Held by the caller rather than per row so opening one closes another.
+	KebabOpen   string
+	OnKebabOpen func(slug string, open bool)
 }
 
 func renderRail(p railProps) ui.Node {
@@ -95,7 +107,8 @@ func renderRail(p railProps) ui.Node {
 			listArgs = append(listArgs, anyNodes(h.MapKeyedComponent(feeds, func(f *affv1.Feed) any { return f.GetId() }, func(f *affv1.Feed) ui.Node {
 				return renderRailRow(t, fmtr, f, indexOf[f.GetId()]+1, f.GetSlug() == p.Selected,
 					itemsForFeed(items, f.GetId()), feedSpend(runs, f.GetId()),
-					p.OnSelect, p.OnToggleEnabled, p.OnRunNow)
+					p.OnSelect, p.OnToggleEnabled, p.OnRunNow, p.OnDelete,
+					p.KebabOpen == f.GetSlug(), p.OnKebabOpen)
 			}))...)
 			return []ui.Node{h.Ul(listArgs...)}
 		},
@@ -122,7 +135,7 @@ func renderRail(p railProps) ui.Node {
 	)
 }
 
-func renderRailRow(t Translator, fmtr Formatters, f *affv1.Feed, rowNumber int, selected bool, feedItems []*affv1.Item, spend7d float64, onSelect func(string), onToggle func(*affv1.Feed), onRunNow func(*affv1.Feed)) ui.Node {
+func renderRailRow(t Translator, fmtr Formatters, f *affv1.Feed, rowNumber int, selected bool, feedItems []*affv1.Item, spend7d float64, onSelect func(string), onToggle func(*affv1.Feed), onRunNow func(*affv1.Feed), onDelete func(*affv1.Feed), kebabOpen bool, onKebabOpen func(string, bool)) ui.Node {
 	wt := wui.T(t.T)
 	now := time.Now()
 	var lastBuilt *time.Time
@@ -210,6 +223,19 @@ func renderRailRow(t Translator, fmtr Formatters, f *affv1.Feed, rowNumber int, 
 			wui.Button(wui.ButtonProps{
 				T: wt, ID: "generate-rail-runnow-" + slug, LabelKey: "generate.rail.runNow",
 				Variant: wui.ButtonSecondary, OnClick: func() { runNowFn(feed) },
+			}),
+			// Delete lives behind the ⋯, never as a button beside Run Now
+			// (§12.6 / D0-15): the two would sit adjacent in a dense list of
+			// rows that all look alike.
+			wui.Kebab(wui.KebabProps{
+				T: wt, ID: "generate-rail-kebab-" + slug,
+				LabelKey: "generate.rail.actionsFor", LabelArgs: []any{f.GetTitle()},
+				Open:         kebabOpen,
+				OnOpenChange: func(open bool) { onKebabOpen(slug, open) },
+				Items: []wui.KebabItem{{
+					ID: "generate-rail-delete-" + slug, LabelKey: "generate.rail.delete",
+					Danger: true, OnSelect: func() { onDelete(feed) },
+				}},
 			}),
 		),
 	)

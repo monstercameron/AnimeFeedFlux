@@ -31,6 +31,7 @@ import (
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/web/appstate"
 	"github.com/monstercameron/AnimeFeedFlux/web/shell"
+	wui "github.com/monstercameron/AnimeFeedFlux/web/ui"
 )
 
 // tapeWindowDays is the width of the tape's fixed time window (the
@@ -111,6 +112,20 @@ const (
 	newFeedTTLMinutes      = 15
 	newFeedTokenBudget     = 100_000
 	newFeedRunBudgetPerDay = 24
+
+	// A new feed needs a VALID schedule, not an empty one.
+	//
+	// internal/feedspec rejects an empty cron with `cron_invalid` and an
+	// empty timezone with `timezone_invalid`, so a draft that left both blank
+	// could never be saved — the same class of trap as the zero budgets, and
+	// the one that actually made "create a feed" impossible in practice.
+	// 09:00 daily is a real, deliberate default: once a day matches what this
+	// app is for, and a morning slot means a failed overnight run is visible
+	// when someone is awake to see it. UTC because the browser's zone is not
+	// available to this code and a wrong-but-confident local zone is worse
+	// than an obvious one the operator will change.
+	newFeedCron     = "0 9 * * *"
+	newFeedTimezone = "UTC"
 )
 
 // newFeedDraft builds the blank feed the "+ New" control starts from.
@@ -128,6 +143,8 @@ const (
 // were editable, persisted, and inert. This is what they are for.
 func newFeedDraft(g *affv1.Settings_Generation) *affv1.Feed {
 	spec := &affv1.FeedSpec{
+		Cron:             newFeedCron,
+		Timezone:         newFeedTimezone,
 		ItemsPerRun:      newFeedItemsPerRun,
 		FeedWindow:       newFeedWindowFallback,
 		DailyTokenBudget: newFeedTokenBudget,
@@ -218,6 +235,20 @@ func Render() ui.Node {
 		}
 		return nil
 	}, sess.Get())
+
+	// Feed deletion state: which feed the confirmation is open for, what has
+	// been typed into it, and whether the call is in flight.
+	// pump keeps renders flowing while a mutation is in flight — see
+	// web/ui/pump.go for the GWC defect it exists for.
+	pump := wui.UsePump()
+	pendingDelete := ui.UseState((*affv1.Feed)(nil))
+	deleteTyped := ui.UseState("")
+	deleting := ui.UseState(false)
+	// railKebab is the slug whose row menu is open, "" for none — held here
+	// rather than per row so opening one closes the last.
+	railKebab := ui.UseState("")
+	// stripMenu is whether the strip's per-feed ⋯ menu is open.
+	stripMenu := ui.UseState(false)
 
 	// Effort is a per-preview knob on the strip; it is not a recipe field
 	// today, so it lives here rather than on the draft feed.
@@ -403,7 +434,8 @@ func Render() ui.Node {
 				return
 			}
 			railErr.Set(nil)
-			go func() {
+			pump.Run(func(done func()) {
+				defer done()
 				_, err := deps.Feed.SetEnabled(context.Background(), &affv1.FeedServiceSetEnabledRequest{
 					FeedId: f.GetId(), Enabled: !f.GetEnabled(), ExpectedVersion: f.GetVersion(),
 				})
@@ -412,21 +444,46 @@ func Render() ui.Node {
 					return
 				}
 				feedsRes.Reload()
-			}()
+			})
 		},
 		OnRunNow: func(f *affv1.Feed) {
 			if f == nil {
 				return
 			}
 			railErr.Set(nil)
-			go func() {
+			pump.Run(func(done func()) {
+				defer done()
 				_, err := deps.Feed.RunNow(context.Background(), &affv1.FeedServiceRunNowRequest{FeedId: f.GetId()})
 				if err != nil {
 					railErr.Set(err)
 					return
 				}
 				feedsRes.Reload()
-			}()
+			})
+		},
+		KebabOpen: railKebab.Get(),
+		OnKebabOpen: func(slug string, open bool) {
+			if open {
+				railKebab.Set(slug)
+				return
+			}
+			if railKebab.Get() == slug {
+				railKebab.Set("")
+			}
+		},
+		// Opening the confirmation is all this does. The delete itself is
+		// behind a typed confirmation because the server's delete is soft but
+		// there is no Restore RPC for feeds, so from here it is a one-way
+		// door — and a deleted feed's URL stops resolving for everyone
+		// already subscribed to it.
+		OnDelete: func(f *affv1.Feed) {
+			if f == nil {
+				return
+			}
+			railKebab.Set("")
+			railErr.Set(nil)
+			deleteTyped.Set("")
+			pendingDelete.Set(f)
 		},
 	}
 
@@ -456,7 +513,8 @@ func Render() ui.Node {
 				return
 			}
 			validateErr.Set(nil)
-			go func() {
+			pump.Run(func(done func()) {
+				defer done()
 				resp, err := deps.Feed.ValidateSpec(context.Background(), &affv1.FeedServiceValidateSpecRequest{
 					Kind: d.GetKind(), Slug: d.GetSlug(), Spec: d.GetSpec(),
 				})
@@ -469,7 +527,7 @@ func Render() ui.Node {
 					return
 				}
 				fieldErrs.Set(MapFieldErrors(resp.GetErrors()))
-			}()
+			})
 		},
 		OnSave: func() {
 			d := draft.Get()
@@ -478,7 +536,8 @@ func Render() ui.Node {
 			}
 			saving.Set(true)
 			saveErr.Set(nil)
-			go func() {
+			pump.Run(func(done func()) {
+				defer done()
 				defer saving.Set(false)
 				var err error
 				var saved *affv1.Feed
@@ -512,7 +571,7 @@ func Render() ui.Node {
 				loadedSnapshot.Set(cloneFeed(saved))
 				creatingNew.Set(false)
 				feedsRes.Reload()
-			}()
+			})
 		},
 		OnResolveConflict: func(resolution ConflictResolution, keepMine map[string]bool) {
 			theirs := conflictTheirs.Get()
@@ -577,7 +636,8 @@ func Render() ui.Node {
 			slug := d.GetSlug()
 			ctxStream, cancel := context.WithCancel(context.Background())
 			activeCancel.Set(cancel)
-			go func() {
+			pump.Run(func(done func()) {
+				defer done()
 				defer sampling.Set(false)
 				// The UNSAVED editor state rides along, so a preview shows
 				// what the operator is currently typing rather than what is
@@ -641,7 +701,7 @@ func Render() ui.Node {
 						SelectedView:      selectedView.Get(),
 					})
 				}
-			}()
+			})
 		},
 		OnCancel: func() {
 			cancelGen.Set(cancelGen.Get() + 1)
@@ -660,7 +720,8 @@ func Render() ui.Node {
 			}
 			id := sampleID.Get()
 			actionErr.Set(nil)
-			go func() {
+			pump.Run(func(done func()) {
+				defer done()
 				_, err := deps.Item.PromoteSample(context.Background(), &affv1.ItemServicePromoteSampleRequest{
 					SampleId: id, CandidateId: candidateID,
 				})
@@ -679,7 +740,7 @@ func Render() ui.Node {
 				sampleID.Set("")
 				selectedCandidate.Set(0)
 				clearPersistedSampleState()
-			}()
+			})
 		},
 		OnDiscard: func() {
 			if sampleID.Get() == "" {
@@ -701,7 +762,8 @@ func Render() ui.Node {
 			candidates.Set(nil)
 			sampleID.Set("")
 			clearPersistedSampleState() // D2-29: discarded samples don't come back on refresh
-			go func() {
+			pump.Run(func(done func()) {
+				defer done()
 				_, err := deps.Sample.DiscardSample(context.Background(), &affv1.SampleServiceDiscardSampleRequest{SampleId: id})
 				outcome := ClassifyMutationError(err, shell.ErrDisconnected)
 				if ShouldRollbackOptimisticState(outcome) {
@@ -722,7 +784,7 @@ func Render() ui.Node {
 						SelectedView:      selectedView.Get(),
 					})
 				}
-			}()
+			})
 		},
 	}
 
@@ -748,10 +810,22 @@ func Render() ui.Node {
 		OnSize:   func(n int32) { sampleSize.Set(n) },
 		Temp:     tempOverride.Get(),
 		OnTemp:   func(f float64) { tempOverride.Set(f) },
-		Estimate: previewEstimate(samplerProps),
-		Disabled: !samplerProps.Connected || draft.Get().GetId() == 0 || samplerProps.DisabledReason != "",
-		Reason:   samplerProps.DisabledReason,
-		Sampling: sampling.Get(),
+		// Feed CRUD, on the strip where it can be seen.
+		Dirty:        DraftDirty(loadedSnapshot.Get(), draft.Get()),
+		Saving:       saving.Get(),
+		OnSave:       editorProps.OnSave,
+		OnDeleteFeed: func() { railProps.OnDelete(editorProps.Loaded) },
+		OnRunNow:     func() { railProps.OnRunNow(editorProps.Loaded) },
+		FeedEnabled:  editorProps.Loaded.GetEnabled(),
+		OnToggleEnabled: func() {
+			railProps.OnToggleEnabled(editorProps.Loaded)
+		},
+		MenuOpen:   stripMenu.Get(),
+		OnMenuOpen: stripMenu.Set,
+		Estimate:   previewEstimate(samplerProps),
+		Disabled:   !samplerProps.Connected || draft.Get().GetId() == 0 || samplerProps.DisabledReason != "",
+		Reason:     samplerProps.DisabledReason,
+		Sampling:   sampling.Get(),
 		OnPreview: func() {
 			if samplerProps.OnSample != nil {
 				samplerProps.OnSample()
@@ -783,6 +857,66 @@ func Render() ui.Node {
 		}),
 	)
 
+	// The typed-confirmation modal for feed deletion. Built unconditionally
+	// (web/ui.Confirm renders nothing when Open is false) so its hooks keep a
+	// fixed slot in this fiber.
+	deleteConfirm := wui.Confirm(wui.ConfirmProps{
+		T: wui.T(deps.I18n.T), ID: "generate-feed-delete-confirm",
+		TitleKey:   "generate.rail.delete.title",
+		MessageKey: "generate.rail.delete.message",
+		MessageArgs: []any{
+			pendingDelete.Get().GetTitle(),
+			pendingDelete.Get().GetSlug(),
+		},
+		// The slug, not the word DELETE. Typing a feed's own slug proves the
+		// operator knows WHICH feed this is — the failure mode with a fixed
+		// word is deleting the right-looking wrong row.
+		RequiredPhrase: pendingDelete.Get().GetSlug(),
+		Typed:          deleteTyped.Get(),
+		OnTypedChange:  deleteTyped.Set,
+		Open:           pendingDelete.Get() != nil,
+		Busy:           deleting.Get(),
+		OnCancel: func() {
+			pendingDelete.Set(nil)
+			deleteTyped.Set("")
+		},
+		OnConfirm: func() {
+			f := pendingDelete.Get()
+			if f == nil || deleting.Get() {
+				return
+			}
+			deleting.Set(true)
+			railErr.Set(nil)
+			pump.Run(func(done func()) {
+				defer done()
+				_, err := deps.Feed.Delete(context.Background(), &affv1.FeedServiceDeleteRequest{
+					FeedId: f.GetId(),
+					// Version-checked: the server refuses a delete aimed at a
+					// version this page has not seen, so a feed edited in
+					// another tab is never removed on the strength of a stale
+					// view of it.
+					ExpectedVersion: f.GetVersion(),
+				})
+				deleting.Set(false)
+				if err != nil {
+					railErr.Set(err)
+					return
+				}
+				pendingDelete.Set(nil)
+				deleteTyped.Set("")
+				// Leave the editor if it was showing the feed that just went.
+				if selectedSlug.Get() == f.GetSlug() {
+					selectedSlug.Set("")
+					draft.Set(nil)
+					loadedSnapshot.Set(nil)
+					candidates.Set(nil)
+					sampleID.Set("")
+				}
+				feedsRes.Reload()
+			})
+		},
+	})
+
 	return renderWorkbench(workbenchProps{
 		Strip: strip,
 		Stakes: renderStakes(stakesProps{
@@ -791,8 +925,27 @@ func Render() ui.Node {
 		}),
 		Prompts: prompts,
 		Preview: ui.CreateElement(renderSampler, samplerProps),
+		// The feed list is its own disclosure, not a stowaway inside "Recipe
+		// settings". It is the CRUD surface — every feed with its status,
+		// stale flag, last build, 7-day spend, the enable toggle, Run Now and
+		// (now) delete — and burying it under a heading about slugs and cron
+		// expressions is why this app looked like it had no feed management
+		// at all. Open by default when no feed is selected, because then
+		// choosing one is the only thing to do.
+		Feeds: ui.CreateElement(renderRail, railProps),
+		// Open by default, always. Collapsing it once a feed was selected is
+		// what made the app look like it had no feed management: the list,
+		// the enable toggles and Run Now all vanished the moment you started
+		// working. The operator can still collapse it; it just does not
+		// collapse itself.
+		FeedsOpen: true,
+		FeedCount: len(feedsRes.Get().Value),
+		// A brand-new draft has nothing to preview and several required
+		// fields in the recipe form, so that is where the operator needs to
+		// be looking.
+		RecipeOpen:  creatingNew.Get(),
+		FeedConfirm: deleteConfirm,
 		Recipe: h.Fragment(
-			ui.CreateElement(renderRail, railProps),
 			ui.CreateElement(renderEditor, editorProps),
 			ui.CreateElement(renderURLPanel, urlPanelProps{
 				BaseURL: settingsRes.Get().Value.GetSettings().GetPublishing().GetPublicBaseUrl(),

@@ -10,6 +10,7 @@ import (
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	wui "github.com/monstercameron/AnimeFeedFlux/web/ui"
 )
 
 // render_workbench.go is /generate's layout, rebuilt.
@@ -70,6 +71,20 @@ type workbenchProps struct {
 	Prompts ui.Node
 	Preview ui.Node
 	Recipe  ui.Node
+
+	// Feeds is the feed list — the management surface for every feed, with
+	// its own disclosure rather than nested inside Recipe's.
+	Feeds     ui.Node
+	FeedsOpen bool
+	// RecipeOpen forces the recipe drawer open. Creating a feed REQUIRES
+	// fields that live in it (slug, title, schedule), so leaving it shut on a
+	// new draft asks the operator to guess where the form is.
+	RecipeOpen bool
+	FeedCount  int
+	// FeedConfirm is the delete confirmation modal. Rendered at the top level
+	// so it is not inside a collapsed <details>, which would hide the dialog
+	// that the collapsed thing just opened.
+	FeedConfirm ui.Node
 }
 
 // stakesProps is the one-line readout of what the selected feed actually is.
@@ -114,23 +129,62 @@ func renderStakes(p stakesProps) ui.Node {
 // every region is built by the caller from Render's existing state, so this
 // function is pure layout and can be reasoned about as such.
 func renderWorkbench(p workbenchProps) ui.Node {
-	t := deps.I18n
 	return h.Div(
 		h.ClassStr("af-gen"),
 		h.Div(h.ClassStr("af-gen__strip"), p.Strip),
 		p.Stakes,
+		p.FeedConfirm,
+		renderFeedsDisclosure(p),
 		h.Div(h.ClassStr("af-gen__work"),
 			h.Section(h.ClassStr("af-gen__prompts"), p.Prompts),
 			h.Section(h.ClassStr("af-gen__preview"), p.Preview),
 		),
-		// The recipe is collapsed by default and that is the point: these are
-		// set-once fields, and having them open is what made the page a form
-		// with a preview bolted on instead of a workbench.
-		h.Tag("details", h.ClassStr("af-gen__recipe"),
-			h.Tag("summary", nil, h.Text(t.T("generate.workbench.recipeSettings"))),
-			p.Recipe,
-		),
+		// The recipe stays collapsed for an EXISTING feed — those are
+		// set-once fields, and having them open is what made this page a form
+		// with a preview bolted on. A new draft is the exception; see
+		// RecipeOpen.
+		renderRecipeDisclosure(p),
 	)
+}
+
+// renderFeedsDisclosure wraps the feed list in a <details>.
+//
+// The args are SPREAD into h.Tag, not passed as one slice. h.Tag is variadic
+// (`Tag(name string, args ...any)`), so handing it a []any makes the slice
+// itself an argument — it is neither a prop nor a node, and GWC stringifies
+// it, which put a literal "0x58930000" on the page above the feed list. A
+// pointer rendered as body text is the visible end of that mistake; the
+// invisible end is that the element got none of its props.
+//
+// `open` is a boolean HTML attribute: its presence is what opens the element
+// and its value is ignored, so `open="false"` would still be open. It has to
+// be omitted entirely when closed.
+func renderFeedsDisclosure(p workbenchProps) ui.Node {
+	t := deps.I18n
+	args := []any{h.ClassStr("af-gen__feeds")}
+	if p.FeedsOpen {
+		args = append(args, h.Attr("open", "open"))
+	}
+	args = append(args,
+		h.Tag("summary", nil, h.Text(t.T("generate.workbench.feedsSummary", strconv.Itoa(p.FeedCount)))),
+		p.Feeds,
+	)
+	return h.Tag("details", args...)
+}
+
+// renderRecipeDisclosure wraps the recipe form, opened when the draft needs
+// it. Args are spread, not passed as a slice — see renderFeedsDisclosure.
+func renderRecipeDisclosure(p workbenchProps) ui.Node {
+	t := deps.I18n
+	args := []any{h.ClassStr("af-gen__recipe")}
+	if p.RecipeOpen {
+		args = append(args, h.Attr("open", "open"))
+	}
+	args = append(args,
+		h.Tag("summary", nil, h.Text(t.T("generate.workbench.recipeSettings"))),
+		p.Recipe,
+	)
+	return h.Tag("details", args...)
 }
 
 // promptFieldProps is one prompt editor.
@@ -245,6 +299,28 @@ type stripProps struct {
 	OnNew       func()
 	Model       string
 	OnModel     func(string)
+
+	// --- The feed's own CRUD, on the strip ---------------------------------
+	//
+	// These are here because they were nowhere on screen. Save lived at the
+	// bottom of a collapsed "Recipe settings" disclosure, Delete inside a ⋯
+	// inside a row inside a collapsed "Feeds" disclosure, and New was a text
+	// link the width of the word. The report was "where is the option to CRUD
+	// a feed?" and the honest answer was: nowhere you could see.
+	//
+	// Dirty drives Save's enabled state, so the button doubles as the
+	// unsaved-changes indicator; Selected gates the menu, since there is
+	// nothing to run, disable or delete when no feed is loaded.
+	Dirty           bool
+	Saving          bool
+	OnSave          func()
+	OnDeleteFeed    func()
+	OnRunNow        func()
+	FeedEnabled     bool
+	OnToggleEnabled func()
+	MenuOpen        bool
+	OnMenuOpen      func(bool)
+
 	// Models is the provider's own list (SystemService.ListModels). When it
 	// is empty or ModelsUnavailable is set, the model control degrades to the
 	// text input it used to be — a workbench that cannot pick a model while
@@ -271,6 +347,59 @@ func tempFieldValue(v float64) string {
 		return ""
 	}
 	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// saveLabel says what the button will do, and what state the draft is in.
+func saveLabel(t Translator, dirty, saving bool) string {
+	switch {
+	case saving:
+		return t.T("generate.workbench.saving")
+	case dirty:
+		return t.T("generate.workbench.saveChanges")
+	default:
+		return t.T("generate.workbench.saved")
+	}
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// feedMenuProps configures the strip's per-feed action menu.
+type feedMenuProps struct {
+	Selected        string
+	FeedEnabled     bool
+	Open            bool
+	OnOpen          func(bool)
+	OnRunNow        func()
+	OnToggleEnabled func()
+	OnDelete        func()
+}
+
+// renderFeedMenu is the ⋯ beside the feed picker: Run now, enable/disable,
+// and Delete. Its own component so the kebab's hooks live in their own fiber
+// rather than shifting the strip's slots when the menu appears and
+// disappears with the selection.
+func renderFeedMenu(p feedMenuProps) ui.Node {
+	t := deps.I18n
+	enableKey := "generate.workbench.menu.disable"
+	if !p.FeedEnabled {
+		enableKey = "generate.workbench.menu.enable"
+	}
+	return wui.Kebab(wui.KebabProps{
+		T: wui.T(t.T), ID: "gen-strip-feed-menu",
+		LabelKey: "generate.workbench.menu.label", LabelArgs: []any{p.Selected},
+		Open:         p.Open,
+		OnOpenChange: p.OnOpen,
+		Items: []wui.KebabItem{
+			{ID: "gen-strip-run-now", LabelKey: "generate.workbench.menu.runNow", OnSelect: p.OnRunNow},
+			{ID: "gen-strip-toggle", LabelKey: enableKey, OnSelect: p.OnToggleEnabled},
+			{ID: "gen-strip-delete", LabelKey: "generate.workbench.menu.delete", Danger: true, OnSelect: p.OnDelete},
+		},
+	})
 }
 
 // renderStripModel is the model control: a menu of the models this
@@ -420,9 +549,33 @@ func renderStrip(p stripProps) ui.Node {
 			h.Button(h.Type("button"), h.ClassStr("af-gen__new"),
 				h.OnClick(ui.UseEvent(func() { p.OnNew() })),
 				h.Text(t.T("generate.workbench.newFeed"))),
+			// Save sits beside the feed it saves, not at the far end of a
+			// collapsed form. Disabled when there is nothing to save, so it
+			// doubles as the unsaved-changes indicator.
+			h.Button(h.Type("button"),
+				h.ClassStr("af-gen__save"),
+				h.Disabled(!p.Dirty || p.Saving),
+				h.Aria("busy", boolStr(p.Saving)),
+				h.OnClick(ui.UseEvent(func() {
+					if p.OnSave != nil {
+						p.OnSave()
+					}
+				})),
+				h.Text(saveLabel(t, p.Dirty, p.Saving))),
+			// Everything else you can do TO a feed, in one menu: run it now,
+			// disable it, delete it.
+			h.Show(p.Selected != "", ui.CreateElement(renderFeedMenu, feedMenuProps{
+				Selected:        p.Selected,
+				FeedEnabled:     p.FeedEnabled,
+				Open:            p.MenuOpen,
+				OnOpen:          p.OnMenuOpen,
+				OnRunNow:        p.OnRunNow,
+				OnToggleEnabled: p.OnToggleEnabled,
+				OnDelete:        p.OnDeleteFeed,
+			})),
 			// Built every render, shown only on failure: a control that
 			// appears and disappears would shift this fiber's hook slots.
-			h.Show(p.FeedsErr != nil, h.Button(h.Type("button"), h.ClassStr("af-gen__new"),
+			h.Show(p.FeedsErr != nil, h.Button(h.Type("button"), h.ClassStr("af-gen__retry"),
 				h.OnClick(ui.UseEvent(func() {
 					if p.OnRetryFeed != nil {
 						p.OnRetryFeed()

@@ -716,7 +716,9 @@ func emitWorkbenchStyles() {
 	// The temperature override holds one number; sized to it so it does not
 	// read as an equal partner to the model menu beside it.
 	css.Global(".af-gen__temp", css.W(css.Length("5rem")), monoFont())
-	css.Global(".af-gen__new",
+	// Retry keeps the quiet text-action treatment: it is a recovery control
+	// that only exists when the feed list failed, not one of the verbs.
+	css.Global(".af-gen__retry",
 		css.Raw("min-height", "24px"),
 		css.PaddingX(tokens.Space(1)),
 		css.Raw("border", "0"),
@@ -725,6 +727,31 @@ func emitWorkbenchStyles() {
 		css.FontSize(tokens.FontSize(tokens.TextSm)),
 		css.Cursor.Pointer,
 	)
+	// New feed and Save read as buttons, not as text links: they are two of
+	// the four CRUD verbs and they were losing to a select box beside them.
+	css.Global(".af-gen__new, .af-gen__save",
+		css.Raw("min-height", "28px"),
+		css.PaddingY(tokens.Space(1)),
+		css.PaddingX(tokens.Space(3)),
+		css.Rounded(tokens.Radius(tokens.RadiusSm)),
+		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
+		css.Bg(tokens.Color(tokens.RoleBg)),
+		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+		css.Cursor.Pointer,
+	)
+	// Save with unsaved work is the one control on the strip that wants the
+	// eye; Save with nothing to save fades back to a status word.
+	css.Global(".af-gen__save:not(:disabled)",
+		css.TextColor(tokens.Color(tokens.RoleAccent)),
+		css.Border(css.Px(1), tokens.Color(tokens.RoleAccent)),
+		css.FontWeight.Medium,
+	)
+	css.Global(".af-gen__save:disabled",
+		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
+		css.Raw("cursor", "default"),
+	)
+
 	// The one primary action on the page, and the only filled control.
 	css.Global(".af-gen__preview-btn",
 		css.PaddingY(tokens.Space(2)),
