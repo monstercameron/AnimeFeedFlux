@@ -517,9 +517,32 @@ func NewItemServer(st *store.Store, inv publish.Invalidator, idSource ids.Source
 // invalidate calls the injected Invalidator for slug. A nil Invalidator is
 // tolerated (useful for tests exercising everything except cache behavior)
 // rather than panicking a caller that has not wired one up yet.
-func (s *ItemServer) invalidate(slug string) {
-	if s.inv != nil && slug != "" {
-		s.inv.InvalidateFeed(slug)
+func (s *ItemServer) invalidate(ctx context.Context, slug string) {
+	if s.inv == nil || slug == "" {
+		return
+	}
+	s.inv.InvalidateFeed(slug)
+
+	// ...and every aggregate that lists this feed as a member.
+	//
+	// An aggregate's documents are cached under the AGGREGATE's slug, so the
+	// call above reaches none of them — publish.Invalidator's own doc comment
+	// makes the fan-out the caller's responsibility. FeedServer already did
+	// this for recipe edits; item writes did not, so publishing, editing,
+	// deleting or correcting an item left every aggregate containing the feed
+	// serving whatever it had cached, indefinitely (there is no TTL on a
+	// cache entry).
+	//
+	// Best-effort, and deliberately not escalated to an RPC error: the write
+	// has already committed, and a missed invalidation self-heals on the next
+	// write or restart — the identical argument feedInvalidate makes for its
+	// own copy of this fan-out.
+	slugs, err := s.st.AggregateSlugsFor(ctx, slug)
+	if err != nil {
+		return
+	}
+	for _, agg := range slugs {
+		s.inv.InvalidateFeed(agg)
 	}
 }
 
@@ -735,7 +758,7 @@ func (s *ItemServer) Create(ctx context.Context, req *affv1.ItemServiceCreateReq
 		return nil, status.Errorf(codes.Internal, "rpc: creating item: %v", err)
 	}
 
-	s.invalidate(slug)
+	s.invalidate(ctx, slug)
 
 	out, err := itemLoadByID(ctx, db, id)
 	if err != nil {
@@ -943,7 +966,7 @@ func (s *ItemServer) Update(ctx context.Context, req *affv1.ItemServiceUpdateReq
 	}
 
 	if slug, serr := itemFeedSlug(ctx, db, old.FeedID); serr == nil {
-		s.invalidate(slug)
+		s.invalidate(ctx, slug)
 	}
 
 	return &affv1.ItemServiceUpdateResponse{Item: itemToProto(out)}, nil
@@ -979,7 +1002,7 @@ func (s *ItemServer) Delete(ctx context.Context, req *affv1.ItemServiceDeleteReq
 	}
 
 	if slug, serr := itemFeedSlug(ctx, db, old.FeedID); serr == nil {
-		s.invalidate(slug)
+		s.invalidate(ctx, slug)
 	}
 	return &affv1.ItemServiceDeleteResponse{}, nil
 }
@@ -1014,7 +1037,7 @@ func (s *ItemServer) Restore(ctx context.Context, req *affv1.ItemServiceRestoreR
 	}
 
 	if slug, serr := itemFeedSlug(ctx, db, old.FeedID); serr == nil {
-		s.invalidate(slug)
+		s.invalidate(ctx, slug)
 	}
 
 	out, err := itemLoadByID(ctx, db, id)
@@ -1125,7 +1148,7 @@ func (s *ItemServer) PromoteSample(ctx context.Context, req *affv1.ItemServicePr
 		return nil, status.Errorf(codes.Internal, "rpc: promoting sample %d: %v", sampleID, err)
 	}
 
-	s.invalidate(slug)
+	s.invalidate(ctx, slug)
 
 	out, err := itemLoadByID(ctx, db, itemID)
 	if err != nil {
@@ -1269,7 +1292,7 @@ func (s *ItemServer) PublishCorrection(ctx context.Context, req *affv1.ItemServi
 		return nil, status.Errorf(codes.Internal, "rpc: publishing correction for item %d: %v", correctsID, err)
 	}
 
-	s.invalidate(slug)
+	s.invalidate(ctx, slug)
 
 	out, err := itemLoadByID(ctx, db, itemID)
 	if err != nil {
@@ -1588,7 +1611,7 @@ func (s *ItemServer) RevertRevision(ctx context.Context, req *affv1.ItemServiceR
 	// every other mutation in this file, so a rolled-back revert never
 	// invalidates a cache for a write that did not happen.
 	if slug, serr := itemFeedSlug(ctx, db, old.FeedID); serr == nil {
-		s.invalidate(slug)
+		s.invalidate(ctx, slug)
 	}
 
 	return &affv1.ItemServiceRevertRevisionResponse{Item: itemToProto(out)}, nil

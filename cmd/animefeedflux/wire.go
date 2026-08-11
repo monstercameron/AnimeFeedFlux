@@ -768,7 +768,7 @@ func (e *genExecutor) Execute(ctx context.Context, feedID int64, trigger string)
 		// invalidates its render cache, AFTER commit, never before (a
 		// canceled/rolled-back run must not drop good cached content for a
 		// change that never happened).
-		e.inv.InvalidateFeed(row.Slug)
+		invalidateFeedAndAggregates(ctx, e.st, e.inv, row.Slug)
 	}
 	return err
 }
@@ -832,7 +832,7 @@ func (e *wireRunExecutor) ExecuteRun(feedID, runID int64) {
 		}
 		result, err := generate.Run(ctx, deps, row.Feed, generateSpecFrom(fs, "manual", e.prices))
 		if err == nil && result.Run.Status == generate.StatusCompleted && e.inv != nil {
-			e.inv.InvalidateFeed(row.Slug)
+			invalidateFeedAndAggregates(ctx, e.st, e.inv, row.Slug)
 		}
 		if err != nil {
 			e.log.Warn("run.finished", "feed_slug", row.Slug, "run_id", runID,
@@ -1774,4 +1774,33 @@ func adminProtocols() *http.Protocols {
 	p.SetHTTP1(true)
 	p.SetUnencryptedHTTP2(true)
 	return &p
+}
+
+// invalidateFeedAndAggregates drops the feed's own cached documents and those
+// of every aggregate that lists it as a member (PLAN.md §14.2).
+//
+// A generation run is the frequent way a feed's published shape changes, and
+// it went through InvalidateFeed(slug) alone — which reaches nothing cached
+// under an aggregate's slug. Since cache entries have no TTL, an aggregate
+// that had been fetched once kept serving that snapshot while its members
+// published new items every day.
+//
+// Best-effort on the fan-out, matching internal/rpc's two call sites: the run
+// has already committed, and a missed invalidation self-heals on the next
+// write or restart.
+func invalidateFeedAndAggregates(ctx context.Context, st *store.Store, inv publish.Invalidator, slug string) {
+	if inv == nil || slug == "" {
+		return
+	}
+	inv.InvalidateFeed(slug)
+	if st == nil {
+		return
+	}
+	slugs, err := st.AggregateSlugsFor(ctx, slug)
+	if err != nil {
+		return
+	}
+	for _, agg := range slugs {
+		inv.InvalidateFeed(agg)
+	}
 }

@@ -368,3 +368,50 @@ func (s *Store) RestoreItem(ctx context.Context, itemKey string) error {
 	}
 	return nil
 }
+
+// AggregateSlugsFor returns the slug of every aggregate feed that lists the
+// feed named by memberSlug as a member (PLAN.md §14.2).
+//
+// It exists because an aggregate's rendered documents are cached under the
+// AGGREGATE's slug, so invalidating a member reaches none of them: every
+// caller that changes a member's published shape has to invalidate the
+// aggregates too, and publish.Invalidator's doc comment says so explicitly —
+// "any aggregate containing this feed must also be invalidated; that is the
+// caller's responsibility". Before this helper existed only one of the three
+// such callers (internal/rpc's FeedServer, on recipe edits) actually did it,
+// with its own copy of this query keyed by feed id; item writes and completed
+// generation runs — the frequent cases, and the ones that add items — did
+// not. An aggregate that had been fetched once therefore served that snapshot
+// until a recipe edit or a restart.
+//
+// Keyed by slug rather than id because that is what the cache and the
+// Invalidator interface speak, and what every one of those call sites already
+// has in hand at the moment it needs to fan out.
+//
+// A feed with no aggregates returns nil, not an error: that is the common
+// case, not a failure.
+func (s *Store) AggregateSlugsFor(ctx context.Context, memberSlug string) ([]string, error) {
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT a.slug
+		  FROM feed_members fm
+		  JOIN feeds a ON a.id = fm.aggregate_feed_id
+		  JOIN feeds m ON m.id = fm.member_feed_id
+		 WHERE m.slug = ? AND a.deleted_at IS NULL`, memberSlug)
+	if err != nil {
+		return nil, fmt.Errorf("store: listing aggregates for %q: %w", memberSlug, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var slug string
+		if err := rows.Scan(&slug); err != nil {
+			return nil, fmt.Errorf("store: scanning aggregate slug: %w", err)
+		}
+		out = append(out, slug)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterating aggregates for %q: %w", memberSlug, err)
+	}
+	return out, nil
+}

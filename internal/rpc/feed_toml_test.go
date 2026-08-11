@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	"github.com/monstercameron/AnimeFeedFlux/internal/ids"
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
 )
 
@@ -184,5 +185,73 @@ func TestExportAndImportRejectBadInput(t *testing.T) {
 	// too — import is not a way around the checks Create applies.
 	if _, err := s.ImportTOML(t.Context(), &affv1.FeedServiceImportTOMLRequest{Toml: `{"slug":"","title":""}`}); err == nil {
 		t.Error("importing an invalid recipe as a new feed succeeded")
+	}
+}
+
+// itemAggregateInvalidator records every slug it is asked to drop, so a test
+// can assert the fan-out reached the aggregate and not just the member.
+type recordingInvalidator struct{ slugs []string }
+
+func (r *recordingInvalidator) InvalidateFeed(slug string) { r.slugs = append(r.slugs, slug) }
+func (r *recordingInvalidator) InvalidateAll()             {}
+
+func TestItemWritesInvalidateTheAggregatesContainingTheFeed(t *testing.T) {
+	// An aggregate's documents are cached under the AGGREGATE's slug, and
+	// cache entries have no TTL — so before the fan-out existed, an aggregate
+	// fetched once kept serving that snapshot while its members published new
+	// items every day. Recipe edits fanned out; item writes, the frequent
+	// case, did not.
+	st := feedOpenTestStore(t)
+	feeds := NewFeedServer(st, nil, nil)
+	member := mustCreateFeed(t, feeds, feedTestFeed("trivia-daily"))
+	mustCreateFeed(t, feeds, feedTestAggregate("everything", "Everything", []string{"trivia-daily"}))
+
+	inv := &recordingInvalidator{}
+	items := NewItemServer(st, inv, ids.NewSource())
+
+	if _, err := items.Create(t.Context(), &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: member.GetId(), Title: "A new item", SummaryText: "s", BodyHtml: "<p>b</p>",
+	}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var sawMember, sawAggregate bool
+	for _, s := range inv.slugs {
+		switch s {
+		case "trivia-daily":
+			sawMember = true
+		case "everything":
+			sawAggregate = true
+		}
+	}
+	if !sawMember {
+		t.Error("the item's own feed was not invalidated")
+	}
+	if !sawAggregate {
+		t.Errorf("the aggregate containing the feed was not invalidated (got %v)", inv.slugs)
+	}
+}
+
+func TestInvalidationDoesNotFanOutToUnrelatedFeeds(t *testing.T) {
+	// The fan-out must be scoped by membership, not broadcast: dropping every
+	// feed's cache on every item write would turn a targeted invalidation
+	// into a global one and throw away the render cache's whole value.
+	st := feedOpenTestStore(t)
+	feeds := NewFeedServer(st, nil, nil)
+	member := mustCreateFeed(t, feeds, feedTestFeed("trivia-daily"))
+	mustCreateFeed(t, feeds, feedTestFeed("news-roundup"))
+
+	inv := &recordingInvalidator{}
+	items := NewItemServer(st, inv, ids.NewSource())
+	if _, err := items.Create(t.Context(), &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: member.GetId(), Title: "A new item", SummaryText: "s", BodyHtml: "<p>b</p>",
+	}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	for _, s := range inv.slugs {
+		if s == "news-roundup" {
+			t.Errorf("an unrelated feed was invalidated: %v", inv.slugs)
+		}
 	}
 }
