@@ -236,6 +236,21 @@ func (s *SystemServer) sysLoadProvider(ctx context.Context, r store.Reader) (*af
 	if p.GetEffort() == "" {
 		p.Effort = defaultProviderEffort
 	}
+	// The two model fields default for the same reason Effort does, and they
+	// did not, which is why /settings/provider showed "Choose a model…" under
+	// both while Effort sat there correctly reading "Smart".
+	//
+	// Seeding on READ is safe for these two specifically: empty means "never
+	// chosen", so there is no persisted value to overwrite. That is NOT true
+	// in general — see sysLoadGeneration's warning about Enabled, where a
+	// stored `false` serialises as an absent key and seeding a default would
+	// silently re-enable a kill switch someone turned off.
+	if p.GetDefaultModel() == "" {
+		p.DefaultModel = DefaultProviderModel
+	}
+	if p.GetEmbeddingModel() == "" {
+		p.EmbeddingModel = DefaultProviderEmbeddingModel
+	}
 	// KeyPresent is derived on every read and never stored: a profile row
 	// records which ENVIRONMENT VARIABLE holds its key (PLAN.md §4 keeps key
 	// material out of the database entirely), so whether that variable is
@@ -248,9 +263,55 @@ func (s *SystemServer) sysLoadProvider(ctx context.Context, r store.Reader) (*af
 }
 
 // defaultProviderEffort is the SchemaFlux Speed tier used when none is
-// configured. "smart" is the library's own thorough tier and matches what
-// internal/llm did before this setting existed (it set no tier).
-const defaultProviderEffort = "smart"
+// configured.
+//
+// "quick" — the operator asked for low effort (2026-08-11), and of the three
+// tiers SchemaFlux exposes (smart/fast/quick, labelled "most thorough" /
+// "balanced" / "cheapest") quick is the low one. There is no "low" tier to
+// set literally; validProviderEfforts would reject it.
+//
+// This was "smart", chosen to match what internal/llm did before the setting
+// existed, so the change is not cosmetic: any deployment that never picked an
+// effort moves from the most thorough tier to the cheapest one on next boot.
+// That is the point — cheaper and faster per run — but output quality is the
+// thing being traded away, and a deployment happy with what it was getting
+// should set the tier explicitly rather than rely on this.
+const defaultProviderEffort = "quick"
+
+// Cold-start model choices, shown on /settings/provider until an operator
+// picks otherwise.
+const (
+	// DefaultProviderModel is the chat model a fresh install starts on, set
+	// to the operator's stated choice (2026-08-11).
+	//
+	// The string must match the provider's model id EXACTLY. The settings
+	// dropdown only renders options that SystemService.ListModels returned,
+	// so an id the provider does not publish under this spelling shows as
+	// "Choose a model…" again — the same empty box this constant exists to
+	// fix, with a value behind it.
+	//
+	// Nothing generates from this value yet. Each feed carries its own model
+	// in its recipe (feedspec.ModelParams.Model), and generateSpecFrom reads
+	// THAT, so changing this does not change what runs today. It is the
+	// value a new feed should inherit, and wiring that is a separate change.
+	//
+	// It also has no row in the price table, so a feed pointed at it prices
+	// at zero and every USD ceiling goes inert for that feed — see
+	// genGate.Allowed's warning in cmd/animefeedflux/wire.go. Entering a
+	// price for whatever model you actually run is not optional if the
+	// dollar ceiling is meant to hold.
+	DefaultProviderModel = "gpt-55.6-luna"
+
+	// DefaultProviderEmbeddingModel is not a preference — it is the model
+	// the process genuinely uses. cmd/animefeedflux/wire.go pins
+	// `embeddingModel = openai.SmallEmbedding3` and `embeddingDim = 1536` at
+	// compile time and never reads this setting, so any other value shown
+	// here would be a straightforward lie about what produced the vectors in
+	// item_embeddings. Kept as the literal rather than importing the openai
+	// package into this one for a single string; if wire.go's constant ever
+	// changes, this must change with it.
+	DefaultProviderEmbeddingModel = "text-embedding-3-small"
+)
 
 // validProviderEfforts are the only accepted values — they are SchemaFlux's
 // Speed tiers verbatim (PLAN.md §8.1), not an invented scale this codebase
