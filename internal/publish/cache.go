@@ -89,6 +89,18 @@ type Cache struct {
 	order   *list.List // front = most recently used
 	bytes   int64
 	max     int64
+
+	// bodyBytes/gzipBytes are the same total as bytes, split the way Stats
+	// reports it. They are maintained incrementally on every mutation
+	// instead of being summed on demand because Stats' only production
+	// caller is /healthz, which a load balancer hits every few seconds —
+	// and summing meant walking every entry while holding the mutex that
+	// every cache read needs. That walk grows with the permalink entries
+	// this cache exists to bound (see "The size ceiling" above), so the
+	// health check got slower, and blocked the hot path for longer, exactly
+	// as the cache filled up.
+	bodyBytes int64
+	gzipBytes int64
 }
 
 // cacheItem is what the LRU list carries: the entry plus its key, because
@@ -153,14 +165,14 @@ func (c *Cache) Put(key string, e Entry) {
 
 	if el, ok := c.entries[key]; ok {
 		it := el.Value.(*cacheItem)
-		c.bytes -= it.size
+		c.subLocked(it)
 		it.entry, it.size = e, entrySize(e)
-		c.bytes += it.size
+		c.addLocked(it)
 		c.order.MoveToFront(el)
 	} else {
 		it := &cacheItem{key: key, entry: e, size: entrySize(e)}
 		c.entries[key] = c.order.PushFront(it)
-		c.bytes += it.size
+		c.addLocked(it)
 	}
 
 	if c.max <= 0 {
@@ -175,13 +187,30 @@ func (c *Cache) Put(key string, e Entry) {
 	}
 }
 
+// addLocked/subLocked keep the three byte counters in step with one item
+// joining or leaving the cache. They exist so no mutation path can update
+// bytes and forget the Stats split — the counters are only correct if every
+// site changes all three, and there is now exactly one site per direction.
+// The caller holds the lock.
+func (c *Cache) addLocked(it *cacheItem) {
+	c.bytes += it.size
+	c.bodyBytes += int64(len(it.entry.Body))
+	c.gzipBytes += int64(len(it.entry.GzipBody))
+}
+
+func (c *Cache) subLocked(it *cacheItem) {
+	c.bytes -= it.size
+	c.bodyBytes -= int64(len(it.entry.Body))
+	c.gzipBytes -= int64(len(it.entry.GzipBody))
+}
+
 // removeLocked drops one element from both the list and the map. The caller
 // holds the lock.
 func (c *Cache) removeLocked(el *list.Element) {
 	it := el.Value.(*cacheItem)
 	c.order.Remove(el)
 	delete(c.entries, it.key)
-	c.bytes -= it.size
+	c.subLocked(it)
 }
 
 // deleteLocked drops key if present. The caller holds the lock.
@@ -244,18 +273,18 @@ func (c *Cache) InvalidateAll() {
 	defer c.mu.Unlock()
 	c.entries = make(map[string]*list.Element)
 	c.order.Init()
-	c.bytes = 0
+	c.bytes, c.bodyBytes, c.gzipBytes = 0, 0, 0
 }
 
-// Stats reports current occupancy, for /healthz and dashboards.
+// Stats reports current occupancy, for /healthz and dashboards. It is O(1):
+// see the counters on Cache for why that matters on a path a load balancer
+// polls.
 func (c *Cache) Stats() Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s := Stats{Entries: len(c.entries)}
-	for _, el := range c.entries {
-		e := el.Value.(*cacheItem).entry
-		s.BodyBytes += int64(len(e.Body))
-		s.GzipBodyBytes += int64(len(e.GzipBody))
+	return Stats{
+		Entries:       len(c.entries),
+		BodyBytes:     c.bodyBytes,
+		GzipBodyBytes: c.gzipBytes,
 	}
-	return s
 }
