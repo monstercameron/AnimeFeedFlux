@@ -97,6 +97,12 @@ type SystemServer struct {
 	// deployment that has not wired a table.
 	applyPrices func([]*affv1.PriceEntry)
 
+	// applyPublishing publishes saved publishing settings to the publish
+	// plane. Same reason as applyPrices: the public base URL was stored,
+	// displayed, and read by nothing, while every generated feed URL came
+	// from the env var the process booted with.
+	applyPublishing func(*affv1.Settings_Publishing)
+
 	// modelLister is the seam ListModels (models.go) resolves the provider
 	// through. nil means "build a real OpenAI lister from the configured
 	// key at call time", which is what production does; a test supplies a
@@ -118,6 +124,12 @@ type SystemServer struct {
 // engine. See SystemServer.applyPrices.
 func WithPriceSink(apply func([]*affv1.PriceEntry)) SystemServerOption {
 	return func(s *SystemServer) { s.applyPrices = apply }
+}
+
+// WithPublishingSink wires saved publishing settings through to the publish
+// plane. See SystemServer.applyPublishing.
+func WithPublishingSink(apply func(*affv1.Settings_Publishing)) SystemServerOption {
+	return func(s *SystemServer) { s.applyPublishing = apply }
 }
 
 func WithModelLister(l llm.ModelLister) SystemServerOption {
@@ -484,6 +496,9 @@ func (s *SystemServer) UpdateSettings(ctx context.Context, req *affv1.SystemServ
 	// back.
 	if s.applyPrices != nil {
 		s.applyPrices(settings.GetProvider().GetPriceTable())
+	}
+	if s.applyPublishing != nil {
+		s.applyPublishing(settings.GetPublishing())
 	}
 	return &affv1.SystemServiceUpdateSettingsResponse{Settings: settings}, nil
 }

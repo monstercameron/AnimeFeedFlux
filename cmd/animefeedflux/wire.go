@@ -193,6 +193,56 @@ func specFromRow(row feedRow) (feedspec.Spec, error) {
 	return fs, nil
 }
 
+// liveBaseURL holds the operator-configured public base URL for the publish
+// plane to read on every request.
+//
+// A plain mutex rather than atomic.Value because the write path is one
+// settings save and the read path is one string per request — the simplest
+// thing that is correct across the two goroutines involved.
+type liveBaseURL struct {
+	mu  sync.RWMutex
+	val string
+}
+
+func (b *liveBaseURL) get() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.val
+}
+
+func (b *liveBaseURL) set(v string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.val = strings.TrimRight(strings.TrimSpace(v), "/")
+}
+
+// loadPublishingAtBoot seeds the live base URL from the stored setting so a
+// restart does not quietly revert every feed URL to the env var.
+func loadPublishingAtBoot(ctx context.Context, r store.Reader, b *liveBaseURL) error {
+	var raw string
+	err := r.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'publishing'`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("wire: reading publishing settings: %w", err)
+	}
+	p := &affv1.Settings_Publishing{}
+	if err := json.Unmarshal([]byte(raw), p); err != nil {
+		return fmt.Errorf("wire: parsing publishing settings: %w", err)
+	}
+	b.set(p.GetPublicBaseUrl())
+	return nil
+}
+
+// baseURLFn adapts a possibly-nil holder to publish.Deps.BaseURLFn.
+func baseURLFn(b *liveBaseURL) func() string {
+	if b == nil {
+		return nil
+	}
+	return b.get
+}
+
 // loadPriceTableAtBoot applies the stored rates before the first scheduled
 // run, so a restart does not silently revert to an empty table (and with an
 // empty table every cost reads $0.0000 and no ceiling can ever trip).
@@ -1087,6 +1137,7 @@ func buildControlPlane(
 	provider llm.Provider,
 	nov generate.Novelty,
 	prices *budget.Table,
+	baseURL *liveBaseURL,
 	sem *schedule.Semaphore,
 	metrics *obs.Metrics,
 ) (http.Handler, error) {
@@ -1139,6 +1190,11 @@ func buildControlPlane(
 	sysSrv := rpc.NewSystemServer(st, log,
 		rpc.WithVersionInfo(version, commit, time.Now()),
 		rpc.WithPriceSink(func(entries []*affv1.PriceEntry) { applyPriceTable(prices, entries) }),
+		rpc.WithPublishingSink(func(p *affv1.Settings_Publishing) {
+			if baseURL != nil {
+				baseURL.set(p.GetPublicBaseUrl())
+			}
+		}),
 		rpc.WithDefaultGenerationEnabled(cfg.GenerationEnabled))
 	sampleSrv := rpc.NewSampleServer(rpc.SampleServerConfig{
 		Feeds:      feedLookup{st: st, prices: prices},
@@ -1279,7 +1335,7 @@ func buildControlPlane(
 // internal/publish/invalidate.go's doc comment for why that gap exists and
 // why duplicating this ~15-line constructor is the documented way around
 // it. Every line below except the last mirrors buildPublishHandler exactly.
-func buildPublishHandlerWithInvalidator(st *store.Store, cfg *config.Config, version string, log *slog.Logger, metrics *obs.Metrics) (http.Handler, publish.Invalidator, error) {
+func buildPublishHandlerWithInvalidator(st *store.Store, cfg *config.Config, version string, log *slog.Logger, metrics *obs.Metrics, baseURL *liveBaseURL) (http.Handler, publish.Invalidator, error) {
 	reader := st.Reader()
 
 	tagYear, err := bootTagYear(context.Background(), reader)
@@ -1344,7 +1400,10 @@ func buildPublishHandlerWithInvalidator(st *store.Store, cfg *config.Config, ver
 		GetItem: func(ctx context.Context, itemKey string) (model.Feed, model.Item, bool, error) {
 			return getItem(ctx, reader, itemKey)
 		},
-		BaseURL:   cfg.PublicBaseURL.String(),
+		BaseURL: cfg.PublicBaseURL.String(),
+		// nil in tests that do not exercise the settings path; the boot-time
+		// BaseURL above is then the only source, exactly as before.
+		BaseURLFn: baseURLFn(baseURL),
 		Generator: "AnimeFeedFlux " + version,
 		DocsURL:   docsURL,
 		TagYear:   tagYear,
@@ -1470,7 +1529,13 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 		log.Warn("AFF_SLACK_WEBHOOK_URL not set; nightly backup/prune/staleness alerting is disabled")
 	}
 
-	publishHandler, inv, err := buildPublishHandlerWithInvalidator(st, cfg, version, log, metrics)
+	// Seeded before the publish handler is built, so the very first request
+	// already serves the configured base URL rather than the env var.
+	baseURL := &liveBaseURL{}
+	if err := loadPublishingAtBoot(ctx, st.Reader(), baseURL); err != nil {
+		log.Error("loading publishing settings", slog.Any("error", err))
+	}
+	publishHandler, inv, err := buildPublishHandlerWithInvalidator(st, cfg, version, log, metrics, baseURL)
 	if err != nil {
 		log.Error("building publish handler", slog.Any("error", err))
 		return exitRuntimeFail
@@ -1536,7 +1601,7 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 		Metrics:    metrics,
 	})
 
-	controlHandler, err := buildControlPlane(st, cfg, inv, log, provider, nov, prices, sem, metrics)
+	controlHandler, err := buildControlPlane(st, cfg, inv, log, provider, nov, prices, baseURL, sem, metrics)
 	if err != nil {
 		log.Error("building control plane", slog.Any("error", err))
 		return exitRuntimeFail

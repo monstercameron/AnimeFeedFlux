@@ -522,7 +522,7 @@ func TestGenGateKillSwitchBlocksDispatchNotServing(t *testing.T) {
 	// (buildPublishHandlerWithInvalidator) with no reference to genGate —
 	// serving is unaffected by the switch by construction. Prove it still
 	// serves the feed seeded above.
-	handler, _, err := buildPublishHandlerWithInvalidator(st, cfg, "test", slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	handler, _, err := buildPublishHandlerWithInvalidator(st, cfg, "test", slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
 	if err != nil {
 		t.Fatalf("buildPublishHandlerWithInvalidator: %v", err)
 	}

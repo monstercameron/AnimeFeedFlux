@@ -58,8 +58,25 @@ type Deps struct {
 	GetItem func(ctx context.Context, itemKey string) (model.Feed, model.Item, bool, error)
 
 	// BaseURL is the public base URL, absolute, no trailing slash (the
-	// validated form of config.Config.PublicBaseURL).
+	// validated form of config.Config.PublicBaseURL). It is the value this
+	// process booted with, and the fallback whenever BaseURLFn has nothing
+	// to say.
 	BaseURL string
+
+	// BaseURLFn, when set and returning a non-empty string, overrides
+	// BaseURL per request.
+	//
+	// This exists because /settings/publishing has always had a "Public base
+	// URL" field that was stored, read back, and used by NOTHING: every guid,
+	// every atom:link, every subscribe URL and every JSON Feed URL came from
+	// the env var this process happened to start with. An operator could edit
+	// the field, see "Saved.", and watch every feed keep advertising the old
+	// host — the setting was a screenshot of a value, not the value.
+	//
+	// Read per request rather than captured once, so a change takes effect
+	// without a restart. The implementation behind it is expected to be a
+	// cheap in-memory read, not a database query per request.
+	BaseURLFn func() string
 	// Generator identifies the software in <generator>/<meta name=generator>.
 	Generator string
 	// DocsURL is the RSS spec URL for <docs>.
@@ -517,7 +534,7 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		writeStatus(w, r, "internal error", http.StatusInternalServerError)
 		return
 	}
-	body, err := render.Index(feeds, s.deps.BaseURL, s.deps.Generator)
+	body, err := render.Index(feeds, s.baseURL(), s.deps.Generator)
 	if err != nil {
 		writeStatus(w, r, "internal error", http.StatusInternalServerError)
 		return
@@ -659,9 +676,9 @@ func (s *server) renderFeed(ctx context.Context, slug, format, contentType strin
 
 	ch := model.Channel{
 		Feed:      feed,
-		SelfURL:   s.deps.BaseURL + "/feeds/" + slug + "." + format,
-		HTMLURL:   s.deps.BaseURL + "/",
-		Host:      s.deps.BaseURL,
+		SelfURL:   s.baseURL() + "/feeds/" + slug + "." + format,
+		HTMLURL:   s.baseURL() + "/",
+		Host:      s.baseURL(),
 		TagYear:   s.tagYearFor(feed),
 		Items:     items,
 		BuildTime: s.deps.now(),
@@ -747,8 +764,8 @@ func (s *server) handleItem(w http.ResponseWriter, r *http.Request) {
 
 	ch := model.Channel{
 		Feed:      feed,
-		HTMLURL:   s.deps.BaseURL + "/",
-		Host:      s.deps.BaseURL,
+		HTMLURL:   s.baseURL() + "/",
+		Host:      s.baseURL(),
 		TagYear:   s.tagYearFor(feed),
 		Generator: s.deps.Generator,
 	}
@@ -914,4 +931,20 @@ func (s *server) tagYearFor(f model.Feed) int {
 		return f.CreatedAt.UTC().Year()
 	}
 	return s.deps.TagYear
+}
+
+// baseURL is the public base URL in effect for THIS request: the operator's
+// configured value when there is one, otherwise the boot-time value.
+//
+// Trailing slashes are trimmed here rather than trusted from the caller. Every
+// use below appends a path beginning with "/", so a stored value ending in one
+// would produce "https://host//feeds/x.xml" — which is a different URL to most
+// aggregators, and a feed whose guid changed is a feed that reposts everything.
+func (s *server) baseURL() string {
+	if s.deps.BaseURLFn != nil {
+		if v := strings.TrimRight(s.deps.BaseURLFn(), "/"); v != "" {
+			return v
+		}
+	}
+	return strings.TrimRight(s.deps.BaseURL, "/")
 }
