@@ -40,31 +40,44 @@ var loginMessages = gwci18n.NamespaceCatalog{
 // the session — the second call would already be unauthenticated. That is
 // a server behavior this UI reflects honestly rather than papers over.
 const (
-	KeyRecoverTitle                 = "recover.title"
-	KeyRecoverIntro                 = "recover.intro"
-	KeyRecoverCodeStepLabel         = "recover.codeStepLabel"
-	KeyRecoverCodeLabel             = "recover.codeLabel"
-	KeyRecoverCodeHint              = "recover.codeHint"
-	KeyRecoverCodeSubmit            = "recover.codeSubmit"
-	KeyRecoverRemainingCodes        = "recover.remainingCodes"
-	KeyRecoverLowCodesWarning       = "recover.lowCodesWarning"
-	KeyRecoverChooseActionHeading   = "recover.chooseActionHeading"
-	KeyRecoverChooseActionIntro     = "recover.chooseActionIntro"
-	KeyRecoverChoosePasswordReset   = "recover.choosePasswordReset"
-	KeyRecoverChooseReenrollTOTP    = "recover.chooseReenrollTOTP"
-	KeyRecoverNewPasswordLabel      = "recover.newPasswordLabel"
-	KeyRecoverConfirmPasswordLabel  = "recover.confirmPasswordLabel"
-	KeyRecoverPasswordMismatch      = "recover.passwordMismatch"
-	KeyRecoverPasswordTooShort      = "recover.passwordTooShort"
-	KeyRecoverPasswordTooLong       = "recover.passwordTooLong"
-	KeyRecoverResetSubmit           = "recover.resetSubmit"
-	KeyRecoverReenrollHeading       = "recover.reenrollHeading"
-	KeyRecoverReenrollIntro         = "recover.reenrollIntro"
-	KeyRecoverReenrollSubmit        = "recover.reenrollSubmit"
-	KeyRecoverReenrollProvisioned   = "recover.reenrollProvisioned"
-	KeyRecoverDoneHeading           = "recover.doneHeading"
-	KeyRecoverDoneBody              = "recover.doneBody"
-	KeyRecoverDoneGoToLogin         = "recover.doneGoToLogin"
+	KeyRecoverTitle                = "recover.title"
+	KeyRecoverIntro                = "recover.intro"
+	KeyRecoverCodeStepLabel        = "recover.codeStepLabel"
+	KeyRecoverCodeLabel            = "recover.codeLabel"
+	KeyRecoverCodeHint             = "recover.codeHint"
+	KeyRecoverCodeSubmit           = "recover.codeSubmit"
+	KeyRecoverRemainingCodes       = "recover.remainingCodes"
+	KeyRecoverLowCodesWarning      = "recover.lowCodesWarning"
+	KeyRecoverChooseActionHeading  = "recover.chooseActionHeading"
+	KeyRecoverChooseActionIntro    = "recover.chooseActionIntro"
+	KeyRecoverChoosePasswordReset  = "recover.choosePasswordReset"
+	KeyRecoverChooseReenrollTOTP   = "recover.chooseReenrollTOTP"
+	KeyRecoverNewPasswordLabel     = "recover.newPasswordLabel"
+	KeyRecoverConfirmPasswordLabel = "recover.confirmPasswordLabel"
+	KeyRecoverPasswordMismatch     = "recover.passwordMismatch"
+	KeyRecoverPasswordTooShort     = "recover.passwordTooShort"
+	KeyRecoverPasswordTooLong      = "recover.passwordTooLong"
+	KeyRecoverResetSubmit          = "recover.resetSubmit"
+	KeyRecoverReenrollHeading      = "recover.reenrollHeading"
+	KeyRecoverReenrollIntro        = "recover.reenrollIntro"
+	KeyRecoverReenrollSubmit       = "recover.reenrollSubmit"
+	KeyRecoverReenrollProvisioned  = "recover.reenrollProvisioned"
+	KeyRecoverDoneHeading          = "recover.doneHeading"
+	KeyRecoverDoneBody             = "recover.doneBody"
+	KeyRecoverDoneGoToLogin        = "recover.doneGoToLogin"
+
+	// KeyRecoverSavedConfirm labels the "I've saved this" checkbox that
+	// gates leaving the TOTP re-enrollment screen. Declared here 2026-08-10
+	// because it was not: web/pages/auth/recover.go has carried
+	// `const keyRecoverSavedConfirm = "recoverSavedConfirmLabel"` with no
+	// catalogue entry, so the checkbox rendered its own raw key. Same class
+	// of gap as KeyCommonConnectionUnreachable — a BARE key string that gets
+	// its namespace at the call site, which a prefix-based sweep cannot see.
+	//
+	// NOTE the key string keeps recover.go's exact spelling, prefix and all
+	// (it is not "recover.savedConfirm"): the call site is the source of
+	// truth here, and renaming it would silently reintroduce the raw key.
+	KeyRecoverSavedConfirm          = "recoverSavedConfirmLabel"
 	KeyRecoverBreakGlassHeading     = "recover.breakGlassHeading"
 	KeyRecoverBreakGlassBody        = "recover.breakGlassBody"
 	KeyRecoverBreakGlassCommandNote = "recover.breakGlassCommandNote"
@@ -108,6 +121,10 @@ var recoverMessages = gwci18n.NamespaceCatalog{
 	KeyRecoverDoneHeading:   {Text: "Done"},
 	KeyRecoverDoneBody:      {Text: "This recovery session has ended and every other session was signed out. Sign in again with your new credential."},
 	KeyRecoverDoneGoToLogin: {Text: "Go to sign in"},
+	// Losing this screen without saving means the TOTP secret is gone and
+	// break-glass on the box is the only way back in — the checkbox says
+	// what was saved, not merely "I understand".
+	KeyRecoverSavedConfirm: {Text: "I've saved this in my authenticator app"},
 
 	KeyRecoverBreakGlassHeading:     {Text: "Locked out entirely?"},
 	KeyRecoverBreakGlassBody:        {Text: "If you have no recovery codes either, break-glass access resets your password, TOTP, and recovery codes all at once — but it only works over SSH, directly on the server, with access to the database file. There is no remote or web path for it."},

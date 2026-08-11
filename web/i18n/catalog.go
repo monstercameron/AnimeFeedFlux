@@ -72,13 +72,79 @@ const DefaultLocale = "en"
 // (D6-02). Namespaces the D1 auth pages don't need yet are declared empty
 // (D6-04) rather than omitted, so `enCatalog[i18n.NSGenerate]` is always a
 // valid, non-nil map for a later wave to add to.
+//
+// Every non-common namespace is registered as mergeCommonIntoNamespace's
+// output, not the bare *Messages map — see that function's doc comment for
+// why: adapter.go's NewLabelResolver is the ON-PAPER fix for web/ui's
+// shared primitives (StatePanel, Confirm, Button, ...) needing common.*
+// keys, but web/main.go's actual wiring (bundleTranslator, one per page,
+// fixed to that page's own namespace) hands those same primitives a
+// namespace-bound T instead — a wiring gap this package cannot close by
+// editing web/main.go (out of scope for this pass), only by making the
+// lookup succeed regardless of which namespace it lands in.
 var enCatalog = gwci18n.Catalog{
 	NSCommon:   commonMessages,
-	NSAuth:     authMessages,
-	NSShell:    shellMessages,
-	NSGenerate: generateMessages,
-	NSHistory:  historyMessages,
-	NSSettings: settingsMessages,
+	NSAuth:     mergeCommonIntoNamespace(authMessages),
+	NSShell:    mergeCommonIntoNamespace(shellMessages),
+	NSGenerate: mergeCommonIntoNamespace(generateMessages),
+	NSHistory:  mergeCommonIntoNamespace(historyMessages),
+	NSSettings: mergeCommonIntoNamespace(settingsMessages),
+}
+
+// mergeCommonIntoNamespace closes the common-key degrade reported against
+// D6-14: web/ui's shared primitives (web/ui/state.go's StatePanel, confirm.
+// go's Confirm, labels.go-driven Button/Kebab/...) render bare common.*
+// keys ("action.cancel", "state.loading", "confirm.typePhrase", ...)
+// through whatever T their caller passes — and every page wave (D6-11..13)
+// hands those primitives its OWN namespace-bound translator
+// (web/main.go's bundleTranslator{ns: NSGenerate/NSHistory/NSSettings/...}
+// ), not the NSCommon-fixed one adapter.go's NewLabelResolver was built
+// for (see that function's doc comment: "web/ui's primitives ... only ever
+// render common.* keys, so this adapter is fixed to NSCommon"). gwci18n's
+// Bundle.Translate falls back across LOCALES within one namespace, never
+// across namespaces within one locale (see i18n.go's lookup/localeCandidates
+// in the GoWebComponents/v5 module), so a bare "state.loading" call routed
+// through a NSGenerate-bound translator misses commonMessages entirely and
+// falls back to raw "generate.state.loading" text — confirmed by reading
+// web/pages/generate/render_rail.go's wui.StatePanel call (T: wt, the
+// page's NSGenerate translator) and web/pages/settings/render.go's
+// affui.Confirm call (T: t, NSSettings) alongside web/ui/state.go's
+// resolve(t, "state.loading") and confirm.go's resolve(p.T,
+// "action.cancel"/"confirm.typePhrase") call sites.
+//
+// The correct fix is wiring web/main.go's shared-primitive call sites to
+// NewLabelResolver instead — out of scope here (web/main.go is off-limits
+// for this pass) — so this merges a copy of every common.* entry into each
+// consuming namespace's catalogue instead: every non-common namespace's
+// OWN keys are fully prefixed already (e.g. "generate.editor.slug",
+// "settings.security.sessions.revoke" — see keys_generate.go/keys_settings.
+// go's doc comments), while every common.* key is bare ("action.cancel",
+// not "common.action.cancel"), so the two key spaces cannot collide and a
+// dst entry never needs to win over a common one in practice. dst is
+// copied over common's entries last anyway, as a defensive tie-break, so a
+// future bare key added to a non-common namespace shadows rather than
+// silently loses to the merged-in common one.
+func mergeCommonIntoNamespace(dst gwci18n.NamespaceCatalog) gwci18n.NamespaceCatalog {
+	merged := make(gwci18n.NamespaceCatalog, len(dst)+len(commonMessages))
+	for k, v := range commonMessages {
+		merged[k] = v
+	}
+	for k, v := range dst {
+		merged[k] = v
+	}
+	return merged
+}
+
+// Catalog returns enCatalog — the real, literal (non-pseudolocalized) "en"
+// catalogue NewBundle registers by default — for a caller that needs to
+// inspect or diff against it without also linking a *gwci18n.Bundle
+// (cmd/affi18n's pseudo-catalog subcommand: diffing real vs.
+// PseudoCatalog's placeholder counts per entry). The returned maps are
+// enCatalog's own, not a defensive copy — callers must treat it read-only,
+// same expectation as PseudoCatalog's freshly-built one being the only
+// copy that's actually safe to mutate.
+func Catalog() gwci18n.Catalog {
+	return enCatalog
 }
 
 // NewBundle builds the app's Bundle with the "en" catalogue registered and
@@ -93,7 +159,19 @@ func NewBundle() *gwci18n.Bundle {
 		FallbackLocale: DefaultLocale,
 		OnMissing:      logMissingKey,
 	})
-	b.Register(DefaultLocale, enCatalog)
+	catalog := enCatalog
+	if PseudolocaleEnabled() {
+		// D6-24: swap the registered "en" catalogue for its pseudolocalized
+		// (en-XA-style) form. Every T() call in the app targets
+		// DefaultLocale ("en") directly — see e.g. web/main.go's
+		// bundleTranslator and adapter.go's formatters, all of which pass
+		// DefaultLocale as both locale and fallback — so there is no
+		// separate "en-XA" locale to route to at runtime; the pseudolocale
+		// build instead runs the SAME app under DefaultLocale with widened,
+		// bracketed text standing in for it. See pseudo.go's doc comment.
+		catalog = PseudoCatalog()
+	}
+	b.Register(DefaultLocale, catalog)
 	return b
 }
 

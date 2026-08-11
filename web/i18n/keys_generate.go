@@ -30,12 +30,53 @@ import gwci18n "github.com/monstercameron/GoWebComponents/v5/i18n"
 // t.T("generate.editor.cron.readback.weekly", name, clockString, timezone)
 // → {arg1}={name}, {arg2}=clock, {arg3}=timezone).
 var generateMessages = gwci18n.NamespaceCatalog{
+	// Shared "label: value" composition, used everywhere this page needs to
+	// show a translated label next to an already-formatted value (a slug,
+	// an error's text, a relative-time string, a count) rather than
+	// building that pairing with fmt/concatenation (PLAN.md §12.6). {arg1}
+	// is the label, {arg2} is the value.
+	"generate.common.labelValue": {Text: "{arg1}: {arg2}"},
+	// generate.common.errorText is a direct passthrough for an error's own
+	// message (already resolved to text by errorText(err) — see i18n.go),
+	// used where the UI shows the raw error with no label prefix.
+	"generate.common.errorText": {Text: "{arg1}"},
+
+	// generate.errors.disconnected/generate.errors.unexpected are D0-10's
+	// three-way mutation-error split (errors.go's mutationErrorText): a
+	// disconnected refusal never reached the server, so it gets its own
+	// reassuring wording rather than a bare error string — the operator's
+	// only correct move is to wait for reconnect and, if they want, retry.
+	// generate.errors.unexpected is everything that is neither a
+	// disconnection nor a server-issued rejection (generate.common.errorText
+	// covers that last case), kept visibly distinct so it never reads as
+	// "the server said no" when nobody actually said anything.
+	"generate.errors.disconnected": {Text: "You're offline — this wasn't sent. It will not be retried automatically; try again once reconnected."},
+	"generate.errors.unexpected":   {Text: "Unexpected error: {arg1}"},
+
 	// Sampler candidate-view labels (types.go).
 	"generate.sampler.view.rendered":  {Text: "Rendered"},
 	"generate.sampler.view.rawFields": {Text: "Raw fields"},
 	"generate.sampler.view.feedXML":   {Text: "Feed XML"},
 	"generate.sampler.view.slackCard": {Text: "Slack card"},
 	"generate.sampler.view.unknown":   {Text: "Unknown view"},
+
+	// generate.sampler.viewTabs.label is the accessible name for the
+	// four-candidate-view tablist (web/ui.Tabs, adopted in render_sampler.go
+	// for its roving-tabindex arrow-key navigation — a hand-rolled tab strip
+	// had none). generate.sampler.candidateTabs.label is the same for the
+	// per-candidate tab strip; generate.sampler.candidateTab.1..5 are that
+	// strip's own tab labels — a fixed, bounded set of five (not one
+	// interpolated key) because web/ui.Tab has no argument slot to
+	// interpolate an ordinal into a shared label (see this task's final
+	// report), and ValidSampleSize (logic.go) already caps candidates at
+	// five, so a sixth position can never occur.
+	"generate.sampler.viewTabs.label":      {Text: "Candidate view"},
+	"generate.sampler.candidateTabs.label": {Text: "Candidates"},
+	"generate.sampler.candidateTab.1":      {Text: "1"},
+	"generate.sampler.candidateTab.2":      {Text: "2"},
+	"generate.sampler.candidateTab.3":      {Text: "3"},
+	"generate.sampler.candidateTab.4":      {Text: "4"},
+	"generate.sampler.candidateTab.5":      {Text: "5"},
 
 	// Editor (render_editor.go, logic.go).
 	"generate.editor.noSelection":               {Text: "Select a feed from the rail, or create a new one."},
@@ -74,17 +115,25 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.editor.validate":                  {Text: "Validate"},
 	"generate.editor.save":                      {Text: "Save"},
 	"generate.editor.sources":                   {Text: "Sources"},
-	"generate.editor.sourceKindPlaceholder":     {Text: "Source kind"},
-	"generate.editor.removeSource":              {Text: "Remove source"},
-	"generate.editor.addSource":                 {Text: "Add source"},
-	"generate.editor.conflict.headline":         {Text: "This feed changed elsewhere while you were editing."},
-	"generate.editor.conflict.keepMine":         {Text: "Keep my version"},
-	"generate.editor.conflict.takeTheirs":       {Text: "Take the other version"},
-	"generate.editor.conflict.perFieldHint":     {Text: "Or resolve field by field:"},
-	"generate.editor.conflict.mine":             {Text: "Mine"},
-	"generate.editor.conflict.theirs":           {Text: "Theirs"},
-	"generate.editor.conflict.keepMineField":    {Text: "Keep mine"},
-	"generate.editor.conflict.applyPerField":    {Text: "Apply per-field choices"},
+	// generate.editor.sourceUrl/sourceKind are the per-source row fields'
+	// visible/accessible labels (web/ui.Input, adopted in render_editor.go).
+	// The URL field previously had NO label at all (a bare h.Input with no
+	// h.Label sibling) — a real a11y gap web/ui.Input's required LabelKey
+	// closes; the kind field had only a placeholder, which is a hint, not a
+	// label a screen reader announces as the field's name.
+	"generate.editor.sourceUrl":              {Text: "URL"},
+	"generate.editor.sourceKind":             {Text: "Kind"},
+	"generate.editor.sourceKindPlaceholder":  {Text: "Source kind"},
+	"generate.editor.removeSource":           {Text: "Remove source"},
+	"generate.editor.addSource":              {Text: "Add source"},
+	"generate.editor.conflict.headline":      {Text: "This feed changed elsewhere while you were editing."},
+	"generate.editor.conflict.keepMine":      {Text: "Keep my version"},
+	"generate.editor.conflict.takeTheirs":    {Text: "Take the other version"},
+	"generate.editor.conflict.perFieldHint":  {Text: "Or resolve field by field:"},
+	"generate.editor.conflict.mine":          {Text: "Mine"},
+	"generate.editor.conflict.theirs":        {Text: "Theirs"},
+	"generate.editor.conflict.keepMineField": {Text: "Keep mine"},
+	"generate.editor.conflict.applyPerField": {Text: "Apply per-field choices"},
 
 	// Rail (render_rail.go).
 	"generate.rail.killSwitchActive":   {Text: "Generation disabled by the global kill switch."},
@@ -102,6 +151,19 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.rail.runNow":             {Text: "Run now"},
 	"generate.rail.disable":            {Text: "Disable"},
 	"generate.rail.enable":             {Text: "Enable"},
+	// generate.rail.enabledLabel is web/ui.Toggle's visible label (adopted
+	// in render_rail.go in place of the old two-state "Enable"/"Disable"
+	// verb button) — a real switch names the STATE it shows ("Enabled",
+	// with the switch position saying on/off), not the action a click would
+	// take, unlike generate.rail.enable/disable above, which are kept for
+	// reference but no longer called.
+	"generate.rail.enabledLabel": {Text: "Enabled"},
+	// generate.rail.slugPath renders a feed's slug as its own row-relative
+	// path. The slug itself ({arg1}) is an identifier and stays
+	// untranslated content (TODOS.md D6-19); only the "/" framing is
+	// interface formatting, which is why this still goes through the
+	// catalogue instead of an "/%s" Textf.
+	"generate.rail.slugPath": {Text: "/{arg1}"},
 
 	// Sampler (render_sampler.go, logic.go).
 	"generate.sampler.selectOrSaveFeed":          {Text: "Select or save a feed to sample it."},
@@ -128,6 +190,68 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.sampler.novelty.novelNear":         {Text: "Similar ({arg1}) to \"{arg2}\""},
 	"generate.sampler.novelty.rejected":          {Text: "Rejected — too similar ({arg1}) to \"{arg2}\""},
 
+	// generate.sampler.candidateCostDetail is the candidate cost line,
+	// including its token counts — {arg1} the translated "Candidate cost"
+	// label, {arg2} the already-formatted currency amount, {arg3}/{arg4}
+	// the already locale-formatted in/out token counts.
+	"generate.sampler.candidateCostDetail": {Text: "{arg1}: {arg2} (tokens in={arg3} out={arg4})"},
+
 	// Page-level fallback (render.go, before real data is wired).
+	// --- The workbench layout (web/pages/generate/render_workbench.go) ------
+	"generate.workbench.feed":             {Text: "Feed"},
+	"generate.workbench.chooseFeed":       {Text: "Choose a feed…"},
+	"generate.workbench.retryFeeds":       {Text: "Retry"},
+	"generate.workbench.feedsUnavailable": {Text: "Couldn't load feeds"},
+	"generate.workbench.newFeed":          {Text: "+ New"},
+	"generate.workbench.model":            {Text: "Model"},
+	"generate.workbench.modelDefault":     {Text: "Default model"},
+	// {arg1} is a model id the recipe names but the provider's list does not
+	// include — a deprecated id, or one served by a custom endpoint.
+	"generate.workbench.modelUnlisted":   {Text: "{arg1} (not listed)"},
+	"generate.workbench.modelGroupChat":  {Text: "Text models"},
+	"generate.workbench.modelGroupOther": {Text: "Other models"},
+	"generate.workbench.effort":          {Text: "Effort"},
+	"generate.workbench.effort.smart":    {Text: "Smart"},
+	"generate.workbench.effort.fast":     {Text: "Fast"},
+	"generate.workbench.effort.quick":    {Text: "Quick"},
+	"generate.workbench.temp":            {Text: "Temperature override"},
+	// The strip is too narrow for a visible label on this one field, so the
+	// placeholder carries the name; the accessible name is on aria-label.
+	"generate.workbench.tempPlaceholder": {Text: "temp"},
+	"generate.workbench.size":            {Text: "Candidates"},
+	"generate.workbench.sizeN":           {Text: "{arg1}×"},
+	// The verb of the page. "Preview", not "Sample": it names what you get
+	// back, and it is the same word the pane it fills is called.
+	"generate.workbench.preview":        {Text: "Preview"},
+	"generate.workbench.previewing":     {Text: "Generating…"},
+	"generate.workbench.recipeSettings": {Text: "Recipe settings — slug, schedule, budgets, window, sources"},
+	"generate.workbench.insertVariable": {Text: "Insert:"},
+	// {arg1} = the template identifier, e.g. {{.Today}}.
+	"generate.workbench.insertNamed": {Text: "Insert {arg1} at the cursor"},
+	"generate.workbench.noFeed":      {Text: "Pick a feed above, or start a new one, to write its prompts."},
+	"generate.workbench.systemHint":  {Text: "Standing instructions. Sent with every run."},
+	"generate.workbench.userHint":    {Text: "The per-run request. Template variables are filled in at generation time."},
+
 	"generate.notWired": {Text: "This page is not yet wired to live data."},
+
+	// The subscribe-URL panel (web/pages/generate/render_urls.go). The URL
+	// is this product's entire deliverable, and until this panel existed
+	// nothing on the authoring page told an operator where the finished feed
+	// lives — they had to join a base URL from Settings to a slug from the
+	// editor and remember which extension each format uses.
+	"generate.urls.title": {Text: "Subscribe URLs"},
+	"generate.urls.index": {Text: "All feeds"},
+	"generate.urls.rss":   {Text: "RSS"},
+	"generate.urls.atom":  {Text: "Atom"},
+	"generate.urls.json":  {Text: "JSON Feed"},
+	// The button names the action; the two result states name what happened.
+	// "Copy" -> "Copied" keeps the same verb, so the control reads as one
+	// thing in two states rather than as two controls.
+	"generate.urls.copy":       {Text: "Copy"},
+	"generate.urls.copied":     {Text: "Copied"},
+	"generate.urls.copyFailed": {Text: "Couldn't copy"},
+	// The accessible name, so four adjacent "Copy" buttons are told apart by
+	// a screen reader. {arg1} is the row's own label.
+	"generate.urls.copyNamed": {Text: "Copy the {arg1} URL"},
+	"generate.urls.baseUnset": {Text: "Set a public base URL in Settings → Publishing to see subscribe URLs."},
 }

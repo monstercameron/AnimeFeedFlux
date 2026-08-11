@@ -31,6 +31,15 @@ import gwci18n "github.com/monstercameron/GoWebComponents/v5/i18n"
 // package does not own web/pages/history and cannot rename its call sites;
 // see this wave's report for the list of things flagged rather than fixed.
 var historyMessages = gwci18n.NamespaceCatalog{
+	// Added 2026-08-10. wiring.go's renderNotWired had a doc comment
+	// arguing that, since this key was absent, D6-07's "a missing key
+	// renders the key itself" made rendering "history.notWired" the correct
+	// behaviour rather than "inventing wording here". D6-07 describes a
+	// degrade, not a design: `generate.notWired` and
+	// `settings.notWired.message` both carry real copy for the identical
+	// state, so this was the one surface of three that showed an operator a
+	// key. Same wording as its two neighbours, deliberately.
+	"history.notWired":       {Text: "This page is not yet wired to live data."},
 	"history.title":          {Text: "History"},
 	"history.tabs.runs":      {Text: "Runs"},
 	"history.tabs.items":     {Text: "Items"},
@@ -38,13 +47,36 @@ var historyMessages = gwci18n.NamespaceCatalog{
 	"history.cancel":         {Text: "Cancel"},
 	"history.kebab":          {Text: "Actions"},
 	"history.pager.previous": {Text: "Previous"},
-	"history.pager.refresh":  {Text: "Refresh"},
+	// Added 2026-08-10 with the control it labels: both tables rendered
+	// Previous and Refresh and no forward control at all, so every page past
+	// the first was unreachable. See runs_ui.go's "load-ok" reducer case.
+	"history.pager.next":    {Text: "Next"},
+	"history.pager.refresh": {Text: "Refresh"},
 
 	"history.confirm.confirm":         {Text: "Confirm"},
 	"history.confirm.type_to_confirm": {Text: "Type {word} to confirm."},
 
+	// D0-10's three-way mutation-error split (mutationerror_js.go's
+	// mutationErrorText) — disconnected/rejected/unexpected, so a refusal
+	// that never reached the server, a rejection the server actually
+	// issued, and anything else never render the same undifferentiated
+	// text. Mirrors generate.errors.* (keys_generate.go) in shape, adapted
+	// to this package's named-args Catalog.
+	"history.errors.disconnected": {Text: "You're offline — this wasn't sent. It will not be retried automatically; try again once reconnected."},
+	"history.errors.rejected":     {Text: "{message}"},
+	"history.errors.unexpected":   {Text: "Unexpected error: {message}"},
+
 	// Runs tab.
-	"history.runs.filter_feed":          {Text: "Feed"},
+	"history.runs.filter_feed":     {Text: "Feed"},
+	"history.runs.filter_feed_any": {Text: "All feeds"},
+	"history.runs.filter_status":   {Text: "Status"},
+	// "Any status" rather than "All statuses": the control filters TO a
+	// status, so its unset value is the absence of that filter, not a
+	// selection of every status at once.
+	"history.runs.filter_status_any":    {Text: "Any status"},
+	"history.runs.filter_after":         {Text: "Started after"},
+	"history.runs.filter_before":        {Text: "Started before"},
+	"history.runs.filter_clear":         {Text: "Clear filters"},
 	"history.runs.col_status":           {Text: "Status"},
 	"history.runs.col_trigger":          {Text: "Trigger"},
 	"history.runs.col_duration":         {Text: "Duration"},
@@ -53,11 +85,13 @@ var historyMessages = gwci18n.NamespaceCatalog{
 	"history.runs.col_cost":             {Text: "Cost"},
 	"history.runs.col_error":            {Text: "Error"},
 	"history.runs.expand":               {Text: "Expand"},
+	"history.runs.collapse":             {Text: "Collapse"},
 	"history.runs.delete":               {Text: "Delete"},
 	"history.runs.delete_confirm_title": {Text: "Delete this run?"},
 	"history.runs.reject_reasons":       {Text: "Reject reasons"},
 	"history.runs.no_rejects":           {Text: "Nothing was rejected in this run."},
 	"history.runs.log":                  {Text: "Log"},
+	"history.runs.log_unavailable":      {Text: "Couldn't load this run's log. Refresh to try again."},
 	"history.runs.status.running":       {Text: "Running"},
 	"history.runs.status.succeeded":     {Text: "Succeeded"},
 	"history.runs.status.failed":        {Text: "Failed"},
@@ -69,6 +103,19 @@ var historyMessages = gwci18n.NamespaceCatalog{
 	"history.runs.error_kind.transient": {Text: "Transient error"},
 	"history.runs.error_kind.invalid":   {Text: "Invalid configuration"},
 	"history.runs.error_kind.fatal":     {Text: "Fatal error"},
+
+	// history.runs.added_rejected_value/tokens_value replace two "%d / %d"
+	// Textf calls in runs_ui.go's added/rejected and tokens-in/out table
+	// cells. Values are already locale-formatted (gwci18n.FormatNumber)
+	// before interpolation — this key only owns the "X / Y" shape, not the
+	// digit grouping.
+	"history.runs.added_rejected_value": {Text: "{added} / {rejected}"},
+	"history.runs.tokens_value":         {Text: "{in} / {out}"},
+	// history.runs.reject_reason_count pairs a reject reason (an
+	// identifier/code — duplicate, novelty-gate, byte-equality-link-
+	// mismatch, per common.pb.go's RejectReason doc comment — not prose,
+	// TODOS.md D6-19) with its already locale-formatted count.
+	"history.runs.reject_reason_count": {Text: "{reason}: {count}"},
 
 	// Items tab.
 	"history.items.filter_query":      {Text: "Search"},
@@ -100,6 +147,9 @@ var historyMessages = gwci18n.NamespaceCatalog{
 
 	// Item edit form (forms_ui.go).
 	"history.items.guid_never_changes":        {Text: "The GUID never changes, even across corrections."},
+	"history.items.filter_query_placeholder":  {Text: "Search titles and text…"},
+	"history.items.field_feed":                {Text: "Feed"},
+	"history.items.field_feed_none":           {Text: "No feeds available — create a feed before adding an item to it."},
 	"history.items.field_title":               {Text: "Title"},
 	"history.items.field_summary":             {Text: "Summary"},
 	"history.items.field_body":                {Text: "Body"},
@@ -118,9 +168,21 @@ var historyMessages = gwci18n.NamespaceCatalog{
 	"history.items.correction_summary":         {Text: "Correction summary"},
 	"history.items.correction_body":            {Text: "Correction body"},
 
-	// Revisions panel.
-	"history.items.revisions_session_notice": {Text: "Revisions are visible for this session only."},
-	"history.items.no_revisions":             {Text: "No revisions yet."},
+	// Revisions panel (TODOS.md D3-15: real ItemService.ListRevisions/
+	// RevertRevision, not the earlier session-local snapshot stopgap).
+	"history.items.no_revisions": {Text: "No revisions yet."},
+	// history.items.revert_notice sits next to the Revert control (PLAN.md
+	// §12.4: revert "is an ordinary edit, not a rewind") — "revert" reads
+	// like undo, so this states plainly that it creates a new revision and
+	// never deletes or rewrites the ones in between.
+	"history.items.revert_notice": {Text: "Reverting creates a new revision recording this change — it never deletes or rewrites history."},
+	// history.items.revert_conflict/revert_conflict_reload are
+	// IsVersionConflict's (mutationerror.go) dedicated wording: the item
+	// changed since this page last loaded it, so the operator gets a real
+	// choice (reload, then decide) instead of a silent clobber or an
+	// undifferentiated "rejected" message.
+	"history.items.revert_conflict":        {Text: "This item changed since it was loaded, so the revert was not applied."},
+	"history.items.revert_conflict_reload": {Text: "Reload the latest version"},
 
 	// Shared six-state matrix, scoped to this page (see keys_common.go's
 	// state.* for the shared web/ui version — this page's own Catalog

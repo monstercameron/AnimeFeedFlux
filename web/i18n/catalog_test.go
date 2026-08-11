@@ -21,11 +21,12 @@ var allDeclaredAuthKeys = []string{
 	KeyRecoverPasswordTooShort, KeyRecoverPasswordTooLong, KeyRecoverResetSubmit, KeyRecoverReenrollHeading,
 	KeyRecoverReenrollIntro, KeyRecoverReenrollSubmit, KeyRecoverReenrollProvisioned, KeyRecoverDoneHeading,
 	KeyRecoverDoneBody, KeyRecoverDoneGoToLogin, KeyRecoverBreakGlassHeading, KeyRecoverBreakGlassBody,
-	KeyRecoverBreakGlassCommandNote,
+	KeyRecoverBreakGlassCommandNote, KeyRecoverSavedConfirm,
 }
 
 var allDeclaredCommonKeys = []string{
 	KeyCommonGenericAuthError, KeyCommonBackoffNotice, KeyCommonBack, KeyCommonSubmitting,
+	KeyCommonConnectionUnreachable, KeyCommonBackoffCleared,
 	KeyActionSave, KeyActionCancel, KeyActionRetry, KeyActionClose, KeyActionDismiss, KeyActionConfirmDestroy,
 	KeyStateLoading, KeyStateEmpty, KeyStateError, KeyStateDisabled, KeyStateDisconnected,
 	KeyConfirmTypePhrase, KeyConfirmTypeLabel, KeyKebabActionsFor,
@@ -33,10 +34,24 @@ var allDeclaredCommonKeys = []string{
 
 // allDeclaredShellKeys mirrors allDeclaredCommonKeys for keys_shell.go
 // (D6-09).
+// Every header key was missing from this slice, which is why
+// TestNoOrphanCatalogueEntries has been failing on the five header.nav.*/
+// header.signOut entries since they were added: the constants and the
+// catalogue entries both existed, but this hand-maintained list — the only
+// thing either test in this file is driven from — was never extended, so
+// each real key looked like a dead one. Adding a constant WITHOUT adding it
+// here is the failure mode; TODOS.md D6-22's "the sweep should not have to
+// be manual" is about exactly this shape of gap.
 var allDeclaredShellKeys = []string{
 	KeyShellBannerDisconnected, KeyShellBannerReconnectingIn,
 	KeyShellExpiryTitle, KeyShellExpiryBody, KeyShellExpiryLogin,
 	KeyShellGuardRedirectNotice, KeyShellNotImplemented,
+	KeyShellHeaderNavLabel, KeyShellHeaderNavGenerate,
+	KeyShellHeaderNavHistory, KeyShellHeaderNavSettings,
+	KeyShellHeaderSignOut, KeyShellHeaderSignOutBusy, KeyShellHeaderSignOutError,
+	KeyShellHeaderBrandLabel, KeyShellHeaderBrandHomeLabel,
+	KeyShellHeaderThemeLabel, KeyShellHeaderThemeSystem,
+	KeyShellHeaderThemeLight, KeyShellHeaderThemeDark,
 }
 
 // TestEveryDeclaredKeyResolves is the D6-22 half ("every key referenced by

@@ -39,6 +39,32 @@ const (
 	// that reason specifically, as opposed to disabled-with-reason's
 	// other causes).
 	KeyCommonSubmitting = "submitting"
+
+	// KeyCommonConnectionUnreachable is what a failed sign-in renders when
+	// the RPC never reached the server at all, as opposed to reaching it and
+	// being rejected. §12.1's "one generic error string" rule exists to stop
+	// WHICH CREDENTIAL was wrong from becoming an oracle; it was never about
+	// hiding connectivity, and "the server is unreachable, nothing was sent"
+	// leaks nothing about any account.
+	//
+	// Declared here 2026-08-10 because it was NOT: web/pages/auth/
+	// backoff_display.go has carried `const keyConnectionUnreachable =
+	// "connectionUnreachable"` with a doc comment openly stating the
+	// catalogue entry was "out of this task's allowed paths", so the login
+	// page rendered the literal string "common.connectionUnreachable" to the
+	// operator on every unreachable-server sign-in. Reported from a real
+	// browser, not found by any test — and not found by this session's own
+	// first sweep either, which only checked NAMESPACE-PREFIXED key literals
+	// and so could not see a bare one that gets its namespace from
+	// intl.NS(NSCommon) at the call site.
+	KeyCommonConnectionUnreachable = "connectionUnreachable"
+
+	// KeyCommonBackoffCleared is the completion-side counterpart to
+	// KeyCommonBackoffNotice: announced once when the estimated backoff
+	// window elapses, so a screen-reader user who heard "try again in 8s"
+	// also hears when that stopped being true. Same missing-catalogue
+	// history as KeyCommonConnectionUnreachable above.
+	KeyCommonBackoffCleared = "backoffCleared"
 )
 
 // web/ui's shared primitives (D6-14, PLAN.md §12.6) render only these
@@ -118,6 +144,11 @@ var commonMessages = gwci18n.NamespaceCatalog{
 	},
 	KeyCommonBack:       {Text: "Back"},
 	KeyCommonSubmitting: {Text: "Working…"},
+	// States what happened and what it means, and is explicit that nothing
+	// was sent — an operator who has just deployed needs to know whether to
+	// re-check the password or the server.
+	KeyCommonConnectionUnreachable: {Text: "Couldn't reach the server — nothing was sent. Check the connection and try again."},
+	KeyCommonBackoffCleared:        {Text: "You can try again now."},
 
 	KeyActionSave:           {Text: "Save"},
 	KeyActionCancel:         {Text: "Cancel"},

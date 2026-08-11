@@ -10,6 +10,7 @@
 //	affi18n check --catalogue=<path> [dir]
 //	affi18n ratchet --baseline=<path> [dir]
 //	affi18n pseudo [string...]
+//	affi18n pseudo-catalog
 //
 // dir defaults to "web". Every subcommand exits non-zero on failure and
 // prints findings as "path:line:col: rule: text" so they're clickable in a
@@ -41,6 +42,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		return runRatchet(rest, stdout, stderr)
 	case "pseudo":
 		return runPseudo(rest, stdout, stderr)
+	case "pseudo-catalog":
+		return runPseudoCatalog(stdout, stderr)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return 0
@@ -57,7 +60,10 @@ func printUsage(w *os.File) {
   affi18n check --catalogue=<path> [dir]
   affi18n ratchet --baseline=<path> [dir]
   affi18n pseudo [string...]
+  affi18n pseudo-catalog
 
-dir defaults to "web".
+dir defaults to "web". pseudo-catalog runs the real "en" catalogue
+(web/i18n) through the pseudolocalizer and prints every entry, failing if
+any entry's placeholder count changes.
 `)
 }
