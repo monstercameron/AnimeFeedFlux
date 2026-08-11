@@ -797,11 +797,18 @@ func (s *server) handleItem(w http.ResponseWriter, r *http.Request) {
 	}
 	// Keyed under the feed's slug (not just the item key) so
 	// Cache.Invalidate(slug) — called by the control plane on any write
-	// that changes this item (§11) — drops the permalink too.
-	s.cache.Put(feed.Slug+":item:"+itemKey, e)
-	// Also index it under the plain lookup key so a second request for the
-	// same item is a hit regardless of which key populated it first.
-	s.cache.Put(cacheKey, e)
+	// that changes this item (§11) — drops the permalink too, and ALSO under
+	// the plain lookup key, which is the one the read path above can check
+	// before it knows the slug.
+	//
+	// PutPair rather than two Puts: Invalidate reaches the bare key only by
+	// walking to the prefixed one, so the two must never be separable. They
+	// were, under the LRU ceiling — the read path returns on a bare-key hit,
+	// so the prefixed twin was written once and never read again, making it
+	// the first thing evicted and permanently orphaning the bare key that
+	// Invalidate then could not see. A deleted item's permalink kept serving
+	// its original body. See Cache.PutPair and cacheItem.pair.
+	s.cache.PutPair(feed.Slug+":item:"+itemKey, cacheKey, e)
 	writeEntry(w, r, e)
 }
 

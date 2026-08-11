@@ -109,6 +109,22 @@ type cacheItem struct {
 	key   string
 	entry Entry
 	size  int64
+
+	// pair is the key of this entry's twin, or "" when it has none.
+	//
+	// A permalink is cached twice — "<slug>:item:<key>" so Invalidate(slug)
+	// can find it, and a bare "item:<key>" because the read path has only
+	// the item key before its database lookup — and Invalidate reaches the
+	// bare key ONLY by walking to the prefixed one first. That made the two
+	// halves separable by eviction, and not merely in theory: the read path
+	// checks the bare key first and returns on a hit, so the prefixed twin
+	// is written once and never read again. Its recency never improves, so
+	// it is exactly what an LRU evicts first — orphaning a bare key that
+	// Invalidate can no longer see, which serves the pre-deletion body for
+	// the life of the process. Linking them makes "the two keys leave
+	// together" a property of the cache rather than something every removal
+	// path has to remember.
+	pair string
 }
 
 // entrySize is what an entry costs: both representations, since both are held
@@ -148,7 +164,16 @@ func (c *Cache) Get(key string) (Entry, bool) {
 		return Entry{}, false
 	}
 	c.order.MoveToFront(el)
-	return el.Value.(*cacheItem).entry, true
+	// A hit on either half refreshes both, so the pair travels the recency
+	// list together and a twin nothing ever reads directly does not sink to
+	// the eviction end on its own. See cacheItem.pair.
+	it := el.Value.(*cacheItem)
+	if it.pair != "" {
+		if pel, ok := c.entries[it.pair]; ok {
+			c.order.MoveToFront(pel)
+		}
+	}
+	return it.entry, true
 }
 
 // Put stores (or replaces) the entry for key, then evicts from the
@@ -162,19 +187,48 @@ func (c *Cache) Get(key string) (Entry, bool) {
 func (c *Cache) Put(key string, e Entry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.putLocked(key, e)
+	c.evictLocked()
+}
 
+// PutPair stores one entry under two keys that must live and die together —
+// the permalink case described on cacheItem.pair. Both are inserted before
+// any eviction runs, so the second insertion can never push the first out
+// before the two are linked.
+func (c *Cache) PutPair(primary, alias string, e Entry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.putLocked(primary, e)
+	c.putLocked(alias, e)
+	if el, ok := c.entries[primary]; ok {
+		el.Value.(*cacheItem).pair = alias
+	}
+	if el, ok := c.entries[alias]; ok {
+		el.Value.(*cacheItem).pair = primary
+	}
+	c.evictLocked()
+}
+
+// putLocked inserts or replaces one key, leaving any existing pair link
+// intact — a re-render of a permalink replaces the bytes, not the pairing.
+// The caller holds the lock and is responsible for calling evictLocked.
+func (c *Cache) putLocked(key string, e Entry) {
 	if el, ok := c.entries[key]; ok {
 		it := el.Value.(*cacheItem)
 		c.subLocked(it)
 		it.entry, it.size = e, entrySize(e)
 		c.addLocked(it)
 		c.order.MoveToFront(el)
-	} else {
-		it := &cacheItem{key: key, entry: e, size: entrySize(e)}
-		c.entries[key] = c.order.PushFront(it)
-		c.addLocked(it)
+		return
 	}
+	it := &cacheItem{key: key, entry: e, size: entrySize(e)}
+	c.entries[key] = c.order.PushFront(it)
+	c.addLocked(it)
+}
 
+// evictLocked drops least-recently-used entries until the cache is back
+// inside its ceiling. The caller holds the lock.
+func (c *Cache) evictLocked() {
 	if c.max <= 0 {
 		return
 	}
@@ -183,6 +237,8 @@ func (c *Cache) Put(key string, e Entry) {
 		if back == nil {
 			return
 		}
+		// May remove two entries when the victim is half of a pair, which is
+		// the point — it cannot leave an orphan behind.
 		c.removeLocked(back)
 	}
 }
@@ -204,9 +260,25 @@ func (c *Cache) subLocked(it *cacheItem) {
 	c.gzipBytes -= int64(len(it.entry.GzipBody))
 }
 
-// removeLocked drops one element from both the list and the map. The caller
-// holds the lock.
+// removeLocked drops an element and, if it is half of a pair, its twin with
+// it — for any reason an entry leaves, eviction included. The twin's link is
+// cleared before it is dropped so the two cannot chase each other. The
+// caller holds the lock.
 func (c *Cache) removeLocked(el *list.Element) {
+	it := el.Value.(*cacheItem)
+	c.dropLocked(el)
+	if it.pair == "" {
+		return
+	}
+	if pel, ok := c.entries[it.pair]; ok {
+		pel.Value.(*cacheItem).pair = ""
+		c.dropLocked(pel)
+	}
+}
+
+// dropLocked removes exactly one element from both the list and the map,
+// following no links. The caller holds the lock.
+func (c *Cache) dropLocked(el *list.Element) {
 	it := el.Value.(*cacheItem)
 	c.order.Remove(el)
 	delete(c.entries, it.key)
