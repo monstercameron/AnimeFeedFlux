@@ -24,12 +24,14 @@ import (
 	"github.com/monstercameron/GoWebComponents/v5/fetch"
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
 	"github.com/monstercameron/GoWebComponents/v5/interop"
+	"github.com/monstercameron/GoWebComponents/v5/router"
 	"github.com/monstercameron/GoWebComponents/v5/state"
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/web/appstate"
+	historypage "github.com/monstercameron/AnimeFeedFlux/web/pages/history"
 	"github.com/monstercameron/AnimeFeedFlux/web/shell"
 	wui "github.com/monstercameron/AnimeFeedFlux/web/ui"
 )
@@ -170,8 +172,16 @@ func newFeedDraft(g *affv1.Settings_Generation) *affv1.Feed {
 	// complaining about a field that visibly shows a legal value. Generative
 	// is also the right default: it is the kind that needs no sources.
 	return &affv1.Feed{
-		Spec:       spec,
-		Kind:       affv1.FeedKind_FEED_KIND_GENERATIVE,
+		Spec: spec,
+		Kind: affv1.FeedKind_FEED_KIND_GENERATIVE,
+		// Enabled. A feed created disabled cannot even be PREVIEWED — the
+		// sampler refuses a disabled feed — so the first thing a new feed did
+		// was tell the operator three times that it was switched off, with no
+		// hint that they had to switch it on before anything would work. The
+		// safety net for "it started spending on its own" is the budgets and
+		// ceilings this draft carries plus the global kill switch, not a
+		// feed that silently does nothing.
+		Enabled:    true,
 		TtlMinutes: newFeedTTLMinutes,
 	}
 }
@@ -181,6 +191,9 @@ func newFeedDraft(g *affv1.Settings_Generation) *affv1.Feed {
 // mounts/unmounts it on navigation like any other page.
 func Render() ui.Node {
 	sess := state.UseAtomKey(shell.SessionAtom)
+	// nav takes the operator to a feed's run history — see the OnHistory
+	// handlers below.
+	nav := router.UseNavigate()
 	connected := sess.Get() != appstate.Disconnected
 	killed := sess.Get() == appstate.Killed
 
@@ -249,6 +262,9 @@ func Render() ui.Node {
 	railKebab := ui.UseState("")
 	// stripMenu is whether the strip's per-feed ⋯ menu is open.
 	stripMenu := ui.UseState(false)
+	// lastRun is the run this page most recently started with Run now, and
+	// what became of it. See render_runstatus.go.
+	lastRun := ui.UseState(runStatus{})
 
 	// Effort is a per-preview knob on the strip; it is not a recipe field
 	// today, so it lives here rather than on the draft feed.
@@ -403,12 +419,16 @@ func Render() ui.Node {
 
 	railProps := railProps{
 		Connected: connected,
-		Resource:  feedsRes,
-		Stats:     statsRes,
-		Items:     itemsRes,
-		Runs:      runsRes,
-		Selected:  selectedSlug.Get(),
-		Err:       railErr.Get(),
+		// settings.generation.staleness_threshold_minutes, which nothing read
+		// before: the rail used a hardcoded 24h constant, so lowering the
+		// threshold to catch a stalling feed changed nothing (A5-01).
+		StaleThresholdMinutes: settingsRes.Get().Value.GetSettings().GetGeneration().GetStalenessThresholdMinutes(),
+		Resource:              feedsRes,
+		Stats:                 statsRes,
+		Items:                 itemsRes,
+		Runs:                  runsRes,
+		Selected:              selectedSlug.Get(),
+		Err:                   railErr.Get(),
 		OnSelect: func(slug string) {
 			selectedSlug.Set(slug)
 			creatingNew.Set(false)
@@ -451,15 +471,64 @@ func Render() ui.Node {
 				return
 			}
 			railErr.Set(nil)
+			lastRun.Set(runStatus{FeedID: f.GetId(), FeedSlug: f.GetSlug()})
 			pump.Run(func(done func()) {
 				defer done()
-				_, err := deps.Feed.RunNow(context.Background(), &affv1.FeedServiceRunNowRequest{FeedId: f.GetId()})
+				resp, err := deps.Feed.RunNow(context.Background(), &affv1.FeedServiceRunNowRequest{FeedId: f.GetId()})
 				if err != nil {
+					// A refusal to START — the kill switch, a budget cap, or a
+					// run already in progress — is a different thing from a run
+					// that started and failed, and is reported as such.
 					railErr.Set(err)
+					lastRun.Update(func(prev runStatus) runStatus {
+						prev.Err = err
+						return prev
+					})
 					return
 				}
+				runID := resp.GetRunId()
+				lastRun.Update(func(prev runStatus) runStatus {
+					prev.RunID = runID
+					return prev
+				})
 				feedsRes.Reload()
+
+				// Follow the run to its end. The pump is held for the whole
+				// poll (this func has not returned), which is what keeps the
+				// timers below firing — see web/ui/pump.go.
+				for i := 0; i < runStatusMaxPolls; i++ {
+					time.Sleep(runStatusPollInterval * time.Second)
+					got, gErr := deps.Run.Get(context.Background(), &affv1.RunServiceGetRequest{RunId: runID})
+					if gErr != nil {
+						// A poll that fails is not the run failing: keep the
+						// line as it was and try again.
+						continue
+					}
+					run := got.GetRun()
+					lastRun.Update(func(prev runStatus) runStatus {
+						if prev.RunID != runID {
+							return prev // superseded by a newer run
+						}
+						prev.Run = run
+						return prev
+					})
+					if st := run.GetStatus(); st != affv1.RunStatus_RUN_STATUS_RUNNING &&
+						st != affv1.RunStatus_RUN_STATUS_UNSPECIFIED {
+						// Finished: the feed's last-built time and the items
+						// it produced have both moved.
+						feedsRes.Reload()
+						itemsRes.Reload()
+						runsRes.Reload()
+						return
+					}
+				}
 			})
+		},
+		OnHistory: func(f *affv1.Feed) {
+			if f == nil {
+				return
+			}
+			nav.Navigate(historypage.FeedRunsPath(f.GetId()))
 		},
 		KebabOpen: railKebab.Get(),
 		OnKebabOpen: func(slug string, open bool) {
@@ -488,16 +557,19 @@ func Render() ui.Node {
 	}
 
 	editorProps := editorProps{
-		Connected:      connected,
-		Draft:          draft.Get(),
-		Loaded:         loadedSnapshot.Get(),
-		IsNew:          creatingNew.Get(),
-		FieldErrs:      fieldErrs.Get(),
-		Saving:         saving.Get(),
-		SaveErr:        saveErr.Get(),
-		ValidateErr:    validateErr.Get(),
-		ConflictTheirs: conflictTheirs.Get(),
-		Resolution:     conflictChoice.Get(),
+		Models:            modelsRes.Get().Value.GetModels(),
+		ModelsUnavailable: modelsRes.Get().Value.GetUnavailable(),
+		ModelsReason:      modelsRes.Get().Value.GetUnavailableReason(),
+		Connected:         connected,
+		Draft:             draft.Get(),
+		Loaded:            loadedSnapshot.Get(),
+		IsNew:             creatingNew.Get(),
+		FieldErrs:         fieldErrs.Get(),
+		Saving:            saving.Get(),
+		SaveErr:           saveErr.Get(),
+		ValidateErr:       validateErr.Get(),
+		ConflictTheirs:    conflictTheirs.Get(),
+		Resolution:        conflictChoice.Get(),
 		OnFieldChange: func(mutate func(*affv1.Feed)) {
 			d := draft.Get()
 			if d == nil {
@@ -811,6 +883,7 @@ func Render() ui.Node {
 		Temp:     tempOverride.Get(),
 		OnTemp:   func(f float64) { tempOverride.Set(f) },
 		// Feed CRUD, on the strip where it can be seen.
+		Creating:     creatingNew.Get(),
 		Dirty:        DraftDirty(loadedSnapshot.Get(), draft.Get()),
 		Saving:       saving.Get(),
 		OnSave:       editorProps.OnSave,
@@ -819,6 +892,10 @@ func Render() ui.Node {
 		FeedEnabled:  editorProps.Loaded.GetEnabled(),
 		OnToggleEnabled: func() {
 			railProps.OnToggleEnabled(editorProps.Loaded)
+		},
+		OnHistory: func() {
+			stripMenu.Set(false)
+			nav.Navigate(historypage.FeedRunsPath(editorProps.Loaded.GetId()))
 		},
 		MenuOpen:   stripMenu.Get(),
 		OnMenuOpen: stripMenu.Set,
@@ -919,10 +996,17 @@ func Render() ui.Node {
 
 	return renderWorkbench(workbenchProps{
 		Strip: strip,
-		Stakes: renderStakes(stakesProps{
-			Feed:    editorProps.Loaded,
-			Enabled: editorProps.Loaded.GetEnabled(),
-		}),
+		Stakes: h.Fragment(
+			renderStakes(stakesProps{
+				Feed:    editorProps.Loaded,
+				Enabled: editorProps.Loaded.GetEnabled(),
+			}),
+			renderRunStatus(runStatusProps{
+				Status:      lastRun.Get(),
+				HistoryHref: historypage.FeedRunsPath(lastRun.Get().FeedID),
+				OnDismiss:   func() { lastRun.Set(runStatus{}) },
+			}),
+		),
 		Prompts: prompts,
 		Preview: ui.CreateElement(renderSampler, samplerProps),
 		// The feed list is its own disclosure, not a stowaway inside "Recipe

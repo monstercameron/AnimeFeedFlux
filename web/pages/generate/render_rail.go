@@ -31,8 +31,17 @@ import (
 
 type railProps struct {
 	Connected bool
-	Resource  fetch.AsyncResource[[]*affv1.Feed]
-	Stats     fetch.AsyncResource[*affv1.SystemServiceStatsResponse]
+	// StaleThresholdMinutes is settings.generation.staleness_threshold_minutes.
+	//
+	// It was a write-only setting: stored, editable, displayed by `aff system`,
+	// and read by nothing — this rail used a hardcoded 24h constant instead, so
+	// an operator lowering the threshold to catch a stalling feed changed a
+	// number on a screen and nothing about which rows flagged stale (A5-01).
+	// Zero means unset and falls back to that same constant, so an untouched
+	// deployment behaves exactly as before.
+	StaleThresholdMinutes int32
+	Resource              fetch.AsyncResource[[]*affv1.Feed]
+	Stats                 fetch.AsyncResource[*affv1.SystemServiceStatsResponse]
 	// Items/Runs feed the tape and the 7-day spend column — see render.go's
 	// itemsRes/runsRes doc comments for why they are fetched flat (one
 	// request across every feed) rather than per-row.
@@ -57,6 +66,8 @@ type railProps struct {
 	// RPC for feeds, so from this screen it is irreversible — hence the typed
 	// confirmation at the call site.
 	OnDelete func(*affv1.Feed)
+	// OnHistory opens one feed's run history (/history/runs?feed=...).
+	OnHistory func(*affv1.Feed)
 	// KebabOpen/OnKebabOpen track which row's overflow menu is open, by slug.
 	// Held by the caller rather than per row so opening one closes another.
 	KebabOpen   string
@@ -107,7 +118,8 @@ func renderRail(p railProps) ui.Node {
 			listArgs = append(listArgs, anyNodes(h.MapKeyedComponent(feeds, func(f *affv1.Feed) any { return f.GetId() }, func(f *affv1.Feed) ui.Node {
 				return renderRailRow(t, fmtr, f, indexOf[f.GetId()]+1, f.GetSlug() == p.Selected,
 					itemsForFeed(items, f.GetId()), feedSpend(runs, f.GetId()),
-					p.OnSelect, p.OnToggleEnabled, p.OnRunNow, p.OnDelete,
+					p.StaleThresholdMinutes,
+					p.OnSelect, p.OnToggleEnabled, p.OnRunNow, p.OnDelete, p.OnHistory,
 					p.KebabOpen == f.GetSlug(), p.OnKebabOpen)
 			}))...)
 			return []ui.Node{h.Ul(listArgs...)}
@@ -135,7 +147,7 @@ func renderRail(p railProps) ui.Node {
 	)
 }
 
-func renderRailRow(t Translator, fmtr Formatters, f *affv1.Feed, rowNumber int, selected bool, feedItems []*affv1.Item, spend7d float64, onSelect func(string), onToggle func(*affv1.Feed), onRunNow func(*affv1.Feed), onDelete func(*affv1.Feed), kebabOpen bool, onKebabOpen func(string, bool)) ui.Node {
+func renderRailRow(t Translator, fmtr Formatters, f *affv1.Feed, rowNumber int, selected bool, feedItems []*affv1.Item, spend7d float64, staleThresholdMinutes int32, onSelect func(string), onToggle func(*affv1.Feed), onRunNow func(*affv1.Feed), onDelete func(*affv1.Feed), onHistory func(*affv1.Feed), kebabOpen bool, onKebabOpen func(string, bool)) ui.Node {
 	wt := wui.T(t.T)
 	now := time.Now()
 	var lastBuilt *time.Time
@@ -143,7 +155,11 @@ func renderRailRow(t Translator, fmtr Formatters, f *affv1.Feed, rowNumber int, 
 		tm := ts.AsTime()
 		lastBuilt = &tm
 	}
-	stale := IsStale(f.GetEnabled(), lastBuilt, now, defaultStaleThresholdMinutes)
+	threshold := staleThresholdMinutes
+	if threshold <= 0 {
+		threshold = defaultStaleThresholdMinutes
+	}
+	stale := IsStale(f.GetEnabled(), lastBuilt, now, threshold)
 
 	lastBuildText := t.T("generate.rail.neverBuilt")
 	if lastBuilt != nil {
@@ -232,10 +248,16 @@ func renderRailRow(t Translator, fmtr Formatters, f *affv1.Feed, rowNumber int, 
 				LabelKey: "generate.rail.actionsFor", LabelArgs: []any{f.GetTitle()},
 				Open:         kebabOpen,
 				OnOpenChange: func(open bool) { onKebabOpen(slug, open) },
-				Items: []wui.KebabItem{{
-					ID: "generate-rail-delete-" + slug, LabelKey: "generate.rail.delete",
-					Danger: true, OnSelect: func() { onDelete(feed) },
-				}},
+				Items: []wui.KebabItem{
+					{
+						ID: "generate-rail-history-" + slug, LabelKey: "generate.rail.history",
+						OnSelect: func() { onHistory(feed) },
+					},
+					{
+						ID: "generate-rail-delete-" + slug, LabelKey: "generate.rail.delete",
+						Danger: true, OnSelect: func() { onDelete(feed) },
+					},
+				},
 			}),
 		),
 	)
