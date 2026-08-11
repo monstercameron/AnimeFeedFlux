@@ -807,21 +807,47 @@ func (l *LoginResult) Close() {
 // settings — goes over the real WebSocket bridge, which is the part PLAN.md
 // §2/§4 actually needs proven.
 func (a *App) Login(ctx context.Context, password, totpSecret string) (*LoginResult, error) {
-	plainConn, err := grpc.NewClient(a.AdminAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, fmt.Errorf("e2e: dialing plain grpc for login: %w", err)
-	}
-	defer func() { _ = plainConn.Close() }()
+	return a.LoginAt(ctx, password, totpSecret, time.Now())
+}
 
+// LoginAt is Login, but the TOTP code is computed for totpAt instead of the
+// real wall-clock instant Login itself uses. This exists so a test can open
+// a SECOND live session shortly after the first without the second Login's
+// code being refused as a replay of the first's: internal/rpc/auth.go's
+// verifyTOTPCode marks each 30s TOTP step used exactly once
+// (store.ErrTOTPReplay), and two Logins issued milliseconds apart against
+// real time.Now() would otherwise compute the identical code for the
+// identical step. Passing totpAt = (a reference instant).Add(30*time.Second)
+// (or a further multiple) mints a code for the NEXT step instead, which
+// AuthServer's real ±1-step skew (internal/auth/totp.go's totpSkew) still
+// accepts at the moment the RPC actually lands, without colliding with a
+// code already marked used for the current step.
+func (a *App) LoginAt(ctx context.Context, password, totpSecret string, totpAt time.Time) (*LoginResult, error) {
 	// AuthServer has no injected clock (internal/rpc/auth.go's NewAuthServer
 	// hard-codes now: time.Now with no override hook), so the TOTP code must
 	// be computed against REAL wall-clock time, not this suite's fake
 	// app.Clock — a code minted against app.Clock's fixed testEpoch would
 	// never validate against AuthServer's real-time verification window.
-	code, err := TOTPCode(totpSecret, time.Now())
+	code, err := TOTPCode(totpSecret, totpAt)
 	if err != nil {
 		return nil, fmt.Errorf("e2e: computing totp code: %w", err)
 	}
+	return a.LoginWithCode(ctx, password, code)
+}
+
+// LoginWithCode is Login/LoginAt's shared core: it takes an already-computed
+// TOTP code directly rather than a secret+instant to derive one from. Split
+// out so a test can exercise Login with a code it constructed some other
+// way — e.g. sessions_test.go's negative case, which deliberately REUSES an
+// already-consumed code to prove a wrong password is refused before the
+// TOTP check is ever reached, without that reuse being mistaken for the
+// thing under test (a replay).
+func (a *App) LoginWithCode(ctx context.Context, password, code string) (*LoginResult, error) {
+	plainConn, err := grpc.NewClient(a.AdminAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("e2e: dialing plain grpc for login: %w", err)
+	}
+	defer func() { _ = plainConn.Close() }()
 
 	authClient := affv1.NewAuthServiceClient(plainConn)
 	var header metadata.MD

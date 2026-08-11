@@ -1,8 +1,3 @@
-// Package testutil also holds the deterministic fixtures every renderer and
-// store test builds on (PLAN.md §17.1): a seeded feed, items and channel
-// with known, stable values, so that a schema change is one edit here rather
-// than twenty edits across the test suite, and so golden files stay stable
-// run to run.
 package testutil
 
 import (

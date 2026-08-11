@@ -9,10 +9,21 @@
 package flowtest
 
 import (
+	"context"
+	"net"
+	"strconv"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+
+	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/internal/auth"
+	"github.com/monstercameron/AnimeFeedFlux/internal/rpc"
 	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 )
 
@@ -216,15 +227,172 @@ func TestJ7_RecoveryAttemptAppearsInAuthEvents(t *testing.T) {
 	}
 }
 
-// TestJ7_ElevatedSessionScope_Skip documents BF-32, which cannot be tested
-// yet: internal/auth.Session and the sessions table carry no scope/elevation
-// concept at all (migrations/0001_auth.sql), so "reaches only password
-// change and TOTP re-enrollment" has nothing to assert against until
-// AuthService (B1-02) mints a scoped elevated session and its interceptor
-// (B1-08) enforces that scope on every RPC. Faking a scope check here would
-// only prove this test file agrees with itself, not that the real system
-// enforces anything — exactly the "fabricated passing test" this package
-// must not produce.
-func TestJ7_ElevatedSessionScope_Skip(t *testing.T) {
-	t.Skip("BF-32 needs AuthService's elevated-session scope (B1-02) enforced by the RPC interceptor (B1-08); neither exists yet, and sessions carry no scope field to assert against")
+// j7BuildAuthRPCServer stands up a real, minimal *grpc.Server exposing ONLY
+// AuthService, with authSrv's own session interceptor (internal/rpc/
+// interceptor.go's UnaryInterceptor) chained in front of every call — the
+// same shape internal/e2e/app.go's plain, pre-bridge listener uses for
+// Login, reproduced here because this package may not import internal/e2e
+// (a `_test`-suffixed sibling suite, not a library) and may not edit
+// internal/rpc or internal/bridge to expose a shared test helper. This is
+// what turns BF-32 from "does the interceptor's logic look right in
+// isolation" into "does a real RPC call over a real network connection get
+// refused or allowed exactly as PLAN.md §12.2 requires" (§17.5).
+func j7BuildAuthRPCServer(t *testing.T, w *World) (authSrv *rpc.AuthServer, addr string) {
+	t.Helper()
+	authSrv, err := rpc.NewAuthServer(w.Store, j1SecretKey)
+	if err != nil {
+		t.Fatalf("rpc.NewAuthServer: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening for j7's plain grpc server: %v", err)
+	}
+	gs := grpc.NewServer(grpc.ChainUnaryInterceptor(authSrv.UnaryInterceptor()))
+	affv1.RegisterAuthServiceServer(gs, authSrv)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+	return authSrv, lis.Addr().String()
+}
+
+// j7DialAuthClient dials addr with no transport security (matching the
+// loopback, no-TLS shape every other plain-grpc test fixture in this repo
+// uses, e.g. internal/e2e/app.go's LoginWithCode).
+func j7DialAuthClient(t *testing.T, addr string) affv1.AuthServiceClient {
+	t.Helper()
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dialing j7's plain grpc server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return affv1.NewAuthServiceClient(conn)
+}
+
+// j7CtxWithToken attaches the raw session token to ctx as outgoing gRPC
+// metadata under rpc.SessionTokenHeader — interceptor.go's
+// sessionTokenFromContext documents this as the source used by "any future
+// transport that isn't internal/bridge (e.g. cmd/aff's plain-gRPC
+// session-metadata path)", which is exactly the shape of the plain
+// connection j7BuildAuthRPCServer/j7DialAuthClient set up: there is no
+// bridge.Session on this connection to carry the token instead.
+func j7CtxWithToken(ctx context.Context, token string) context.Context {
+	return metadata.AppendToOutgoingContext(ctx, rpc.SessionTokenHeader, token)
+}
+
+// TestJ7_ElevatedSessionReachesOnlyPasswordAndTOTP is BF-32. The blocker the
+// original skip named — "sessions carry no scope field, and neither
+// AuthService nor its interceptor exist" — is gone: migrations/
+// 0005_session_scope.sql added sessions.scope, AuthService is real
+// (internal/rpc/auth.go), and its UnaryInterceptor (internal/rpc/
+// interceptor.go) enforces elevatedAllowedMethods as a default-deny
+// allowlist on every single RPC, not just the two it happens to permit.
+//
+// This drives two REAL RecoverWithCode calls over a real (plain,
+// pre-bridge) grpc.Server with authSrv's own interceptor chained in front,
+// then proves: the resulting session's own row is marked elevated (real
+// state, not the in-memory tracker's opinion of itself); an ordinary
+// AuthService method with nothing bespoke about it (ListSessions — chosen
+// specifically because it is unremarkable surface, not something
+// special-cased to fail) is refused with PermissionDenied; and each of the
+// two methods §12.2 actually grants — ChangePassword and ReenrollTOTP — is
+// reachable. Two separate recovery flows are needed because a successful
+// ChangePassword or ReenrollTOTP from an elevated session ends that session
+// (auth.go's endElevatedSession), so testing both allowed methods against
+// the same still-elevated session is not possible without exercising a
+// state the real system never lets exist.
+func TestJ7_ElevatedSessionReachesOnlyPasswordAndTOTP(t *testing.T) {
+	w := New(t)
+	ctx := t.Context()
+	j1SetupAdmin(t, w)
+	recoveryCodes := j7SetupRecoveryCodes(t, w, 5)
+
+	_, addr := j7BuildAuthRPCServer(t, w)
+	client := j7DialAuthClient(t, addr)
+
+	// --- Flow 1: elevated session's scope, and the default-deny refusal ---
+	var header1 metadata.MD
+	rec1, err := client.RecoverWithCode(ctx, &affv1.AuthServiceRecoverWithCodeRequest{
+		RecoveryCode: recoveryCodes[0],
+	}, grpc.Header(&header1))
+	if err != nil {
+		t.Fatalf("RecoverWithCode (flow 1): %v", err)
+	}
+	token1 := header1.Get(rpc.SessionTokenHeader)
+	if len(token1) == 0 || token1[0] == "" {
+		t.Fatal("RecoverWithCode response carried no session token header")
+	}
+	elevatedCtx1 := j7CtxWithToken(ctx, token1[0])
+	sessID1, err := strconv.ParseInt(rec1.GetSession().GetId(), 10, 64)
+	if err != nil {
+		t.Fatalf("parsing session id %q: %v", rec1.GetSession().GetId(), err)
+	}
+
+	// BF-32 (§22 J7): an elevated session cannot reach anything but password
+	// reset and TOTP re-enrollment. ListSessions is ordinary AuthService
+	// surface with no elevated-specific branch of its own — exactly the kind
+	// of method a hand-maintained per-handler check would be most likely to
+	// forget to gate, which is why interceptor.go's default-deny allowlist
+	// matters more here than on a method that already special-cases itself.
+	if _, err := client.ListSessions(elevatedCtx1, &affv1.AuthServiceListSessionsRequest{}); err == nil {
+		t.Fatal("ListSessions unexpectedly succeeded from an elevated session")
+	} else if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("ListSessions from an elevated session: code = %v, want PermissionDenied", status.Code(err))
+	}
+
+	// The session row itself is scoped elevated — real state persisted by
+	// migration 0005, not merely the elevatedTracker's private bookkeeping.
+	// This is checked AFTER the ListSessions call above rather than right
+	// after RecoverWithCode, because interceptor.go's authorize() is what
+	// writes the scope column (RecoverWithCode itself is in
+	// noSessionMethods and short-circuits authorize entirely, per
+	// interceptor.go's own comment) — the column reflects "the scope of the
+	// last authorized call", not "the scope this session was minted with",
+	// until at least one authenticated call has gone through the
+	// interceptor. ListSessions above is exactly such a call, even though
+	// it was refused.
+	scope, err := w.Store.SessionScope(ctx, sessID1)
+	if err != nil {
+		t.Fatalf("SessionScope: %v", err)
+	}
+	if scope != store.SessionScopeElevated {
+		t.Fatalf("recovery session scope = %q, want %q", scope, store.SessionScopeElevated)
+	}
+	// RegenerateRecoveryCodes is likewise outside the allowlist (auth.go's
+	// own comment on it: "never reachable from an elevated session").
+	if _, err := client.RegenerateRecoveryCodes(elevatedCtx1, &affv1.AuthServiceRegenerateRecoveryCodesRequest{}); err == nil {
+		t.Fatal("RegenerateRecoveryCodes unexpectedly succeeded from an elevated session")
+	} else if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("RegenerateRecoveryCodes from an elevated session: code = %v, want PermissionDenied", status.Code(err))
+	}
+
+	// Allowed: ChangePassword. An elevated session skips the current-
+	// password/TOTP re-proof (ChangePassword's own doc comment) — identity
+	// was already re-proven by the single-use recovery code that minted this
+	// session.
+	if _, err := client.ChangePassword(elevatedCtx1, &affv1.AuthServiceChangePasswordRequest{
+		NewPassword: "a brand new elevated-session passphrase!!",
+	}); err != nil {
+		t.Fatalf("ChangePassword from an elevated session should be reachable, got: %v", err)
+	}
+
+	// --- Flow 2: the OTHER allowed method, ReenrollTOTP ---
+	// A fresh recovery is needed: flow 1's ChangePassword ended its own
+	// session (auth.go's endElevatedSession) and RecoverWithCode revokes
+	// every existing session on success regardless, so this is a clean new
+	// elevated session, not a reuse of flow 1's.
+	var header2 metadata.MD
+	if _, err := client.RecoverWithCode(ctx, &affv1.AuthServiceRecoverWithCodeRequest{
+		RecoveryCode: recoveryCodes[1],
+	}, grpc.Header(&header2)); err != nil {
+		t.Fatalf("RecoverWithCode (flow 2): %v", err)
+	}
+	token2 := header2.Get(rpc.SessionTokenHeader)
+	if len(token2) == 0 || token2[0] == "" {
+		t.Fatal("RecoverWithCode (flow 2) response carried no session token header")
+	}
+	elevatedCtx2 := j7CtxWithToken(ctx, token2[0])
+
+	if _, err := client.ReenrollTOTP(elevatedCtx2, &affv1.AuthServiceReenrollTOTPRequest{}); err != nil {
+		t.Fatalf("ReenrollTOTP from an elevated session should be reachable, got: %v", err)
+	}
 }

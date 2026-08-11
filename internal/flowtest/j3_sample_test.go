@@ -4,10 +4,23 @@ package flowtest
 
 import (
 	"bytes"
+	"context"
+	"io"
+	"net"
+	"strconv"
 	"testing"
+	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	"github.com/monstercameron/AnimeFeedFlux/internal/budget"
+	"github.com/monstercameron/AnimeFeedFlux/internal/generate"
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
 	"github.com/monstercameron/AnimeFeedFlux/internal/render"
+	"github.com/monstercameron/AnimeFeedFlux/internal/rpc"
+	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 )
 
 // TestJ3_SampleWritesNoItems is BF-11, called out in the task brief as the
@@ -274,5 +287,155 @@ func TestJ3_KillSwitchBlocksTheProviderEntirely(t *testing.T) {
 	}
 	if len(samples) != 0 {
 		t.Fatalf("%d samples rows exist with the kill switch on, want 0", len(samples))
+	}
+}
+
+// --- B2-06: SampleStream driven over a real network connection ---
+//
+// Every TestJ3_* test above drives World.Sample, which calls
+// generate.Sample in-process — proving the sampling pipeline's own logic,
+// never that a real client on the other end of a real socket gets the same
+// candidates back. TestB2_06_SampleStreamOverRealConnection closes that gap
+// for SampleStream specifically; RunService.Watch's real-connection half of
+// B2-06 is BF-40/41/43 in j9_watch_test.go, and TestJ7_
+// ElevatedSessionReachesOnlyPasswordAndTOTP (BF-32) already proves the
+// session interceptor works over a real connection of this same shape, so
+// this test — like j9's — registers only SampleService on a plain TCP
+// grpc.Server with no interceptor chained in; auth is not what B2-06 is
+// about. Per §17.5, it asserts on RESULTING SYSTEM STATE: the candidates
+// arrive as separate stream messages rather than one batched response, and
+// the samples row this real RPC call persisted is readable back from the
+// store afterward — not merely that the RPC returned without error.
+
+// b2FeedLookup satisfies SampleServerConfig.Feeds against this package's
+// real store, handing back validSampleSpec() for every feed — the same
+// "a fixed, valid generate.Spec supplied directly" pattern this package's
+// own doc comment already establishes (the scheduler that would map a
+// stored FeedSpec into a live generate.Spec, PLAN.md A7, does not exist
+// yet).
+type b2FeedLookup struct{ w *World }
+
+func (l b2FeedLookup) GetFeedForSample(ctx context.Context, feedID int64) (model.Feed, generate.Spec, error) {
+	f, found, err := l.w.feedByID(ctx, feedID)
+	if err != nil {
+		return model.Feed{}, generate.Spec{}, err
+	}
+	if !found {
+		return model.Feed{}, generate.Spec{}, store.ErrNotFound
+	}
+	return f, validSampleSpec(), nil
+}
+
+// b2AlwaysAllowBudget always allows: budget enforcement is BF-13's job, not
+// B2-06's.
+type b2AlwaysAllowBudget struct{}
+
+func (b2AlwaysAllowBudget) CheckSample(ctx context.Context, feedID int64, projectedTokens int) budget.Decision {
+	return budget.Decision{Allow: true}
+}
+
+func (b2AlwaysAllowBudget) RemainingDailyUSD(ctx context.Context, feedID int64) (float64, error) {
+	return 100, nil
+}
+
+// b2BuildSampleRPCServer stands up a real, minimal *grpc.Server exposing
+// ONLY SampleService against w's real store, over a real TCP loopback
+// listener — the same shape j9BuildRunRPCServer (j9_watch_test.go) uses.
+func b2BuildSampleRPCServer(t *testing.T, w *World) (addr string) {
+	t.Helper()
+	srv := rpc.NewSampleServer(rpc.SampleServerConfig{
+		Feeds:    b2FeedLookup{w: w},
+		GenStore: storeAdapter{s: w.Store},
+		Provider: w.Provider,
+		IDs:      w.IDs,
+		Budget:   b2AlwaysAllowBudget{},
+		Samples:  w.Store,
+		Enabled:  func(context.Context) (bool, string, error) { return true, "", nil },
+		Now:      w.Clock.Now,
+	})
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening for b2's plain grpc server: %v", err)
+	}
+	gs := grpc.NewServer()
+	affv1.RegisterSampleServiceServer(gs, srv)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+	return lis.Addr().String()
+}
+
+// TestB2_06_SampleStreamOverRealConnection is B2-06's SampleStream half.
+func TestB2_06_SampleStreamOverRealConnection(t *testing.T) {
+	w := New(t)
+	ctx := t.Context()
+
+	feed, err := w.CreateFeed(ctx, validGenerativeFeed("b2-06-samplestream"))
+	if err != nil {
+		t.Fatalf("CreateFeed: %v", err)
+	}
+	w.Provider.QueueResult(validGenerateResult(
+		"Real-connection candidate one",
+		"Real-connection candidate two",
+	))
+
+	addr := b2BuildSampleRPCServer(t, w)
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dialing b2's plain grpc server: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	client := affv1.NewSampleServiceClient(conn)
+
+	streamCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	stream, err := client.SampleStream(streamCtx, &affv1.SampleServiceSampleStreamRequest{
+		FeedId:     feed.ID,
+		SampleSize: 2,
+	})
+	if err != nil {
+		t.Fatalf("SampleStream: %v", err)
+	}
+
+	var sampleID string
+	var titles []string
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("stream.Recv: %v", err)
+		}
+		if msg.GetSampleId() != "" {
+			sampleID = msg.GetSampleId()
+		}
+		if c := msg.GetCandidate(); c != nil {
+			titles = append(titles, c.GetTitle())
+		}
+	}
+
+	// B2-06: the candidates were delivered as separate stream messages over
+	// the real connection, not one batched response.
+	if len(titles) != 2 {
+		t.Fatalf("SampleStream delivered %d candidate messages over the real connection, want 2 (titles: %v)", len(titles), titles)
+	}
+
+	// §17.5: resulting system state, not a mock's call log — the samples
+	// row this real RPC call persisted is readable back from the store,
+	// over the real connection, matching BF-12's in-process assertion.
+	if sampleID == "" {
+		t.Fatal("SampleStream never sent a sample id over the real connection")
+	}
+	id, err := strconv.ParseInt(sampleID, 10, 64)
+	if err != nil {
+		t.Fatalf("parsing sample id %q: %v", sampleID, err)
+	}
+	row, err := w.SampleRow(ctx, id)
+	if err != nil {
+		t.Fatalf("reading back the samples row SampleStream persisted, over the real connection: %v", err)
+	}
+	if row.FeedID != feed.ID {
+		t.Fatalf("persisted sample row feed_id = %d, want %d", row.FeedID, feed.ID)
 	}
 }

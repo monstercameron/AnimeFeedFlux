@@ -241,7 +241,15 @@ func (a runStoreAdapter) CommitRun(ctx context.Context, run generate.RunRecord, 
 	case generate.StatusCompleted:
 		return a.st.CommitRun(ctx, runID, items, summary)
 	case generate.StatusSkipped:
-		return a.st.SkipRun(ctx, runID, run.Error)
+		// Mirrors cmd/animefeedflux/wire.go's genStoreAdapter.CommitRun
+		// exactly (reason = run.ErrorKind, summary passed through) — that
+		// file's own comment documents why the naive `SkipRun(ctx, runID,
+		// run.Error)` this adapter used to call is wrong: run.Error is empty
+		// for a skip (skipping is not an error), and omitting summary
+		// silently records a skipped run's real token/cost spend and reject
+		// reasons as zero, even though the novelty-retry loop (§9 step 5)
+		// may have made several real provider calls before giving up.
+		return a.st.SkipRun(ctx, runID, run.ErrorKind, summary)
 	default:
 		return a.st.FailRun(ctx, runID, run.ErrorKind, run.Error, summary)
 	}

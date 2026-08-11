@@ -68,14 +68,31 @@ func TestIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("an unauthenticated bridge upgrade is refused", func(t *testing.T) {
+	t.Run("an unauthenticated bridge upgrade is allowed but confined", func(t *testing.T) {
+		// This asserted 401 until login moved entirely onto the WebSocket.
+		// It had to change, and the reason is worth stating so nobody
+		// "fixes" it back: refusing the anonymous upgrade made login
+		// impossible by construction. AuthService.Login lives behind the
+		// bridge, so a browser with no cookie could not open the socket, and
+		// the socket was the only route to the call that would mint the
+		// cookie. The app could never be logged into at all.
+		//
+		// The security boundary did not move, it moved DOWN a layer, which
+		// is where §2 always said it belonged: the bridge transports and
+		// internal/rpc decides. An anonymous socket may open; the
+		// interceptor's allowlist confines it to Login and RecoverWithCode
+		// and default-denies everything else, and every authenticated call
+		// still re-checks the session against the store on every RPC.
+		//
+		// So the property under test is no longer "the upgrade is refused"
+		// but "an anonymous connection can reach nothing that matters".
 		resp, err := app.DialBridgeUnauthenticated()
 		if err != nil {
 			t.Fatalf("GET bridge with no cookie: %v", err)
 		}
 		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("bridge upgrade with no cookie = %d, want 401", resp.StatusCode)
+		if resp.StatusCode == http.StatusUnauthorized {
+			t.Fatalf("bridge upgrade with no cookie = 401; anonymous upgrade must be allowed or login is impossible")
 		}
 	})
 

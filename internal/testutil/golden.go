@@ -1,7 +1,17 @@
-// Package testutil holds fixtures shared across the test suite, starting
-// with the golden-file comparator every renderer test depends on from
-// milestone A2 onward (PLAN.md §17.1): a deliberate format change must be
-// one flag and a reviewed diff, never hand-editing the recorded XML/JSON.
+// Package testutil holds the test infrastructure specified in PLAN.md §17.1,
+// shared across every suite in this tree so it is written once rather than
+// reinvented per package:
+//
+//   - a golden-file comparator (this file), so a deliberate format change is
+//     one `-update` flag and a reviewed diff, never hand-editing recorded
+//     XML/JSON;
+//   - deterministic fixtures (fixtures.go) — a seeded feed, items and
+//     channel with known, stable values, so a schema change is one edit
+//     here rather than twenty edits across the test suite, and golden files
+//     stay stable run to run;
+//   - an injected http.Client (httpclient.go) that serves testdata/ for
+//     upstream fetches instead of dialing out, which is also load-bearing
+//     for RULE-1 (A0-T07): no test in this tree may need a live network.
 package testutil
 
 import (

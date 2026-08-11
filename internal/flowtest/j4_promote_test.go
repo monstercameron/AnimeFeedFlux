@@ -3,12 +3,15 @@
 package flowtest
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
+	"github.com/monstercameron/AnimeFeedFlux/internal/publish"
 	"github.com/monstercameron/AnimeFeedFlux/internal/render"
+	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 )
 
 // promoteOne is the shared J4 setup every test below builds on: a feed
@@ -289,21 +292,109 @@ func TestJ4_LastBuildDateReflectsThePromotedItem(t *testing.T) {
 	}
 }
 
-// TestJ4_RenderCacheInvalidationIsUnwired documents, rather than papers
-// over, a real gap this task's brief specifically calls out as the failure
-// mode to catch ("a promote that skips cache invalidation"). PLAN.md §22 J4
-// requires "the feed's render cache was invalidated" after a promote.
-// internal/publish.Cache (cache.go) exposes Invalidate/InvalidateAll and IS
-// what publish.NewServer uses internally — but NewServer returns a bare
-// http.Handler with that *Cache unexported and unreachable from outside the
-// package, and nothing today calls Invalidate on a write: that wiring is
-// the not-yet-built PromoteSample RPC / control-plane (TODOS.md B1-04,
-// B1-07). A flow test in internal/flowtest cannot reach into another
-// package's private field to invalidate it, and building a parallel cache
-// here would test flowtest's own plumbing, not the real one. Per the task's
-// instruction to write a visible, named skip rather than silently omitting
-// the assertion:
-func TestJ4_RenderCacheInvalidationIsUnwired(t *testing.T) {
-	t.Skip("blocked on B1: no control-plane path calls publish.Cache.Invalidate on a write; " +
-		"publish.NewServer's *Cache is a private field with no external invalidation hook (PLAN.md §22 J4, BF-19)")
+// TestJ4_PromoteInvalidatesRenderCache is the cache-invalidation half of
+// BF-19. It was previously t.Skip'd on the theory that nothing outside
+// internal/publish could reach the *Cache NewServer builds internally — true
+// of NewServer itself, but internal/publish/invalidate.go now exports
+// NewServerAndInvalidator specifically to close that gap (PLAN.md §11,
+// TODOS.md RULE-6), and internal/store/hooks.go now exports Hooked to fire
+// it after a real write commits. Both pieces are real, tested code in their
+// own packages (invalidate_test.go, hooks are exercised by store's own
+// tests); this test only wires them together the way TODOS.md's wiring note
+// says a real caller eventually will, and proves the wiring actually
+// prevents a stale cache hit rather than merely compiling.
+//
+// The proof is structural, not a call-log assertion (§17.5): the cache has
+// no TTL (cache.go), so if PromoteSample's write did NOT fire the
+// invalidator, a second fetch of the same URL would return the exact same
+// cached bytes as the first — missing the promoted item. Only a real
+// invalidation between the two fetches can make the second response differ.
+func TestJ4_PromoteInvalidatesRenderCache(t *testing.T) {
+	w := New(t)
+	ctx := t.Context()
+
+	feed, err := w.CreateFeed(ctx, validGenerativeFeed("j4-cache-invalidate"))
+	if err != nil {
+		t.Fatalf("CreateFeed: %v", err)
+	}
+
+	existing := model.Item{
+		FeedID:      feed.ID,
+		ItemKey:     w.IDs.NewItemKey(w.Clock.Now()),
+		ContentHash: "j4-cache-invalidate-baseline",
+		Title:       "The item present before any promotion",
+		SummaryText: "Baseline content the first fetch should see.",
+		BodyHTML:    "<p>Baseline body.</p>",
+		Link:        "https://example.com/baseline",
+		SourceName:  "AnimeFeedFlux",
+		PublishedAt: w.Clock.Now(),
+		Origin:      model.OriginGenerated,
+		CreatedAt:   w.Clock.Now(),
+		UpdatedAt:   w.Clock.Now(),
+	}
+	if _, err := w.Store.InsertItem(ctx, existing); err != nil {
+		t.Fatalf("seeding existing item: %v", err)
+	}
+
+	// A second, independent server over the SAME store, built through
+	// NewServerAndInvalidator so this test can hold the Invalidator that
+	// server's *Cache answers requests from — the exact seam
+	// invalidate.go's doc comment describes wiring a real caller through.
+	handler, inv := publish.NewServerAndInvalidator(w.publishDeps())
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	hooked := store.NewHooked(w.Store, func(slug string) { inv.InvalidateFeed(slug) })
+
+	fetch := func() string {
+		t.Helper()
+		resp, err := srv.Client().Get(srv.URL + "/feeds/" + feed.Slug + ".xml")
+		if err != nil {
+			t.Fatalf("fetching feed: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		buf := make([]byte, 0, 4096)
+		tmp := make([]byte, 4096)
+		for {
+			n, rerr := resp.Body.Read(tmp)
+			buf = append(buf, tmp[:n]...)
+			if rerr != nil {
+				break
+			}
+		}
+		return string(buf)
+	}
+
+	// Warm the cache with the pre-promotion state.
+	before := fetch()
+	if !strings.Contains(before, existing.ItemKey) {
+		t.Fatalf("first fetch does not contain the seeded item %q:\n%s", existing.ItemKey, before)
+	}
+
+	w.Provider.QueueResult(validGenerateResult("A brand new candidate that must invalidate the cache"))
+	outcome, err := w.Sample(ctx, feed, validSampleSpec())
+	if err != nil {
+		t.Fatalf("Sample: %v", err)
+	}
+	candidate := w.StampForPromotion(outcome.Result.Items[0], feed)
+
+	// Promote through Hooked, exactly as the not-yet-built control plane
+	// will (TODOS.md B1-04/B1-07) once it holds a *Hooked instead of a bare
+	// *Store — this fires the WriteHook, and therefore inv.InvalidateFeed,
+	// synchronously after PromoteSample's own transaction commits.
+	if _, err := hooked.PromoteSample(ctx, outcome.SampleID, candidate); err != nil {
+		t.Fatalf("hooked.PromoteSample: %v", err)
+	}
+
+	// BF-19 (§22 J4): the feed's render cache was invalidated. If it were
+	// not, this fetch would return the SAME cached bytes as `before` and
+	// never see the promoted item.
+	after := fetch()
+	if !strings.Contains(after, candidate.ItemKey) {
+		t.Fatalf("fetch after promote does not contain the promoted item %q — cache was not invalidated:\nbefore:\n%s\nafter:\n%s",
+			candidate.ItemKey, before, after)
+	}
+	if after == before {
+		t.Fatal("fetch after promote returned byte-identical cached content to the pre-promote fetch — cache was not invalidated")
+	}
 }
