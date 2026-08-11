@@ -21,6 +21,7 @@ package wsconn
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"google.golang.org/grpc"
@@ -49,7 +50,12 @@ import (
 // know which path the server actually answers on) with no useful error
 // short of a browser session. "/" is used instead so this client dials
 // exactly the path the server actually serves.
-const DefaultEndpoint = "/"
+// It must stay in sync with cmd/animefeedflux/wire.go's bridgeEndpoint. It
+// was briefly "/", which forced the admin mux to give the bridge the root
+// path — and that made the SPA unreachable at its own <base href="/"> and
+// turned every client-side route into a 404. The bridge owns one explicit
+// path now so the UI can own the rest.
+const DefaultEndpoint = "/grpc"
 
 // keepaliveInterval/keepaliveTimeout are paired with
 // internal/bridge/server.go's defaultKeepaliveEnforcementPolicy (MinTime
@@ -183,6 +189,39 @@ func (c *Conn) Ready() bool {
 	return c.cc != nil && c.cc.GetState() == connectivity.Ready
 }
 
+// Usable reports whether an RPC should be ATTEMPTED, which is a different
+// question from Ready.
+//
+// gRPC connects lazily: a fresh ClientConn sits in Idle until an RPC forces
+// a dial. Gating calls on Ready alone therefore deadlocks by construction —
+// the guard refuses the very RPC that would have connected, so the state
+// never leaves Idle and every call is refused forever. That is exactly what
+// happened: the login form reported "connection unreachable" on every
+// attempt while the WebSocket underneath was perfectly healthy, because
+// nothing was ever allowed to dial through it.
+//
+// So Idle and Connecting are attemptable — gRPC will connect and, if it
+// cannot, fail the call on its own terms with a real status. Only
+// TransientFailure and Shutdown are refused up front, which is the case
+// D0-10 actually cares about: a socket known to be down, where attempting
+// would just produce a slow, less informative failure.
+func (c *Conn) Usable() bool {
+	if c.cc == nil {
+		return false
+	}
+	switch c.cc.GetState() {
+	case connectivity.TransientFailure, connectivity.Shutdown:
+		return false
+	case connectivity.Idle:
+		// Nudge the lazy connection so the first call does not pay the full
+		// dial latency inside its own deadline.
+		c.cc.Connect()
+		return true
+	default: // Ready, Connecting
+		return true
+	}
+}
+
 // Guard runs fn only if the socket is Ready, otherwise returns
 // ErrDisconnected without attempting the call. D0-10: "queue or refuse
 // mutations while DISCONNECTED — never fail silently." This
@@ -193,10 +232,47 @@ func (c *Conn) Ready() bool {
 // decides to layer on top (e.g. a page-level "retry when reconnected"
 // queue built on this same sentinel).
 func (c *Conn) Guard(fn func() error) error {
-	if !c.Ready() {
+	if !c.Usable() {
 		return ErrDisconnected
 	}
 	return fn()
+}
+
+// WaitReady blocks until the connection reaches connectivity.Ready, or
+// returns an error once it instead reaches TransientFailure/Shutdown (the
+// upgrade was refused — e.g. a ticket that was already redeemed, expired,
+// or unknown; internal/bridge/server.go's ServeHTTP answers those with a
+// plain 401 before any WebSocket even opens) or ctx is done first.
+//
+// This exists for web/shell.Mount's boot dial specifically: when that dial
+// carries a login ticket (wsconn.PendingTicket/TicketEndpoint — see
+// ticket.go's package doc comment for why the boot dial, not a later
+// swap, is what has to carry it), Mount needs to know within a bounded
+// window whether the ticket actually redeemed so it can fall back to a
+// plain anonymous dial instead of leaving the operator on a connection
+// that will keep retrying the same now-permanently-invalid ticket URL
+// forever. An ordinary boot dial (no ticket) has no equivalent need — it
+// is allowed to sit in Idle/Connecting and let the shell's existing
+// DISCONNECTED banner/reconnect machinery handle it — so this is not
+// called on that path.
+func (c *Conn) WaitReady(ctx context.Context) error {
+	if c.cc == nil {
+		return fmt.Errorf("wsconn: WaitReady: connection is nil")
+	}
+	state := c.cc.GetState()
+	for state != connectivity.Ready {
+		if state == connectivity.TransientFailure || state == connectivity.Shutdown {
+			return fmt.Errorf("wsconn: WaitReady: connection refused (state=%s)", state)
+		}
+		if !c.cc.WaitForStateChange(ctx, state) {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("wsconn: WaitReady: %w", err)
+			}
+			return fmt.Errorf("wsconn: WaitReady: state change wait ended unexpectedly")
+		}
+		state = c.cc.GetState()
+	}
+	return nil
 }
 
 // Close releases the underlying connection and stops the connectivity

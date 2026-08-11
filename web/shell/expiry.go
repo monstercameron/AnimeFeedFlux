@@ -37,7 +37,29 @@ func renderExpiryModal() ui.Node {
 		AcknowledgeExpiry()
 	})
 
-	return h.Show(pending.Get(), h.Div(
+	// Return nothing at all when closed — do NOT render it hidden.
+	//
+	// This used h.Show, which hides by setting the `hidden` ATTRIBUTE. That
+	// works only while nothing overrides the user agent's `display:none`,
+	// and `af-expiry-modal--visible` sets a display of its own. The result
+	// was a full-screen fixed overlay that was invisible, still laid out,
+	// and swallowed every pointer event on the page: the login form could
+	// not be clicked at all, on a fresh load, for a visitor who had never
+	// had a session.
+	//
+	// No unit test could see it — the node was present and correct in the
+	// tree, and only a real browser resolves `hidden` against a competing
+	// `display`. A headless Playwright click found it in one run, reporting
+	// `<div hidden class="af-expiry-modal af-expiry-modal--visible">
+	// intercepts pointer events`.
+	//
+	// A closed modal has no reason to be in the DOM. The hooks above are
+	// called unconditionally before this branch, so the rule of hooks holds.
+	if !pending.Get() {
+		return h.Fragment()
+	}
+
+	return h.Div(
 		h.ClassStr("af-expiry-modal af-expiry-modal--visible"),
 		h.Div(
 			h.P(t.T(keyExpiryMessage)),
@@ -47,5 +69,5 @@ func renderExpiryModal() ui.Node {
 				t.T(keyExpiryLogin),
 			),
 		),
-	))
+	)
 }

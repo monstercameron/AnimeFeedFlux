@@ -65,6 +65,7 @@ import (
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/web/appstate"
 	"github.com/monstercameron/AnimeFeedFlux/web/guard"
+	"github.com/monstercameron/AnimeFeedFlux/web/tokens"
 	"github.com/monstercameron/AnimeFeedFlux/web/wsconn"
 )
 
@@ -79,6 +80,15 @@ var routeTable = []guard.RouteInfo{
 	{Path: "/generate", RequiresAuth: true},
 	{Path: "/history", RequiresAuth: true},
 	{Path: "/settings", RequiresAuth: true},
+	// Each settings section is its own address, so /settings/provider can be
+	// bookmarked, pasted, and — the point of the change — survive a reload
+	// on the section you were actually looking at. Before this the section
+	// was component state, so every refresh dropped you back on Security and
+	// there was no way to link anyone (including a future you reading a
+	// runbook) at a specific panel.
+	//
+	// Guarded exactly like /settings: same auth requirement, same redirect.
+	{Path: "/settings/:section", RequiresAuth: true},
 }
 
 // initialSessionTimeout bounds the boot-time "whoami" call (D0-06/D0-07):
@@ -88,6 +98,15 @@ var routeTable = []guard.RouteInfo{
 // correctly"). An unreachable control plane must not leave the admin
 // tool blank forever, so this is bounded rather than an unbounded block.
 const initialSessionTimeout = 5 * time.Second
+
+// ticketDialTimeout bounds how long Mount waits for a ticket-carrying boot
+// dial (see wsconn.PendingTicket/TicketEndpoint and ticket.go's package doc
+// comment for why the boot dial itself, not a later swap, has to be the one
+// that redeems the ticket) to reach Ready before giving up and falling back
+// to a plain anonymous dial. Generous relative to one WebSocket handshake
+// but short enough that a genuinely stuck/refused ticket redemption does
+// not leave the operator staring at a blank screen for long.
+const ticketDialTimeout = 10 * time.Second
 
 // conn is the shell's one control-plane connection, set by Mount.
 var conn *wsconn.Conn
@@ -134,7 +153,69 @@ func Conn() *wsconn.Conn {
 // documents. wire may be nil (e.g. a future non-page caller of Mount that
 // has nothing to wire).
 func Mount(ctx context.Context, selector string, wire func(*wsconn.Conn)) {
-	dialedConn, err := wsconn.Connect(ctx, wsconn.DefaultEndpoint, applyEvent)
+	// Emit the design tokens BEFORE anything renders.
+	//
+	// This had no caller anywhere, and the consequence was total: web/tokens
+	// defines the :root custom properties, and web/ui's every rule reads them
+	// with css.Var("--color-…"). With Emit unwired, those variables were
+	// simply undefined, so every var() resolved to nothing and the entire app
+	// rendered as unstyled browser defaults — no colours, no spacing, no dark
+	// mode. The token layer's careful work (both themes, the WCAG contrast
+	// corrections, the reduced-motion collapse, the :root[data-theme] selector
+	// fix) was all real and all reaching no one.
+	//
+	// Nothing caught it: the tokens have unit tests that assert on the rules
+	// they GENERATE, which pass whether or not anyone emits them, and no host
+	// test loads a document. It took a screenshot.
+	tokens.Emit()
+
+	// Resolve and stamp <html data-theme> immediately after the tokens are
+	// emitted and before anything renders. Order matters in both directions:
+	// after Emit, because the dark block has to exist for the attribute to
+	// select anything; before the first render, because applying it later
+	// means painting a frame of light theme first — a white flash on the
+	// login screen, in what may well be a dark room. See theme.go.
+	ApplyStoredTheme()
+	// Held for the life of the page: while the preference is "system", an OS
+	// theme change follows through to the document. The returned cleanup is
+	// deliberately dropped — this listener's lifetime IS the page's.
+	_ = WatchSystemTheme()
+
+	// This package's own rules (#app, .af-banner, .af-expiry-modal,
+	// .af-content/.af-placeholder) — see styles.go. Emitted right after
+	// tokens.Emit() so the shell's own root/banner/modal styling is in
+	// place before the router's first render, same reasoning as
+	// tokens.Emit() itself: nothing here should render unstyled even for
+	// one frame.
+	emitShellStyles()
+
+	// A ticket left by a just-completed CompleteLogin (web/wsconn/ticket.go)
+	// makes THIS the connection every page package's Init(...) gets wired
+	// to with an already-authenticated session — see ticket.go's package
+	// doc comment for why the boot dial has to be the one carrying it
+	// (Chromium does not store the Set-Cookie a ticket redemption sets on a
+	// WebSocket 101 response, and there is no supported way to redial an
+	// already-dialed *grpc.ClientConn with a different URL later).
+	endpoint := wsconn.DefaultEndpoint
+	ticket := wsconn.PendingTicket()
+	if ticket != "" {
+		endpoint = wsconn.TicketEndpoint(ticket)
+	}
+
+	dialedConn, err := wsconn.Connect(ctx, endpoint, applyEvent)
+	if err == nil && ticket != "" {
+		waitCtx, cancel := context.WithTimeout(ctx, ticketDialTimeout)
+		waitErr := dialedConn.WaitReady(waitCtx)
+		cancel()
+		if waitErr != nil {
+			// The ticket didn't redeem (already used, expired, or some
+			// other upgrade refusal) — fall back to a plain anonymous dial
+			// rather than leaving the operator on a connection that will
+			// only ever retry the same now-permanently-invalid ticket URL.
+			_ = dialedConn.Close()
+			dialedConn, err = wsconn.Connect(ctx, wsconn.DefaultEndpoint, applyEvent)
+		}
+	}
 	if err != nil {
 		// The initial dial failing outright (not merely "not yet Ready")
 		// still needs an honest DISCONNECTED banner rather than a login

@@ -103,9 +103,10 @@ type shellWrapperProps struct {
 // fit rather than inventing an artificial parent route.
 func renderShellWrapper(props shellWrapperProps) ui.Node {
 	return h.Fragment(
+		ui.CreateElement(renderHeader, nil),
 		ui.CreateElement(renderBanner, nil),
 		ui.CreateElement(renderExpiryModal, nil),
-		renderPageBody(props.Path),
+		h.Main(h.ClassStr("af-content"), renderPageBody(props.Path)),
 	)
 }
 

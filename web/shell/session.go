@@ -75,7 +75,7 @@ func applyTransition(ev appstate.Event) {
 // modal shows) rather than applied immediately and silently. Every other
 // event applies immediately.
 func applyEvent(ev appstate.Event) {
-	if ev == appstate.EvSessionExpired && dirtyCheck != nil && dirtyCheck() {
+	if ev == appstate.EvSessionExpired && ShouldHoldExpiry(dirtyCheck) {
 		PendingExpiryAtom.Global().Set(true)
 		return
 	}

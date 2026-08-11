@@ -81,6 +81,8 @@ func wirePages(conn *wsconn.Conn) {
 
 	bundle := shell.Bundle()
 
+	// Everything goes over the WebSocket, login included: §3's transport
+	// rule is one bridge, not one bridge plus an HTTP side door.
 	authpage.Init(conn.Auth, conn.Auth)
 
 	generatepage.Init(generatepage.Deps{
@@ -96,6 +98,7 @@ func wirePages(conn *wsconn.Conn) {
 	historypage.Init(historypage.Deps{
 		Runs:  conn.Run,
 		Items: conn.Item,
+		Feeds: conn.Feed,
 		T:     bundleCatalog{bundle: bundle},
 	})
 
@@ -175,6 +178,13 @@ func (bundleFormatters) Currency(usd float64) string {
 
 func (bundleFormatters) RelativeTime(t, now time.Time) string {
 	return afi18n.FormatRelativeTime(t, now)
+}
+
+// Percent renders novelty similarity. Two digits, because the difference
+// between 87% and 87.34% is never the difference between accepting a
+// candidate and rejecting it.
+func (bundleFormatters) Percent(fraction float64) string {
+	return afi18n.FormatPercent(fraction, 0)
 }
 
 func (bundleFormatters) ByteSize(n int64) string {

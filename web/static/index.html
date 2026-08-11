@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" style="height:100%">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -20,68 +20,93 @@
 -->
 <base href="/">
 
-<style>
-  /* Minimal, framework-free baseline so the shell has *something* sane
-     to look at before design tokens (D0-11/D0-12, a later wave) land.
-     Deliberately not Tailwind or any other utility framework: nothing
-     here is served from a CDN (this UI is IP-allowlisted and must work
-     with no third-party network dependency), and no CSS framework
-     dependency exists in go.mod for this project to vendor one from. */
-  :root {
-    color-scheme: light dark;
-  }
-  html, body {
-    margin: 0;
-    padding: 0;
-    height: 100%;
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  }
-  #app {
-    min-height: 100%;
-    display: flex;
-    flex-direction: column;
-  }
-  .af-banner {
-    padding: 0.5rem 1rem;
-    background: #7a1f1f;
-    color: #fff;
-    text-align: center;
-    font-size: 0.9rem;
-  }
-  .af-banner--hidden { display: none; }
-  .af-banner--visible { display: block; }
+<!--
+  D0-24: no hand-written <style> block here — all real styling lives in the
+  WASM, authored with GWC's typed CSS library (web/shell/styles.go,
+  web/pages/*/styles.go, web/tokens): see web/shell.Mount, which calls
+  tokens.Emit() then emitShellStyles() before anything renders. What
+  remains below is the near-zero set of things that must exist BEFORE wasm
+  has had a chance to load and run, so none of it can depend on Go-emitted
+  CSS — and each is expressed WITHOUT a <style> tag, since a <style> block
+  (even one containing only "acceptable" rules) is exactly the regression
+  scripts/check-styles.sh guards against:
+    - color-scheme: a UA hint for native form-control/scrollbar rendering
+      (the initial-paint password/TOTP inputs, before any class applies).
+      Expressed as <meta name="color-scheme">, its actual dedicated
+      document-level mechanism — not a `:root { color-scheme }` CSS rule,
+      which needs a <style> tag to exist at all.
+    - body/html margin+height reset: without this, the browser's default
+      body margin puts a visible gap around the <noscript> fallback and
+      around whatever paints in the instant between HTML parse and
+      app.wasm finishing its fetch/instantiate/run. Expressed as inline
+      `style=` attributes on <html>/<body> themselves (below) rather than
+      a stylesheet rule — one element, one inline declaration, no
+      <style> tag needed for two properties.
+    - #noscript-fallback's padding/font-size: only ever paints when JS is
+      disabled outright, i.e. exactly when app.wasm can never run at all
+      — this cannot move to Go for the same reason nothing else here can.
+      Expressed as an inline `style=` attribute on that one element.
+  Anything else (fonts, colors, spacing, #app's layout, every af-*/
+  history-* class) is a real design decision and belongs in Go, not here,
+  so there is exactly one place that decides what this app looks like.
+-->
+<meta name="color-scheme" content="light dark">
+<!--
+  Favicon + theme-color: the two document-level identity bits that must
+  exist before wasm has had a chance to load and run (same rule as the
+  color-scheme meta above — nothing here can depend on Go-emitted CSS).
 
-  .af-expiry-modal {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-  .af-expiry-modal--hidden { display: none; }
-  .af-expiry-modal--visible { display: flex; }
-  .af-expiry-modal > * {
-    background: canvas;
-    color: canvastext;
-    padding: 1.5rem;
-    border-radius: 0.5rem;
-    max-width: 24rem;
-  }
+  The icons are the kitsune crest from docs/design-direction.md's brand
+  assets, shipped as PNG rather than SVG: the artwork is a raster render
+  (gradients, soft interior shading, a glow), and there is no faithful
+  vector of it — a hand-traced approximation would be a different mark
+  wearing the same name. Three sizes are declared rather than one scaled
+  by the browser, because the crest's fox is dense enough that a
+  downscaled 512 turns to mush at tab size; favicon-32 is the one that
+  actually gets used in the tab, and 180 is the iOS home-screen size.
+  /favicon.ico exists too (served by the publish plane, see
+  internal/publish/server.go's handleFavicon) for the clients that ask
+  for that exact path regardless of what is declared here.
 
-  .af-content { flex: 1; padding: 1rem; }
-  .af-placeholder { opacity: 0.6; font-style: italic; }
-
-  #noscript-fallback {
-    padding: 2rem;
-    font-size: 1.1rem;
-  }
-</style>
+  theme-color is the ACCENT token's literal hex per light/dark
+  (web/tokens/theme.go's RoleAccent: #2A5FD8 light / #5B8CFF dark) via
+  prefers-color-scheme media queries, mirroring how :root itself is
+  themed — this one meta tag cannot read a CSS custom property, so the
+  two hex values are spelled out directly. Corrected 2026-08-10: this
+  used to carry the DANGER swatch (#C8452F/#E2604A), which painted the
+  browser's own chrome in the colour reserved for destructive states.
+-->
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/favicon-512.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/favicon-180.png">
+<meta name="theme-color" content="#2A5FD8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#5B8CFF" media="(prefers-color-scheme: dark)">
 </head>
-<body>
+<body style="margin:0;padding:0;height:100%">
+<!-- Theme bootstrap. Deliberately inline, synchronous, and before anything
+     paints: web/shell/theme.go's ApplyStoredTheme runs inside Mount, which
+     cannot happen until the ~30MB wasm binary has downloaded and
+     instantiated. Until then the page has no data-theme attribute, so an
+     operator who chose Dark got a full-white page for the whole load window
+     on every reload. The key and the values are web/shell/theme.go's
+     ("aff.theme"; system|light|dark) — keep the two in sync. "system" (and
+     anything unrecognised) stamps nothing, which is what leaves
+     prefers-color-scheme in charge. -->
+<script>
+  (function () {
+    try {
+      var p = localStorage.getItem("aff.theme");
+      if (p === "light" || p === "dark") {
+        document.documentElement.setAttribute("data-theme", p);
+      }
+    } catch (e) {
+      // Storage can be unavailable (private mode, blocked cookies). The
+      // page then renders in the system theme, which is the default anyway.
+    }
+  })();
+</script>
 <noscript>
-  <div id="noscript-fallback">
+  <div id="noscript-fallback" style="padding:2rem;font-size:1.1rem">
     AnimeFeedFlux Admin requires JavaScript and WebAssembly.
   </div>
 </noscript>
