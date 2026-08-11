@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 )
 
@@ -94,6 +96,15 @@ type tableJSON struct {
 }
 
 // MarshalJSON implements a stable, hand-editable encoding.
+//
+// Sorted by model name, which is what actually delivers the stability the
+// type above claims. Ranging the map and emitting whatever order came out
+// produced a different byte sequence on every call — Go randomizes map
+// iteration deliberately — so each Save rewrote the whole file into a new
+// order and every save produced a full-file diff with no change in it. That
+// defeats both reasons the on-disk shape is a flat list: reviewing what an
+// operator actually edited (§12.5), and hand-editing a file whose lines stay
+// put between saves.
 func (t *Table) MarshalJSON() ([]byte, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -101,6 +112,7 @@ func (t *Table) MarshalJSON() ([]byte, error) {
 	for _, p := range t.prices {
 		tj.Prices = append(tj.Prices, p)
 	}
+	slices.SortFunc(tj.Prices, func(a, b Price) int { return strings.Compare(a.Model, b.Model) })
 	return json.Marshal(tj)
 }
 
