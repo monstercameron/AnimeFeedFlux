@@ -1361,6 +1361,7 @@ func buildPublishHandlerWithInvalidator(st *store.Store, cfg *config.Config, ver
 	}
 
 	deps := publish.Deps{
+		CacheMaxBytes: cfg.CacheMaxBytes,
 		// Logger and Metrics were absent here, and their absence was silent
 		// in the worst way: internal/publish's handlers DO call
 		// obs.HTTPRequest and Metrics.RecordHTTPRequest/RecordCacheResult on

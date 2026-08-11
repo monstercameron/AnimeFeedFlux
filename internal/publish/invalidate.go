@@ -84,7 +84,7 @@ func (a cacheInvalidator) InvalidateAll()             { a.c.InvalidateAll() }
 //	})
 //	// every RPC service now writes through `hooked` instead of `st`.
 func NewServerAndInvalidator(deps Deps) (http.Handler, Invalidator) {
-	s := &server{deps: deps, cache: NewCache()}
+	s := &server{deps: deps, cache: NewCacheWithLimit(deps.CacheMaxBytes)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/healthz", s.handleHealthz)

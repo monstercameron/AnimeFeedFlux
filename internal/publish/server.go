@@ -77,6 +77,13 @@ type Deps struct {
 	// without a restart. The implementation behind it is expected to be a
 	// cheap in-memory read, not a database query per request.
 	BaseURLFn func() string
+	// CacheMaxBytes is the render cache's LRU ceiling in bytes, from
+	// AFF_CACHE_MAX_BYTES (PLAN.md §16, default 64MiB). Zero means unlimited,
+	// which is what a test or the e2e harness gets by default; the real
+	// composition root passes the configured value. Without it the cache grew
+	// without bound — permalinks are cached one per item and items accumulate
+	// forever by design.
+	CacheMaxBytes int64
 	// Generator identifies the software in <generator>/<meta name=generator>.
 	Generator string
 	// DocsURL is the RSS spec URL for <docs>.
@@ -148,7 +155,7 @@ type server struct {
 // PLAN.md §6, and nothing else — no REST API, no admin surface (§2's whole
 // point is that this plane cannot write).
 func NewServer(deps Deps) http.Handler {
-	s := &server{deps: deps, cache: NewCache()}
+	s := &server{deps: deps, cache: NewCacheWithLimit(deps.CacheMaxBytes)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/healthz", s.handleHealthz)

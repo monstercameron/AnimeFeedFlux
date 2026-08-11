@@ -7,6 +7,7 @@ package publish
 import (
 	"bytes"
 	"compress/gzip"
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"sync"
@@ -65,32 +66,129 @@ type Stats struct {
 // every entry belonging to a feed by prefix — see below). Safe for
 // concurrent use: many readers hit this on every request, and a write
 // happens only on control-plane invalidation.
+//
+// # The size ceiling
+//
+// PLAN.md §16 specifies AFF_CACHE_MAX_BYTES as a "render-cache LRU ceiling,
+// default 64MiB", and internal/config has parsed and validated it since the
+// beginning — but nothing read it, and this was a plain map with no eviction
+// at all. Feed documents are bounded (three per slug), so that was survivable
+// until permalinks: those are cached one per item, items accumulate forever by
+// design (§12.4 — the permalink 410s forever and the guid is never reused),
+// and anything that walks them (a crawler, Slack unfurling, a bot) pulls every
+// item ever published into memory permanently. On the 2GB box this deploys to,
+// that is the kind of growth that ends in an OOM months later rather than
+// under test.
+//
+// maxBytes == 0 means unlimited, which is what NewCache still gives you: the
+// e2e harness and the tests build caches directly and have no reason to care.
+// Production goes through NewCacheWithLimit from the composition root.
 type Cache struct {
-	mu      sync.RWMutex
-	entries map[string]Entry
+	mu      sync.Mutex
+	entries map[string]*list.Element
+	order   *list.List // front = most recently used
+	bytes   int64
+	max     int64
 }
 
-// NewCache returns an empty Cache.
-func NewCache() *Cache {
-	return &Cache{entries: make(map[string]Entry)}
+// cacheItem is what the LRU list carries: the entry plus its key, because
+// eviction works from the back of the list and has to delete the map row too.
+type cacheItem struct {
+	key   string
+	entry Entry
+	size  int64
 }
 
-// Get returns the entry for key, and whether it was present. This is the
-// entire cost of a cache hit — no lock beyond an RWMutex read lock, no call
-// out to a renderer or a store (§5.4: "A cache HIT must not touch anything
-// else — that is the whole point").
+// entrySize is what an entry costs: both representations, since both are held
+// for the life of the entry (NewEntry gzips once at Put time, which is what
+// makes a hit cheap). The key itself is not counted — it is tens of bytes
+// against a body measured in kilobytes, and counting it would imply a
+// precision this accounting does not have.
+func entrySize(e Entry) int64 { return int64(len(e.Body) + len(e.GzipBody)) }
+
+// NewCache returns an empty Cache with no size ceiling.
+func NewCache() *Cache { return NewCacheWithLimit(0) }
+
+// NewCacheWithLimit returns an empty Cache that evicts least-recently-used
+// entries once the total body bytes it holds would exceed maxBytes. A
+// maxBytes of zero or less means unlimited.
+func NewCacheWithLimit(maxBytes int64) *Cache {
+	return &Cache{
+		entries: make(map[string]*list.Element),
+		order:   list.New(),
+		max:     maxBytes,
+	}
+}
+
+// Get returns the entry for key, and whether it was present, and marks it as
+// most recently used.
+//
+// This takes an exclusive lock rather than the read lock it used to, because
+// recording recency is a write. That is the price of the ceiling above, and
+// it is a map lookup plus a list splice — nanoseconds, and still no renderer
+// and no store on the hit path, which is what §5.4's "a cache HIT must not
+// touch anything else" is actually protecting.
 func (c *Cache) Get(key string) (Entry, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	e, ok := c.entries[key]
-	return e, ok
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.entries[key]
+	if !ok {
+		return Entry{}, false
+	}
+	c.order.MoveToFront(el)
+	return el.Value.(*cacheItem).entry, true
 }
 
-// Put stores (or replaces) the entry for key.
+// Put stores (or replaces) the entry for key, then evicts from the
+// least-recently-used end until the cache is back inside its ceiling.
+//
+// An entry larger than the whole ceiling is stored and then immediately
+// evicted by the loop below, which is the honest outcome: it cannot be held
+// within the configured budget, and silently keeping it would make the
+// ceiling a suggestion. The request that produced it is still served — the
+// caller already has the entry in hand.
 func (c *Cache) Put(key string, e Entry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[key] = e
+
+	if el, ok := c.entries[key]; ok {
+		it := el.Value.(*cacheItem)
+		c.bytes -= it.size
+		it.entry, it.size = e, entrySize(e)
+		c.bytes += it.size
+		c.order.MoveToFront(el)
+	} else {
+		it := &cacheItem{key: key, entry: e, size: entrySize(e)}
+		c.entries[key] = c.order.PushFront(it)
+		c.bytes += it.size
+	}
+
+	if c.max <= 0 {
+		return
+	}
+	for c.bytes > c.max {
+		back := c.order.Back()
+		if back == nil {
+			return
+		}
+		c.removeLocked(back)
+	}
+}
+
+// removeLocked drops one element from both the list and the map. The caller
+// holds the lock.
+func (c *Cache) removeLocked(el *list.Element) {
+	it := el.Value.(*cacheItem)
+	c.order.Remove(el)
+	delete(c.entries, it.key)
+	c.bytes -= it.size
+}
+
+// deleteLocked drops key if present. The caller holds the lock.
+func (c *Cache) deleteLocked(key string) {
+	if el, ok := c.entries[key]; ok {
+		c.removeLocked(el)
+	}
 }
 
 // Invalidate drops every cached format for slug: every key equal to slug, or
@@ -130,12 +228,12 @@ func (c *Cache) Invalidate(slug string) {
 	for k := range c.entries {
 		if k == slug || k == prefix || len(k) > len(prefix) && k[:len(prefix)] == prefix {
 			if len(k) > len(itemPrefix) && k[:len(itemPrefix)] == itemPrefix {
-				delete(c.entries, "item:"+k[len(itemPrefix):])
+				c.deleteLocked("item:" + k[len(itemPrefix):])
 			}
-			delete(c.entries, k)
+			c.deleteLocked(k)
 		}
 	}
-	delete(c.entries, "index")
+	c.deleteLocked("index")
 }
 
 // InvalidateAll drops every cached entry. Used for a global change (e.g. the
@@ -144,15 +242,18 @@ func (c *Cache) Invalidate(slug string) {
 func (c *Cache) InvalidateAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries = make(map[string]Entry)
+	c.entries = make(map[string]*list.Element)
+	c.order.Init()
+	c.bytes = 0
 }
 
 // Stats reports current occupancy, for /healthz and dashboards.
 func (c *Cache) Stats() Stats {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	s := Stats{Entries: len(c.entries)}
-	for _, e := range c.entries {
+	for _, el := range c.entries {
+		e := el.Value.(*cacheItem).entry
 		s.BodyBytes += int64(len(e.Body))
 		s.GzipBodyBytes += int64(len(e.GzipBody))
 	}
