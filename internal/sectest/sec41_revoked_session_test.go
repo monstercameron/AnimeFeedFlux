@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/monstercameron/GoGRPCBridge/pkg/grpctunnel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -99,12 +101,15 @@ func TestRevokedSession_AlreadyOpenStreamRefused(t *testing.T) {
 	}
 
 	clock := newFakeClock(start)
+	var refusals atomic.Int64
 	validator := bridge.SessionValidatorFunc(func(ctx context.Context, token string, now time.Time) (bridge.Session, error) {
 		s, err := st.GetSessionByTokenHash(ctx, auth.HashToken(token))
 		if err != nil {
+			refusals.Add(1)
 			return bridge.Session{}, err
 		}
 		if !s.Valid(now, auth.SessionIdleTimeout) {
+			refusals.Add(1)
 			return bridge.Session{}, errors.New("sectest: session invalid")
 		}
 		return bridge.Session{UserID: "admin", ExpiresAt: s.ExpiresAt}, nil
@@ -156,15 +161,49 @@ func TestRevokedSession_AlreadyOpenStreamRefused(t *testing.T) {
 		t.Fatalf("health check before revocation: %v", err)
 	}
 
+	// Watch for the transport leaving READY from BEFORE the revocation, so
+	// no transition can happen in a gap between revoking and looking.
+	//
+	// "the health check starts failing" cannot be the assertion here, and
+	// this is not a style preference. When the revalidation loop force-closes
+	// the socket, the gRPC ClientConn immediately redials — and a redial
+	// presents the same now-revoked cookie, which bridge's ServeHTTP
+	// discards, opening the replacement socket ANONYMOUSLY rather than
+	// refusing it (see internal/bridge/server.go, "discarding an
+	// unvalidatable session cookie, continuing anonymously"). This test
+	// registers healthpb directly on the bridge's grpc.Server with no
+	// internal/rpc interceptor in front of it, so nothing confines that
+	// anonymous socket and Check() answers SERVING again. Whether the test
+	// saw a failure was therefore a race between the poll and the redial —
+	// the flake, and the reason it flaked in the direction of PASSING a
+	// broken system rather than failing a working one.
+	stateLeftReady := make(chan struct{})
+	go func() {
+		defer close(stateLeftReady)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		conn.WaitForStateChange(ctx, connectivity.Ready)
+	}()
+
 	// Revoke through the real production path, mid-connection.
 	if err := st.RevokeSession(t.Context(), sessionID); err != nil {
 		t.Fatalf("revoke session: %v", err)
 	}
 
 	waitUntilFake(t, 2*time.Second, func() bool { return clock.waiterCount() >= 1 })
+	before := refusals.Load()
 	clock.Advance(cfg.RevalidateInterval)
 
-	waitUntilFake(t, 3*time.Second, func() bool { return checkHealth() != nil })
+	select {
+	case <-stateLeftReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the socket stayed READY after the session was revoked")
+	}
+
+	// The drop above proves a transport went away; this proves it went away
+	// BECAUSE the revocation was seen. Without the revocation the
+	// revalidation tick validates cleanly and this stays at zero.
+	waitUntilFake(t, 2*time.Second, func() bool { return refusals.Load() > before })
 }
 
 func waitUntilFake(t *testing.T, timeout time.Duration, cond func() bool) {
