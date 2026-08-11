@@ -611,6 +611,46 @@ type DailySpend struct {
 // Failed runs are included, for the same reason SpendSince includes them:
 // money already spent is spent (§22 J5, "a failure that spent money must
 // still show the money").
+// addSampleSpendByDay folds preview spend into the per-day buckets, creating
+// a bucket for a day that had previews but no runs — otherwise a day spent
+// entirely on previews is absent from the map and rendered as a zero.
+func (s *Store) addSampleSpendByDay(ctx context.Context, since time.Time, into map[string]DailySpend) error {
+	const query = `SELECT substr(at, 1, 10) AS day,
+	                      COALESCE(SUM(cost_usd), 0),
+	                      COALESCE(SUM(tokens_in), 0),
+	                      COALESCE(SUM(tokens_out), 0)
+	               FROM sample_spend
+	               WHERE at >= ?
+	               GROUP BY day`
+
+	rows, err := s.writer.QueryContext(ctx, query, formatTime(since))
+	if err != nil {
+		return fmt.Errorf("store: bucketing sample spend by day: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			day                 string
+			cost                float64
+			tokensIn, tokensOut int64
+		)
+		if err := rows.Scan(&day, &cost, &tokensIn, &tokensOut); err != nil {
+			return fmt.Errorf("store: scanning daily sample spend: %w", err)
+		}
+		d := into[day]
+		d.Date = day
+		d.CostUSD += cost
+		d.TokensIn += tokensIn
+		d.TokensOut += tokensOut
+		into[day] = d
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store: reading daily sample spend: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) SpendByDay(ctx context.Context, since time.Time) ([]DailySpend, error) {
 	// substr over the stored RFC3339 text rather than SQLite's date()
 	// function: formatTime writes UTC already, so the first ten characters
@@ -641,6 +681,16 @@ func (s *Store) SpendByDay(ctx context.Context, since time.Time) ([]DailySpend, 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: reading daily spend: %w", err)
+	}
+
+	// Previews cost money and were missing from this chart entirely: they
+	// write no runs row on purpose (§11/§22 J3 — a sample must never look
+	// like a publish), so a day spent entirely on previews read as $0.00.
+	// Their spend is folded in here from sample_spend, but NOT their count:
+	// DailySpend.Runs means runs, and inflating it with previews would make
+	// the run cap and this chart disagree about what a run is.
+	if err := s.addSampleSpendByDay(ctx, since, found); err != nil {
+		return nil, err
 	}
 
 	out := make([]DailySpend, 0, 32)

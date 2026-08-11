@@ -66,9 +66,23 @@ func scanSample(sc rowScanner) (Sample, error) {
 // PutSample writes a fresh sample and returns its id. It is the only write
 // the Sample RPC makes (§11): the whole point of sampling is that it costs
 // money but publishes nothing, and this row is the receipt.
+//
+// It writes the spend to sample_spend as well, in the SAME transaction, so
+// the two cannot disagree about whether a provider call happened. The sample
+// row is the artifact and is deleted on expiry, discard or promotion; the
+// sample_spend row is the money and outlives all three. Keeping the cost only
+// on the artifact made the daily total shrink through the day and let anyone
+// erase a preview's cost by discarding it — see migrations/0006.
 func (s *Store) PutSample(ctx context.Context, feedID int64, payload []byte, tokensIn, tokensOut int, costUSD float64, ttl time.Duration) (int64, error) {
 	now := time.Now()
-	res, err := s.writer.ExecContext(ctx, `
+
+	tx, err := s.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: begin putting sample for feed %d: %w", feedID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
 		INSERT INTO samples (feed_id, created_at, expires_at, payload_json, tokens_in, tokens_out, cost_usd)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		feedID, formatTime(now), formatTime(now.Add(ttl)), string(payload), tokensIn, tokensOut, costUSD)
@@ -79,7 +93,55 @@ func (s *Store) PutSample(ctx context.Context, feedID int64, payload []byte, tok
 	if err != nil {
 		return 0, fmt.Errorf("store: sample id: %w", err)
 	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO sample_spend (feed_id, at, tokens_in, tokens_out, cost_usd)
+		VALUES (?, ?, ?, ?, ?)`,
+		feedID, formatTime(now), tokensIn, tokensOut, costUSD); err != nil {
+		return 0, fmt.Errorf("store: recording sample spend for feed %d: %w", feedID, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: commit putting sample for feed %d: %w", feedID, err)
+	}
 	return id, nil
+}
+
+// SampleSpendSince sums preview spend from sample_spend, the same shape as
+// SpendSince does for runs. feedID 0 means every feed.
+//
+// Read from the ledger, never from `samples`: that table's rows are deleted on
+// expiry, discard and promotion, so summing it would report a total that falls
+// through the day and would let a preview's cost be erased by discarding it.
+func (s *Store) SampleSpendSince(ctx context.Context, feedID int64, since time.Time) (tokensIn, tokensOut int, costUSD float64, err error) {
+	query := `SELECT COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0), COALESCE(SUM(cost_usd), 0)
+	          FROM sample_spend WHERE at >= ?`
+	args := []any{formatTime(since)}
+	if feedID != 0 {
+		query += ` AND feed_id = ?`
+		args = append(args, feedID)
+	}
+	row := s.writer.QueryRowContext(ctx, query, args...)
+	if err := row.Scan(&tokensIn, &tokensOut, &costUSD); err != nil {
+		return 0, 0, 0, fmt.Errorf("store: summing sample spend since %s: %w", formatTime(since), err)
+	}
+	return tokensIn, tokensOut, costUSD, nil
+}
+
+// TotalSpendSince is what every budget ceiling and every spend figure should
+// use: scheduled runs PLUS previews. They are stored apart because a sample
+// must never look like a publish (§11/§22 J3), not because a preview's dollars
+// are a different kind of dollar.
+func (s *Store) TotalSpendSince(ctx context.Context, feedID int64, since time.Time) (tokensIn, tokensOut int, costUSD float64, err error) {
+	runIn, runOut, runUSD, err := s.SpendSince(ctx, feedID, since)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	smpIn, smpOut, smpUSD, err := s.SampleSpendSince(ctx, feedID, since)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return runIn + smpIn, runOut + smpOut, runUSD + smpUSD, nil
 }
 
 // GetSample looks a sample up by id. An EXPIRED sample returns ErrNotFound,

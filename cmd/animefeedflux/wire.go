@@ -644,7 +644,7 @@ func (g *genGate) Allowed(feedID int64) (bool, string) {
 	}
 
 	since := midnightUTC(time.Now())
-	feedIn, feedOut, feedUSD, err := g.st.SpendSince(ctx, feedID, since)
+	feedIn, feedOut, feedUSD, err := g.st.TotalSpendSince(ctx, feedID, since)
 	if err != nil {
 		return false, "budget_lookup_failed"
 	}
@@ -652,7 +652,7 @@ func (g *genGate) Allowed(feedID int64) (bool, string) {
 	if err != nil {
 		return false, "budget_lookup_failed"
 	}
-	globalIn, globalOut, globalUSD, err := g.st.SpendSince(ctx, 0, since)
+	globalIn, globalOut, globalUSD, err := g.st.TotalSpendSince(ctx, 0, since)
 	if err != nil {
 		return false, "budget_lookup_failed"
 	}
@@ -675,7 +675,7 @@ func (g *genGate) Allowed(feedID int64) (bool, string) {
 	// an unlimited month should not pay for a wider scan on every run.
 	var monthSpend budget.Spend
 	if g.monthlyCeilingUSD > 0 {
-		mIn, mOut, mUSD, err := g.st.SpendSince(ctx, 0, budget.MonthStart(now))
+		mIn, mOut, mUSD, err := g.st.TotalSpendSince(ctx, 0, budget.MonthStart(now))
 		if err != nil {
 			return false, "budget_lookup_failed"
 		}
@@ -939,7 +939,7 @@ func (b sampleBudget) CheckSample(ctx context.Context, feedID int64, projected i
 	}
 
 	since := midnightUTC(time.Now())
-	feedIn, feedOut, feedUSD, err := b.st.SpendSince(ctx, feedID, since)
+	feedIn, feedOut, feedUSD, err := b.st.TotalSpendSince(ctx, feedID, since)
 	if err != nil {
 		return budget.Decision{Allow: false, Reason: "budget_lookup_failed"}
 	}
@@ -947,7 +947,7 @@ func (b sampleBudget) CheckSample(ctx context.Context, feedID int64, projected i
 	if err != nil {
 		return budget.Decision{Allow: false, Reason: "budget_lookup_failed"}
 	}
-	globalIn, globalOut, globalUSD, err := b.st.SpendSince(ctx, 0, since)
+	globalIn, globalOut, globalUSD, err := b.st.TotalSpendSince(ctx, 0, since)
 	if err != nil {
 		return budget.Decision{Allow: false, Reason: "budget_lookup_failed"}
 	}
@@ -973,7 +973,7 @@ func (b sampleBudget) RemainingDailyUSD(ctx context.Context, feedID int64) (floa
 	if ceiling <= 0 {
 		return 0, nil // no global ceiling configured: nothing meaningful to report
 	}
-	_, _, usd, err := b.st.SpendSince(ctx, 0, midnightUTC(time.Now()))
+	_, _, usd, err := b.st.TotalSpendSince(ctx, 0, midnightUTC(time.Now()))
 	if err != nil {
 		return 0, err
 	}

@@ -680,7 +680,7 @@ func (s *SystemServer) Stats(ctx context.Context, _ *affv1.SystemServiceStatsReq
 	}
 
 	todayStart := time.Now().UTC().Truncate(24 * time.Hour)
-	_, _, todaySpend, err := s.st.SpendSince(ctx, 0, todayStart)
+	_, _, todaySpend, err := s.st.TotalSpendSince(ctx, 0, todayStart)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "rpc: summing today's spend: %v", err)
 	}
