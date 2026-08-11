@@ -175,16 +175,30 @@ func Restore(ctx context.Context, backupPath, destPath string) error {
 		return fmt.Errorf("ops: copying %s to %s: %w", backupPath, tmp, err)
 	}
 
-	// A backup produced by VACUUM INTO is a single self-contained file with
-	// no WAL of its own. Any -wal/-shm left beside a PREVIOUS database at
-	// destPath must not be allowed to shadow the restored data on next open.
-	for _, suffix := range []string{"-wal", "-shm"} {
-		_ = os.Remove(destPath + suffix)
-	}
-
 	if err := os.Rename(tmp, destPath); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("ops: finalizing restore to %s: %w", destPath, err)
+	}
+
+	// A backup produced by VACUUM INTO is a single self-contained file with
+	// no WAL of its own. Any -wal/-shm left beside a PREVIOUS database at
+	// destPath must not be allowed to shadow the restored data on next open.
+	//
+	// AFTER the rename, never before. This ran first, which made the promise
+	// in this function's doc comment false: a rename that failed left the
+	// previous database's main file in place with its write-ahead log
+	// deleted. In WAL mode a committed transaction can live only in that
+	// sidecar until it is checkpointed, so removing it early does not tidy
+	// anything — it discards recent committed data from the database the
+	// operator was trying to protect, during the operation they reached for
+	// because something had already gone wrong.
+	//
+	// Ordering it here narrows the exposure to the window between a
+	// SUCCEEDED rename and these two removals, where the old sidecars sit
+	// beside the new file. The Verify below opens destPath afterwards and is
+	// what catches that state if the process dies inside it.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		_ = os.Remove(destPath + suffix)
 	}
 
 	if err := Verify(ctx, destPath); err != nil {
