@@ -68,6 +68,11 @@ func renderData() ui.Node {
 			resp, err := deps.Feed.List(bgContext(), &affv1.FeedServiceListRequest{PageSize: 200})
 			feedsLoading.Set(false)
 			if err != nil {
+				// Folded into the section's own error state. Swallowed, this
+				// rendered as an empty feed picker — indistinguishable from
+				// "you have no feeds", on the page whose whole job is
+				// exporting and importing them.
+				statsErr.Set(err)
 				return
 			}
 			feeds.Set(resp.GetFeeds())

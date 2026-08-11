@@ -20,7 +20,7 @@ var allDeclaredAuthKeys = []string{
 	KeyRecoverNewPasswordLabel, KeyRecoverConfirmPasswordLabel, KeyRecoverPasswordMismatch,
 	KeyRecoverPasswordTooShort, KeyRecoverPasswordTooLong, KeyRecoverResetSubmit, KeyRecoverReenrollHeading,
 	KeyRecoverReenrollIntro, KeyRecoverReenrollSubmit, KeyRecoverReenrollProvisioned, KeyRecoverDoneHeading,
-	KeyRecoverDoneBody, KeyRecoverDoneGoToLogin, KeyRecoverBreakGlassHeading, KeyRecoverBreakGlassBody,
+	KeyRecoverDoneBody, KeyRecoverDoneGoToLogin, KeyRecoverCancel, KeyRecoverBreakGlassHeading, KeyRecoverBreakGlassBody,
 	KeyRecoverBreakGlassCommandNote, KeyRecoverSavedConfirm,
 }
 

@@ -350,6 +350,10 @@ func RecoverPage(props RecoverPageProps) ui.Node {
 				h.ClassStr("af-recover-actions"),
 				h.Button(h.Type("button"), h.OnClick(handleChoosePasswordReset), t.T(afi18n.KeyRecoverChoosePasswordReset)),
 				h.Button(h.Type("button"), h.OnClick(handleChooseReenrollTOTP), t.T(afi18n.KeyRecoverChooseReenrollTOTP)),
+				// The way out. Reuses the already-registered handler, so no
+				// hook slot moves.
+				h.Button(h.Type("button"), h.ClassStr("af-recover-cancel"),
+					h.OnClick(handleGoToLogin), t.T(afi18n.KeyRecoverCancel)),
 			),
 		)
 	case RecoverStepResetPassword:
@@ -372,6 +376,8 @@ func RecoverPage(props RecoverPageProps) ui.Node {
 				h.Value(f.ConfirmPassword), h.OnInput(handleConfirmPassword), h.Disabled(f.Submitting)),
 			mismatchNode,
 			h.Button(h.Type("submit"), h.Disabled(!f.CanSubmitReset()), submitLabel),
+			h.Button(h.Type("button"), h.ClassStr("af-recover-cancel"),
+				h.OnClick(handleGoToLogin), t.T(afi18n.KeyRecoverCancel)),
 			errorNode,
 		)
 	case RecoverStepReenrollTOTP:
@@ -389,6 +395,8 @@ func RecoverPage(props RecoverPageProps) ui.Node {
 			h.H2(h.ID(reenrollHeadingID), h.TabIndex(-1), t.T(afi18n.KeyRecoverReenrollHeading)),
 			h.P(t.T(afi18n.KeyRecoverReenrollIntro)),
 			h.Button(h.Type("button"), h.OnClick(handleReenrollSubmit), h.Disabled(f.Submitting), submitLabel),
+			h.Button(h.Type("button"), h.ClassStr("af-recover-cancel"),
+				h.OnClick(handleGoToLogin), t.T(afi18n.KeyRecoverCancel)),
 			errorNode,
 		)
 	case RecoverStepDone:

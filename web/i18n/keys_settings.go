@@ -92,6 +92,7 @@ var settingsMessages = gwci18n.NamespaceCatalog{
 			gwci18n.PluralOther: "{arg1} older revoked sessions are not shown.",
 		},
 	},
+	"settings.security.sessions.revokeError":            {Text: "Couldn't revoke that session. It may already be gone — refresh to check."},
 	"settings.security.sessions.revoke":                 {Text: "Revoke"},
 	"settings.security.sessions.revokeAll.action":       {Text: "Revoke all sessions"},
 	"settings.security.sessions.revokeAll.confirmTitle": {Text: "Revoke all sessions"},

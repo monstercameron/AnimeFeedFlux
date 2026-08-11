@@ -66,9 +66,48 @@ var promptVariables = []string{
 // workbenchProps is everything the layout needs that it does not own.
 type workbenchProps struct {
 	Strip   ui.Node
+	Stakes  ui.Node
 	Prompts ui.Node
 	Preview ui.Node
 	Recipe  ui.Node
+}
+
+// stakesProps is the one-line readout of what the selected feed actually is.
+type stakesProps struct {
+	Feed    *affv1.Feed
+	Enabled bool
+}
+
+// renderStakes states the facts that decide whether pressing Preview is a
+// good idea: which feed is really loaded, whether it is enabled, what
+// schedule it runs on, and what its daily budget is.
+//
+// These live in the recipe form, which the workbench collapsed to a
+// disclosure at the bottom of the page — correct for the fields nobody edits
+// twice, wrong for these four, which are exactly what an operator needs
+// BEFORE writing a prompt and spending money on it. §12.3 also requires a
+// disabled feed to be visible rather than something you discover after a run
+// that never happens.
+func renderStakes(p stakesProps) ui.Node {
+	t := deps.I18n
+	if p.Feed == nil {
+		return h.Fragment()
+	}
+	spec := p.Feed.GetSpec()
+	parts := []any{h.ClassStr("af-gen__stakes")}
+	parts = append(parts, h.Span(h.ClassStr("af-gen__stakes-slug"), h.Text(p.Feed.GetSlug())))
+	if !p.Enabled {
+		parts = append(parts, h.Span(h.ClassStr("af-gen__stakes-flag"),
+			h.Text(t.T("generate.workbench.stakes.disabled"))))
+	}
+	if cron := spec.GetCron(); cron != "" {
+		parts = append(parts, h.Span(h.Text(t.T("generate.workbench.stakes.schedule", cron, spec.GetTimezone()))))
+	}
+	if b := spec.GetDailyTokenBudget(); b > 0 {
+		parts = append(parts, h.Span(h.Text(t.T("generate.workbench.stakes.budget",
+			strconv.FormatInt(b, 10), strconv.Itoa(int(spec.GetDailyRunBudget()))))))
+	}
+	return h.Div(parts...)
 }
 
 // renderWorkbench composes the three regions. It holds no state of its own:
@@ -79,6 +118,7 @@ func renderWorkbench(p workbenchProps) ui.Node {
 	return h.Div(
 		h.ClassStr("af-gen"),
 		h.Div(h.ClassStr("af-gen__strip"), p.Strip),
+		p.Stakes,
 		h.Div(h.ClassStr("af-gen__work"),
 			h.Section(h.ClassStr("af-gen__prompts"), p.Prompts),
 			h.Section(h.ClassStr("af-gen__preview"), p.Preview),
@@ -399,7 +439,11 @@ func renderStrip(p stripProps) ui.Node {
 				h.ClassStr("af-gen__temp"),
 				h.Attr("step", "0.1"), h.Attr("min", "0"), h.Attr("max", "2"),
 				h.Aria("label", t.T("generate.workbench.temp")),
-				h.Attr("title", t.T("generate.workbench.temp")),
+				// The title says what §8.1 says: SchemaFlux exposes no
+				// temperature control, so this value is carried but not yet
+				// applied. A knob that silently does nothing is worse than
+				// one that admits it.
+				h.Attr("title", t.T("generate.workbench.temp.inert")),
 				// Zero means "no override", so the field shows empty rather
 				// than a literal 0 that reads as temperature=0 — the one
 				// value an operator might actually have meant to set.

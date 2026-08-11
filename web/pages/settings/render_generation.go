@@ -174,17 +174,22 @@ func renderGeneration() ui.Node {
 	return screenWrapperRetry(state, errState.Get(), func() { reloadTick.Update(func(n int) int { return n + 1 }) }, body)
 }
 
+// parseInt64 reads a settings field. A negative value is clamped to zero
+// rather than stored: every one of these fields is a count, a ceiling or a
+// budget, and internal/budget reads a negative the same way it reads zero —
+// as "no limit" — so a stray minus sign silently removed a cap.
 func parseInt64(s string) int64 {
 	v, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
+	if err != nil || v < 0 {
 		return 0
 	}
 	return v
 }
 
+// parseFloat clamps for the same reason as parseInt64.
 func parseFloat(s string) float64 {
 	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
+	if err != nil || v < 0 {
 		return 0
 	}
 	return v

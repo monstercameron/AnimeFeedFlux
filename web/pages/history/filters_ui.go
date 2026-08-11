@@ -188,3 +188,22 @@ func endOfDay(t *time.Time) *time.Time {
 	e := t.Add(24*time.Hour - time.Nanosecond)
 	return &e
 }
+
+// renderItemFeedFilter is the Items tab's feed filter. ItemFilter.FeedID and
+// BuildItemListRequest have always forwarded it; §12.4 has always asked for
+// it; no control ever existed.
+func renderItemFeedFilter(t Catalog, feeds []*affv1.Feed, selected int64, onChange func(ui.InputEvent)) ui.Node {
+	opts := make([]any, 0, len(feeds)+4)
+	opts = append(opts,
+		h.ID("history-items-feed"),
+		h.OnChange(ui.UseEvent(onChange)),
+		// Unconditional placeholder — see renderRunFilters for the
+		// index-shifting trap this avoids.
+		h.Option(h.Value("0"), h.SelectedIf(selected == 0), t.T("history.runs.filter_feed_any", nil)),
+	)
+	for _, f := range feeds {
+		id := f.GetId()
+		opts = append(opts, h.Option(h.Value(int64Str(id)), h.SelectedIf(id == selected), h.Text(f.GetTitle())))
+	}
+	return filterField("history-items-feed", t.T("history.runs.filter_feed", nil), h.Select(opts...))
+}

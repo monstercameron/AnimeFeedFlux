@@ -231,6 +231,12 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 		}()
 	}
 
+	handleFeedFilter := func(ev ui.InputEvent) {
+		f := filter.Get()
+		f.FeedID = parseInt64(ev.GetValue())
+		filter.Set(f)
+	}
+
 	handleDeletedFilter := func(ev ui.InputEvent) {
 		f := filter.Get()
 		f.DeletedFilter = deletedFilterFromValue(ev.GetValue())
@@ -239,7 +245,9 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 
 	s := store.Get()
 
-	newestPublished := newestPublishedAt(s.items)
+	// Scoped to the feed the open form is editing (or creating in), not to
+	// whatever mix of feeds the list is currently showing.
+	newestPublished := newestPublishedAt(s.items, editingFeedID(s, feeds.Get()))
 
 	saveItem := func(req *affv1.Item, expectedVersion int64, isCreate bool, setErr func(error)) {
 		setErr(nil)
@@ -463,6 +471,7 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 			h.Input(h.ID("history-items-query"), h.Type("search"),
 				h.Attr("placeholder", props.T.T("history.items.filter_query_placeholder", nil)),
 				h.Value(queryDraft.Get()), h.OnInput(handleQuery)),
+			renderItemFeedFilter(props.T, feeds.Get(), filter.Get().FeedID, handleFeedFilter),
 			h.Label(h.For("history-items-deleted"), props.T.T("history.items.filter_deleted", nil)),
 			h.Select(h.ID("history-items-deleted"), h.OnChange(handleDeletedFilter),
 				h.Option(h.Value("exclude"), props.T.T("history.items.deleted.exclude", nil)),
@@ -487,10 +496,23 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 			h.ClassStr("history-action-error"),
 			mutationErrorText(props.T, rowActionErr.Get()),
 		)),
+		// Bulk delete and restore live behind the kebab, like every other
+		// destructive action in this app (§12.6, and this repo's own ticked
+		// D0-15). They were plain buttons sitting next to the selection
+		// count — the one place where the rule was written down and then not
+		// followed, and the place where a mis-click costs the most because it
+		// costs every selected row at once.
 		h.If(selection.Get().Count() > 0, h.Div(h.ClassStr("history-bulkbar"),
 			h.Textf(props.T.T("history.items.selected_count", nil), selection.Get().Count()),
-			h.Button(h.Type("button"), h.OnClick(bulkDelete), props.T.T("history.items.bulk_delete", nil)),
-			h.Button(h.Type("button"), h.OnClick(bulkRestore), props.T.T("history.items.bulk_restore", nil)),
+			h.Div(h.ClassStr("history-kebab"),
+				kebabTrigger(props.T),
+				h.Div(h.ClassStr("history-kebab-menu"),
+					h.Button(h.Type("button"), h.ClassStr("history-kebab-danger"),
+						h.OnClick(bulkDelete), props.T.T("history.items.bulk_delete", nil)),
+					h.Button(h.Type("button"),
+						h.OnClick(bulkRestore), props.T.T("history.items.bulk_restore", nil)),
+				),
+			),
 		)),
 		renderScreenState(props.T, screen, func() ui.Node {
 			return itemsTable(props.T, s, selection.Get(), toggleSelect, toggleSelectAll, visibleIDs,
@@ -547,6 +569,14 @@ func itemsTable(t Catalog, s itemsLoadState, sel *Selection,
 	)
 }
 
+// itemStatusClass picks the status pill's tone.
+func itemStatusClass(deleted bool) string {
+	if deleted {
+		return "history-status history-status--deleted"
+	}
+	return "history-status history-status--published"
+}
+
 func itemRow(t Catalog, it *affv1.Item, selected bool, toggleSelect func(int64),
 	onEdit func(*affv1.Item), onDelete func(*affv1.Item), onRestore func(*affv1.Item),
 	onCorrection func(*affv1.Item, string, string, string), onToggleRev func(*affv1.Item),
@@ -564,7 +594,12 @@ func itemRow(t Catalog, it *affv1.Item, selected bool, toggleSelect func(int64),
 			h.Td(it.Title),
 			h.Td(originLabel(t, it.Origin)),
 			h.Td(formatTimestamp(it.PublishedAt)),
-			h.Td(t.T(statusKey, nil)),
+			// Status carries colour as well as a word. The token set has
+			// defined RoleSuccess and RoleWarning with checked contrast pairs
+			// since it was written, and this column — the one whose entire job
+			// is status — rendered plain body text. The word stays: colour is
+			// the second encoding, never the only one.
+			h.Td(h.Span(h.ClassStr(itemStatusClass(deleted)), h.Text(t.T(statusKey, nil)))),
 			h.Td(
 				h.Div(h.ClassStr("history-kebab"),
 					kebabTrigger(t),
@@ -745,10 +780,37 @@ func findItem(items []*affv1.Item, id int64) *affv1.Item {
 	return nil
 }
 
-func newestPublishedAt(items []*affv1.Item) time.Time {
+// newestPublishedAt returns the latest published_at among items OF ONE FEED.
+//
+// The feed scoping is the whole point. §5.5 requires pubDates to be unique
+// and increasing WITHIN a feed; comparing a new item against the newest item
+// across every feed in a mixed list answers a question nobody asked, and
+// answers it wrongly in both directions — blocking a legitimate item because
+// some other feed published later today, and waving through a genuine
+// backdate because the busiest feed in the list happens to be older.
+//
+// feedID of 0 means "no feed chosen", and then there is nothing to compare
+// against: a zero Time makes ValidatePublishedAt permissive, which is right,
+// because the server is the authority and this check exists to warn early,
+// not to be the gate.
+// editingFeedID reports which feed the open form belongs to: the edited
+// item's own feed, or the create form's first-listed feed.
+func editingFeedID(s itemsLoadState, feeds []*affv1.Feed) int64 {
+	if s.editing > 0 {
+		if it := findItem(s.items, s.editing); it != nil {
+			return it.GetFeedId()
+		}
+	}
+	if s.editing == -1 && len(feeds) > 0 {
+		return feeds[0].GetId()
+	}
+	return 0
+}
+
+func newestPublishedAt(items []*affv1.Item, feedID int64) time.Time {
 	var newest time.Time
 	for _, it := range items {
-		if it.PublishedAt == nil {
+		if it.PublishedAt == nil || (feedID != 0 && it.GetFeedId() != feedID) {
 			continue
 		}
 		ts := it.PublishedAt.AsTime()

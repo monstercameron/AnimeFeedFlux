@@ -152,14 +152,27 @@ func renderSecurity() ui.Node {
 		}()
 	}
 
+	// revokingID is which row's revoke is in flight, "" when none. Every
+	// other mutation on this page has an in-flight guard; this one did not,
+	// so a double-click fired two revokes and the button gave no sign the
+	// first had been heard. It also swallowed its error — a failed revoke
+	// looked exactly like a successful one, on a security screen.
+	revokingID := ui.UseState("")
+	revokeErr := ui.UseState(error(nil))
 	doRevokeOne := func(sessionID string) {
-		if disconnected {
+		if disconnected || revokingID.Get() != "" {
 			return
 		}
+		revokingID.Set(sessionID)
+		revokeErr.Set(nil)
 		go func() {
-			if _, err := deps.Auth.RevokeSession(bgContext(), &affv1.AuthServiceRevokeSessionRequest{SessionId: sessionID}); err == nil {
-				loadSessions(sessions, sessionsLoading, sessionsErr)
+			_, err := deps.Auth.RevokeSession(bgContext(), &affv1.AuthServiceRevokeSessionRequest{SessionId: sessionID})
+			revokingID.Set("")
+			if err != nil {
+				revokeErr.Set(err)
+				return
 			}
+			loadSessions(sessions, sessionsLoading, sessionsErr)
 		}()
 	}
 
@@ -193,7 +206,9 @@ func renderSecurity() ui.Node {
 		if !row.IsCurrent && !row.Revoked() {
 			revokeCell = affui.Button(affui.ButtonProps{
 				T: t, LabelKey: "settings.security.sessions.revoke", Variant: affui.ButtonSecondary,
-				Disabled: disconnected, OnClick: func() { doRevokeOne(row.ID) },
+				Disabled: disconnected || revokingID.Get() != "",
+				Busy:     revokingID.Get() == row.ID,
+				OnClick:  func() { doRevokeOne(row.ID) },
 			})
 		}
 		// A revoked row previously rendered identically to a live one — "No"
@@ -348,6 +363,8 @@ func renderSecurity() ui.Node {
 			// is set by usage rather than by design — ~90 rows after a single
 			// afternoon on a dev box. Table would build, reconcile and lay out
 			// all of them for the ten a person can see.
+			h.Show(revokeErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"),
+				h.ClassStr("af-error"), h.Text(t("settings.security.sessions.revokeError")))),
 			screenWrapperRetry(sessionState, sessionsErr.Get(),
 				func() { loadSessions(sessions, sessionsLoading, sessionsErr) },
 				affui.VirtualTable(affui.VirtualTableProps{

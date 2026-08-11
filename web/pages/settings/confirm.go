@@ -7,17 +7,6 @@ package settings
 // that modal — see TODOS.md's "Tests" instruction: "typed-confirmation
 // matching" is explicitly named as something to host-test.
 
-// ConfirmationMatches reports whether typed exactly equals want, with no
-// trimming and no case-folding. An exact match is the point: a modal that
-// accepts "delete " or "DELETE" when it asked for "delete" is not
-// actually forcing the admin to read and reproduce the word, just to
-// mash approximately the right keys — the friction is the safety
-// property (PLAN.md §12.6: "irreversible ones require typed
-// confirmation").
-func ConfirmationMatches(typed, want string) bool {
-	return typed == want
-}
-
 // DestructiveAction identifies each kebab-menu action this page defines
 // that needs a confirmation decision, so the reversible/irreversible and
 // typed-word choices below live in one place instead of being redecided

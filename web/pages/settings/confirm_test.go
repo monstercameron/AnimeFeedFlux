@@ -2,29 +2,6 @@ package settings
 
 import "testing"
 
-func TestConfirmationMatches(t *testing.T) {
-	cases := []struct {
-		name  string
-		typed string
-		want  string
-		match bool
-	}{
-		{"exact match", "delete", "delete", true},
-		{"case mismatch rejected", "DELETE", "delete", false},
-		{"trailing space rejected", "delete ", "delete", false},
-		{"leading space rejected", " delete", "delete", false},
-		{"partial rejected", "delet", "delete", false},
-		{"empty typed against empty want matches", "", "", true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := ConfirmationMatches(c.typed, c.want); got != c.match {
-				t.Errorf("ConfirmationMatches(%q, %q) = %v, want %v", c.typed, c.want, got, c.match)
-			}
-		})
-	}
-}
-
 func TestRequiresTypedConfirmation(t *testing.T) {
 	irreversible := map[DestructiveAction]bool{
 		ActionRevokeOneSession:        false,

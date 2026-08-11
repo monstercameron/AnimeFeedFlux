@@ -784,7 +784,11 @@ func Render() ui.Node {
 	)
 
 	return renderWorkbench(workbenchProps{
-		Strip:   strip,
+		Strip: strip,
+		Stakes: renderStakes(stakesProps{
+			Feed:    editorProps.Loaded,
+			Enabled: editorProps.Loaded.GetEnabled(),
+		}),
 		Prompts: prompts,
 		Preview: ui.CreateElement(renderSampler, samplerProps),
 		Recipe: h.Fragment(

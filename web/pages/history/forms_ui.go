@@ -57,7 +57,7 @@ func ItemForm(props ItemFormProps) ui.Node {
 	decision := ValidatePublishedAt(proposed, props.NewestPublished, backdateOverride.Get())
 
 	save := func() {
-		if decision.Blocked {
+		if decision.Blocked || strings.TrimSpace(title.Get()) == "" {
 			return
 		}
 		item := &affv1.Item{
@@ -120,7 +120,12 @@ func ItemForm(props ItemFormProps) ui.Node {
 		h.If(props.Err != nil, h.Div(h.ClassStr("history-form-error"), mutationErrorText(props.T, props.Err))),
 
 		h.Div(h.ClassStr("history-form-actions"),
-			h.Button(h.Type("button"), h.Disabled(decision.Blocked), h.OnClick(save), props.T.T("history.save", nil)),
+			// Disabled on an empty title as well as a blocked backdate: the
+			// server enforces title-required, and letting the click through
+			// to be refused makes the UI the last to know its own rules.
+			h.Button(h.Type("button"),
+				h.Disabled(decision.Blocked || strings.TrimSpace(title.Get()) == ""),
+				h.OnClick(save), props.T.T("history.save", nil)),
 			h.Button(h.Type("button"), h.OnClick(props.OnCancel), props.T.T("history.cancel", nil)),
 		),
 	)

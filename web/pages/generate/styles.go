@@ -689,6 +689,20 @@ func emitWorkbenchStyles() {
 		css.Gap(tokens.Space(2)),
 		css.Raw("flex-wrap", "wrap"),
 	)
+	// The act zone is separated from the configure zone by a rule and real
+	// space, not only by the button's fill. Seven controls in identical
+	// bordered boxes with the verb last gave the eye no entry point; the
+	// divider says "everything left of here describes the run, everything
+	// right of here starts it".
+	css.Global(".af-gen__strip-right",
+		css.Gap(tokens.Space(3)),
+		css.Raw("padding-left", string(tokens.Space(5))),
+		css.Raw("border-left", "1px solid "+string(tokens.Color(tokens.RoleBorder))),
+	)
+	css.Global(".af-gen__strip-right", narrowMedia(
+		css.Raw("border-left", "0"),
+		css.Raw("padding-left", "0"),
+	)...)
 	css.Global(".af-gen__strip select, .af-gen__strip input",
 		css.FontSize(tokens.FontSize(tokens.TextSm)),
 		css.PaddingY(tokens.Space(1)),
@@ -738,6 +752,26 @@ func emitWorkbenchStyles() {
 		css.FontSize(tokens.FontSize(tokens.TextXs)),
 		css.TextColor(tokens.Color(tokens.RoleWarning)),
 		css.Raw("margin", "0"),
+	)
+
+	// The stakes line: quiet, monospaced, directly under the strip so it is
+	// read on the way to the prompt rather than hunted for afterwards.
+	css.Global(".af-gen__stakes",
+		css.Display.Flex,
+		css.Raw("flex-wrap", "wrap"),
+		css.Items.Center,
+		css.Gap(tokens.Space(3)),
+		css.FontSize(tokens.FontSize(tokens.TextXs)),
+		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
+		monoFont(),
+	)
+	css.Global(".af-gen__stakes-slug",
+		css.TextColor(tokens.Color(tokens.RoleText)),
+	)
+	// The one part of this line that is a warning rather than a fact.
+	css.Global(".af-gen__stakes-flag",
+		css.TextColor(tokens.Color(tokens.RoleWarning)),
+		css.FontWeight.Medium,
 	)
 
 	// Two equal columns: neither the prompt nor its output is the junior

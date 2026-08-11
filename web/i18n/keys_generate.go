@@ -198,8 +198,13 @@ var generateMessages = gwci18n.NamespaceCatalog{
 
 	// Page-level fallback (render.go, before real data is wired).
 	// --- The workbench layout (web/pages/generate/render_workbench.go) ------
-	"generate.workbench.feed":             {Text: "Feed"},
-	"generate.workbench.chooseFeed":       {Text: "Choose a feed…"},
+	"generate.workbench.feed":            {Text: "Feed"},
+	"generate.workbench.chooseFeed":      {Text: "Choose a feed…"},
+	"generate.workbench.stakes.disabled": {Text: "Disabled — scheduled runs will not fire"},
+	// {arg1} the cron expression, {arg2} its timezone.
+	"generate.workbench.stakes.schedule": {Text: "{arg1} ({arg2})"},
+	// {arg1} daily token budget, {arg2} daily run budget.
+	"generate.workbench.stakes.budget":    {Text: "{arg1} tokens/day · {arg2} runs/day"},
 	"generate.workbench.retryFeeds":       {Text: "Retry"},
 	"generate.workbench.feedsUnavailable": {Text: "Couldn't load feeds"},
 	"generate.workbench.newFeed":          {Text: "+ New"},
@@ -217,6 +222,7 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.workbench.temp":            {Text: "Temperature override"},
 	// The strip is too narrow for a visible label on this one field, so the
 	// placeholder carries the name; the accessible name is on aria-label.
+	"generate.workbench.temp.inert":      {Text: "Temperature override — carried with the sample but not yet applied by the provider (PLAN §8.1)"},
 	"generate.workbench.tempPlaceholder": {Text: "temp"},
 	"generate.workbench.size":            {Text: "Candidates"},
 	"generate.workbench.sizeN":           {Text: "{arg1}×"},

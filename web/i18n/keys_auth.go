@@ -65,6 +65,11 @@ const (
 	KeyRecoverDoneHeading          = "recover.doneHeading"
 	KeyRecoverDoneBody             = "recover.doneBody"
 	KeyRecoverDoneGoToLogin        = "recover.doneGoToLogin"
+	// KeyRecoverCancel is the way OUT of a recovery step. /login has a Back
+	// control on its second step; /recover had none on any of its three, so
+	// an elevated window that expired mid-flow left a hard reload as the only
+	// escape.
+	KeyRecoverCancel = "recover.cancel"
 
 	// KeyRecoverSavedConfirm labels the "I've saved this" checkbox that
 	// gates leaving the TOTP re-enrollment screen. Declared here 2026-08-10
@@ -121,6 +126,7 @@ var recoverMessages = gwci18n.NamespaceCatalog{
 	KeyRecoverDoneHeading:   {Text: "Done"},
 	KeyRecoverDoneBody:      {Text: "This recovery session has ended and every other session was signed out. Sign in again with your new credential."},
 	KeyRecoverDoneGoToLogin: {Text: "Go to sign in"},
+	KeyRecoverCancel:        {Text: "Cancel and sign in"},
 	// Losing this screen without saving means the TOTP secret is gone and
 	// break-glass on the box is the only way back in — the checkbox says
 	// what was saved, not merely "I understand".

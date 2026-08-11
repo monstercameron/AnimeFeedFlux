@@ -287,6 +287,32 @@ func emitFilterAndTableStyles() {
 		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
 		css.FontSize(tokens.FontSize(tokens.TextSm)),
 	)
+	// Status pills. Text-first, tinted second: a reader who cannot separate
+	// the hues still reads "Published" and "Deleted".
+	css.Global(".history-status",
+		css.Display.InlineBlock,
+		css.PaddingY(css.Px(2)),
+		css.PaddingX(tokens.Space(2)),
+		css.Rounded(tokens.Radius(tokens.RadiusFull)),
+		css.FontSize(tokens.FontSize(tokens.TextXs)),
+		css.FontWeight.Medium,
+	)
+	css.Global(".history-status--published",
+		css.TextColor(tokens.Color(tokens.RoleSuccess)),
+		css.Raw("border", "1px solid "+string(tokens.Color(tokens.RoleSuccess))),
+	)
+	css.Global(".history-status--deleted",
+		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
+		css.Raw("border", "1px solid "+string(tokens.Color(tokens.RoleBorder))),
+	)
+	// A6-08: money is what an operator scans the runs table for, and it read
+	// as one of seven equal numeric columns. Tabular figures so the decimal
+	// points line up, and full-strength ink instead of the muted body tone.
+	css.Global(".history-runs-table td:nth-child(8)",
+		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.FontWeight.Medium,
+		css.Raw("font-variant-numeric", "tabular-nums"),
+	)
 	css.Global(".history-pager, .history-revisions-pager",
 		css.Display.Flex,
 		css.Gap(tokens.Space(2)),
