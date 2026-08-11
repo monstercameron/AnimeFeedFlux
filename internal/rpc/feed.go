@@ -29,6 +29,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -823,12 +824,29 @@ func (s *FeedServer) Create(ctx context.Context, req *affv1.FeedServiceCreateReq
 		}
 	}
 
+	// Identity defaults from settings.publishing fill only what the request
+	// left empty.
+	//
+	// default_author / default_copyright / default_og_image /
+	// default_ttl_minutes persisted, round-tripped through the UI and
+	// reported "Saved." while seeding nothing: every new feed started with
+	// blank identity columns however carefully those defaults were filled in
+	// (A5-01).
+	//
+	// CREATE only. On Update a cleared author means the operator cleared it,
+	// and re-imposing the default there would make the field impossible to
+	// empty; ImportTOML likewise edits an existing feed and keeps its
+	// current identity.
+	defaults := s.feedPublishingDefaults(ctx)
 	extra := feedIdentityExtra{
 		Enabled:    in.GetEnabled(),
-		Author:     in.GetAuthor(),
-		Copyright:  in.GetCopyright(),
-		OGImage:    in.GetOgImage(),
+		Author:     feedFirstNonEmpty(in.GetAuthor(), defaults.GetDefaultAuthor()),
+		Copyright:  feedFirstNonEmpty(in.GetCopyright(), defaults.GetDefaultCopyright()),
+		OGImage:    feedFirstNonEmpty(in.GetOgImage(), defaults.GetDefaultOgImage()),
 		TTLMinutes: in.GetTtlMinutes(),
+	}
+	if extra.TTLMinutes == 0 {
+		extra.TTLMinutes = defaults.GetDefaultTtlMinutes()
 	}
 	id, err := s.feedInsert(ctx, spec, extra)
 	if err != nil {
@@ -1291,4 +1309,46 @@ func (s *FeedServer) ImportTOML(ctx context.Context, req *affv1.FeedServiceImpor
 		s.feedInvalidate(ctx, rec.ID, spec.Slug)
 	}
 	return &affv1.FeedServiceImportTOMLResponse{Feed: p}, nil
+}
+
+// feedPublishingDefaults reads settings.publishing, or an empty message when
+// the row is missing or unreadable.
+//
+// Deliberately best-effort: a default is a convenience, and failing to read
+// one must not stop a feed being created. The caller falls back to the
+// request's own values, which is exactly the behaviour that existed before
+// these defaults were wired.
+//
+// Read directly from the settings row for the same reason the rest of this
+// file reaches through Writer()/Reader(): internal/rpc's SystemServer owns
+// the settings convention but exposes no accessor, and this package may not
+// edit internal/store to add one.
+//
+// NOTE: settings.publishing.default_contact has no destination. `feeds` has
+// author, copyright, og_image and ttl_minutes columns and no contact column,
+// and Feed carries no contact field — so that one setting remains write-only
+// until the column and field exist. It is not silently dropped here; there is
+// nowhere to put it.
+func (s *FeedServer) feedPublishingDefaults(ctx context.Context) *affv1.Settings_Publishing {
+	var raw string
+	err := s.store.Reader().QueryRowContext(ctx,
+		`SELECT value FROM settings WHERE key = 'publishing'`).Scan(&raw)
+	if err != nil {
+		return &affv1.Settings_Publishing{}
+	}
+	p := &affv1.Settings_Publishing{}
+	if err := json.Unmarshal([]byte(raw), p); err != nil {
+		return &affv1.Settings_Publishing{}
+	}
+	return p
+}
+
+// feedFirstNonEmpty returns the first value that is not blank after trimming.
+func feedFirstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
