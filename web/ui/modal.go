@@ -57,7 +57,10 @@ func Modal(p ModalProps) Node {
 				onDismiss()
 			}
 		}),
-		"×",
+		// Decorative glyph; the button's accessible name is the translated
+		// aria-label above (resolve(p.T, "action.close")) — see kebab.go's
+		// matching comment.
+		h.Span(html.Aria("hidden", "true"), "×"), //nolint:i18n -- decorative glyph, aria-hidden; accessible name is the translated aria-label above
 	)
 
 	body := []Node{
@@ -71,6 +74,36 @@ func Modal(p ModalProps) Node {
 		}), resolve(p.T, p.TitleKey)),
 	}
 	body = append(body, p.Children...)
+
+	// D5-01: two independent narrow-width problems, two independent fixes.
+	// (1) Content taller than the viewport (a long form on a short/landscape
+	// phone) must scroll INSIDE the surface, not push the surface itself
+	// off-screen or force the page to scroll behind the backdrop — hence the
+	// unconditional max-height/overflow-y here, not gated to narrow widths,
+	// since a short viewport is not exclusively a narrow one. (2) Below
+	// NarrowMaxWidth the fixed Space(6) padding and the 560px cap both cost
+	// too much of a ~320-375px screen, so both shrink; MaxWidth switches to a
+	// viewport-relative calc() so the surface keeps a safe margin even if
+	// its positioning wrapper (owned by gwcui, not this package) applies
+	// none of its own.
+	surfaceRules := []css.Rule{
+		css.Raw("position", "relative"),
+		css.Display.Flex,
+		css.FlexDir.Col,
+		css.Gap(tokens.Space(4)),
+		css.Padding(tokens.Space(6)),
+		css.MaxWidth(css.Px(560)),
+		css.W(css.Length("100%")),
+		css.Raw("max-height", "calc(100vh - "+string(tokens.Space(8))+")"),
+		css.OverflowY.Auto,
+		css.Rounded(tokens.Radius(tokens.RadiusLg)),
+		css.Bg(tokens.Color(tokens.RoleSurfaceRaised)),
+		css.Raw("box-shadow", tokens.Shadow(tokens.ShadowLg)),
+	}
+	surfaceRules = append(surfaceRules, narrowMedia(
+		css.Padding(tokens.Space(4)),
+		css.MaxWidth(css.Length("calc(100vw - 32px)")),
+	)...)
 
 	return gwcui.AccessibleOverlay(gwcui.AccessibleOverlayProps{
 		Open:                p.Open,
@@ -90,19 +123,8 @@ func Modal(p ModalProps) Node {
 		BackdropStyle: map[string]string{
 			"background": string(tokens.Color(tokens.RoleScrim)),
 		},
-		SurfaceClass: string(css.New(
-			css.Raw("position", "relative"),
-			css.Display.Flex,
-			css.FlexDir.Col,
-			css.Gap(tokens.Space(4)),
-			css.Padding(tokens.Space(6)),
-			css.MaxWidth(css.Px(560)),
-			css.W(css.Length("100%")),
-			css.Rounded(tokens.Radius(tokens.RadiusLg)),
-			css.Bg(tokens.Color(tokens.RoleSurfaceRaised)),
-			css.Raw("box-shadow", tokens.Shadow(tokens.ShadowLg)),
-		)),
-		Children: body,
+		SurfaceClass: string(css.New(surfaceRules...)),
+		Children:     body,
 		OnDismiss: func() {
 			if onDismiss != nil {
 				onDismiss()

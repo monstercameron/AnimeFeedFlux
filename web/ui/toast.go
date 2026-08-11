@@ -64,17 +64,28 @@ func Toast(p ToastProps) Node {
 		nodes = append(nodes, toastCard(p.T, item, p.OnDismiss))
 	}
 
+	// D5-01: the stack is corner-anchored (bottom-right) with per-card
+	// min/max widths at regular widths; below NarrowMaxWidth that becomes a
+	// fixed left inset too, turning the anchored corner into a full-width
+	// bottom stack — a 240-360px card pinned to the right edge of a
+	// 320-375px phone screen leaves only a sliver of left margin, and on
+	// anything narrower than ~272px (240 + the two Space(4) insets) it would
+	// force the PAGE to scroll sideways, which is exactly the failure this
+	// ticket exists to prevent. toastCard's own MinWidth/MaxWidth carry the
+	// matching narrow override.
+	rules := []css.Rule{
+		css.Raw("position", "fixed"),
+		css.Raw("bottom", string(tokens.Space(4))),
+		css.Raw("right", string(tokens.Space(4))),
+		css.Display.Flex,
+		css.FlexDir.ColRev,
+		css.Gap(tokens.Space(2)),
+		css.ZIndex(60),
+	}
+	rules = append(rules, narrowMedia(css.Raw("left", string(tokens.Space(4))))...)
 	return h.Div(
 		html.ID(p.ID),
-		css.Class([]css.Rule{
-			css.Raw("position", "fixed"),
-			css.Raw("bottom", string(tokens.Space(4))),
-			css.Raw("right", string(tokens.Space(4))),
-			css.Display.Flex,
-			css.FlexDir.ColRev,
-			css.Gap(tokens.Space(2)),
-			css.ZIndex(60),
-		}),
+		css.Class(rules),
 		nodes,
 	)
 }
@@ -96,7 +107,10 @@ func toastCard(t T, item ToastItem, onDismiss func(string)) Node {
 				css.Cursor.Pointer,
 			}, focusVisible()...)),
 			html.OnClick(func() { dismiss(id) }),
-			"×",
+			// Decorative glyph; the button's accessible name is the
+			// translated aria-label above (resolve(t, "action.dismiss")) —
+			// see web/ui/kebab.go's matching comment.
+			h.Span(html.Aria("hidden", "true"), "×"), //nolint:i18n -- decorative glyph, aria-hidden; accessible name is the translated aria-label above
 		))
 	}
 
@@ -109,21 +123,27 @@ func toastCard(t T, item ToastItem, onDismiss func(string)) Node {
 	}
 	body = append(body, closeOpt...)
 
+	cardRules := []css.Rule{
+		css.Display.Flex,
+		css.Items.Center,
+		css.Justify.Between,
+		css.Gap(tokens.Space(3)),
+		css.Padding(tokens.Space(3)),
+		css.MinWidth(css.Px(240)),
+		css.MaxWidth(css.Px(360)),
+		css.Rounded(tokens.Radius(tokens.RadiusMd)),
+		css.Bg(tokens.Color(tokens.RoleSurfaceRaised)),
+		css.Raw("border-left", "3px solid "+string(accent)),
+		css.Raw("box-shadow", tokens.Shadow(tokens.ShadowMd)),
+	}
+	cardRules = append(cardRules, narrowMedia(
+		css.MinWidth(css.Length("0")),
+		css.MaxWidth(css.Length("100%")),
+		css.W(css.Length("100%")),
+	)...)
 	return html.WithKey(h.Div(
 		html.Role("status"),
-		css.Class([]css.Rule{
-			css.Display.Flex,
-			css.Items.Center,
-			css.Justify.Between,
-			css.Gap(tokens.Space(3)),
-			css.Padding(tokens.Space(3)),
-			css.MinWidth(css.Px(240)),
-			css.MaxWidth(css.Px(360)),
-			css.Rounded(tokens.Radius(tokens.RadiusMd)),
-			css.Bg(tokens.Color(tokens.RoleSurfaceRaised)),
-			css.Raw("border-left", "3px solid "+string(accent)),
-			css.Raw("box-shadow", tokens.Shadow(tokens.ShadowMd)),
-		}),
+		css.Class(cardRules),
 		body,
 	), id)
 }

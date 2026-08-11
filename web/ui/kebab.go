@@ -94,7 +94,12 @@ func Kebab(p KebabProps) Node {
 				p.OnOpenChange(!p.Open)
 			}
 		}),
-		"⋯",
+		// The glyph is decorative, not prose: the trigger's accessible name
+		// is the translated aria-label set above (resolve(p.T, p.LabelKey,
+		// ...)), so a screen reader never reaches this text node at all.
+		// aria-hidden makes that explicit rather than relying on aria-label
+		// silently overriding the accessible-name computation.
+		h.Span(html.Aria("hidden", "true"), "⋯"), //nolint:i18n -- decorative glyph, aria-hidden; accessible name is the translated aria-label above
 	)
 
 	itemNodes := make([]Node, 0, len(ordered))
@@ -133,8 +138,18 @@ func Kebab(p KebabProps) Node {
 		}
 		onSelect := it.OnSelect
 		openChange := p.OnOpenChange
-		if onSelect != nil && !it.Disabled {
+		disabled := it.Disabled
+		// Registered every render regardless of it.Disabled — see
+		// web/ui/button.go's matching comment: gating hook registration on a
+		// value that varies across renders of the same fiber is unsafe under
+		// GWC's positional hook slots (internal/runtime/hooks.go's
+		// GoUseFunc). The native `disabled` attribute below already stops the
+		// browser from dispatching the click.
+		if onSelect != nil {
 			opts = append(opts, html.OnClick(func() {
+				if disabled {
+					return
+				}
 				onSelect()
 				if openChange != nil {
 					openChange(false)
@@ -145,6 +160,29 @@ func Kebab(p KebabProps) Node {
 	}
 
 	onDismiss := p.OnOpenChange
+	// D5-01: MinWidth(180px) is comfortable up to phone width, but the same
+	// 180px against a 320px viewport leaves only ~140px of margin either
+	// side of an anchor near the screen edge — MaxWidth caps the menu at a
+	// viewport-relative size below NarrowMaxWidth so it can never be wider
+	// than the screen it is anchored to. Whether the anchored positioning
+	// itself flips to stay on-screen when it would otherwise overflow is
+	// decided by gwcui.AccessibleOverlay's positioning implementation, not
+	// this package, and is one of the things this ticket could not verify
+	// without a browser (see the report for the full list).
+	menuRules := []css.Rule{
+		css.Display.Flex,
+		css.FlexDir.Col,
+		css.Padding(tokens.Space(1)),
+		css.MinWidth(css.Px(180)),
+		css.Rounded(tokens.Radius(tokens.RadiusMd)),
+		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
+		css.Bg(tokens.Color(tokens.RoleSurfaceRaised)),
+		css.Raw("box-shadow", tokens.Shadow(tokens.ShadowMd)),
+	}
+	menuRules = append(menuRules, narrowMedia(
+		css.MinWidth(css.Length("calc(100vw - 32px)")),
+		css.MaxWidth(css.Length("calc(100vw - 32px)")),
+	)...)
 	menu := gwcui.AccessibleOverlay(gwcui.AccessibleOverlayProps{
 		Open:                p.Open,
 		SurfaceID:           menuID,
@@ -157,17 +195,8 @@ func Kebab(p KebabProps) Node {
 		CloseOnEscape:       true,
 		CloseOnOutsideClick: true,
 		BaseZIndex:          40,
-		SurfaceClass: string(css.New(
-			css.Display.Flex,
-			css.FlexDir.Col,
-			css.Padding(tokens.Space(1)),
-			css.MinWidth(css.Px(180)),
-			css.Rounded(tokens.Radius(tokens.RadiusMd)),
-			css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
-			css.Bg(tokens.Color(tokens.RoleSurfaceRaised)),
-			css.Raw("box-shadow", tokens.Shadow(tokens.ShadowMd)),
-		)),
-		Children: itemNodes,
+		SurfaceClass:        string(css.New(menuRules...)),
+		Children:            itemNodes,
 		OnDismiss: func() {
 			if onDismiss != nil {
 				onDismiss(false)

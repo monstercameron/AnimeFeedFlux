@@ -97,15 +97,16 @@ func SelectListState(in ListStateInput) ListState {
 // used. Populated is a func() []Node (not a static slice) so the caller does
 // not need to build its row nodes on every render regardless of state.
 type StatePanelProps struct {
-	T                 T
-	State             ListState
-	ErrorKey          string
-	ErrorArgs         []any
-	OnRetry           func() // shown on the error view when non-nil
-	DisabledReasonKey string
-	ReconnectingKey   string // shown on the disconnected view; defaults to a generic message if empty
-	EmptyKey          string
-	Populated         func() []Node
+	T                  T
+	State              ListState
+	ErrorKey           string
+	ErrorArgs          []any
+	OnRetry            func() // shown on the error view when non-nil
+	DisabledReasonKey  string
+	DisabledReasonArgs []any  // interpolation args for DisabledReasonKey (e.g. a kill-switch reason naming a budget figure or a time)
+	ReconnectingKey    string // shown on the disconnected view; defaults to a generic message if empty
+	EmptyKey           string
+	Populated          func() []Node
 	// OnErrorFallback lets a caller add a details/log link next to the retry
 	// button; optional.
 }
@@ -121,7 +122,7 @@ func StatePanel(p StatePanelProps) Node {
 	case StateError:
 		return errorView(p.T, p.ErrorKey, p.ErrorArgs, p.OnRetry)
 	case StateDisabledWithReason:
-		return disabledWithReasonView(p.T, p.DisabledReasonKey)
+		return disabledWithReasonView(p.T, p.DisabledReasonKey, p.DisabledReasonArgs)
 	case StateDisconnected:
 		return disconnectedView(p.T, p.ReconnectingKey)
 	case StateEmpty:
@@ -199,13 +200,13 @@ func errorView(t T, key string, args []any, onRetry func()) Node {
 	return h.Div(stateContainer(), children)
 }
 
-func disabledWithReasonView(t T, reasonKey string) Node {
+func disabledWithReasonView(t T, reasonKey string, reasonArgs []any) Node {
 	return h.Div(
 		stateContainer(css.TextColor(tokens.Color(tokens.RoleWarning))),
 		h.Span(css.Class([]css.Rule{css.FontWeight.Semibold}), resolve(t, "state.disabled")),
 		// The reason itself — the whole point of this state (PLAN.md §12.3):
 		// a dead control with no explanation is indistinguishable from a bug.
-		h.Span(resolve(t, reasonKey)),
+		h.Span(resolve(t, reasonKey, reasonArgs...)),
 	)
 }
 

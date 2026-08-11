@@ -40,12 +40,16 @@ func Toggle(p ToggleProps) Node {
 		trackBg = tokens.Color(tokens.RoleAccent)
 	}
 
+	// 44x24 rather than 36x20. The track IS the hit target — there is no
+	// padded wrapper around it — and 20px tall is under the floor where a
+	// pointer target stops being comfortable. This one carries the
+	// generation kill switch, so a mis-click is not a cosmetic problem.
 	trackRules := []css.Rule{
 		css.Display.InlineFlex,
 		css.Items.Center,
 		css.Raw("position", "relative"),
-		css.W(css.Px(36)),
-		css.H(css.Px(20)),
+		css.W(css.Px(44)),
+		css.H(css.Px(24)),
 		css.Rounded(tokens.Radius(tokens.RadiusFull)),
 		css.Bg(trackBg),
 		css.Raw("border", "none"),
@@ -57,16 +61,17 @@ func Toggle(p ToggleProps) Node {
 	}
 	trackRules = append(trackRules, focusVisible()...)
 
-	knobOffset := "2px"
+	knobOffset := "3px"
 	if p.Checked {
-		knobOffset = "18px"
+		// Track width minus knob width minus the 3px inset on the far side.
+		knobOffset = "23px"
 	}
 	knobRules := []css.Rule{
 		css.Raw("position", "absolute"),
-		css.Raw("top", "2px"),
+		css.Raw("top", "3px"),
 		css.Raw("left", knobOffset),
-		css.W(css.Px(16)),
-		css.H(css.Px(16)),
+		css.W(css.Px(18)),
+		css.H(css.Px(18)),
 		css.Rounded(tokens.Radius(tokens.RadiusFull)),
 		css.Bg(tokens.Color(tokens.RoleSurface)),
 		css.Raw("transition", "left "+string(tokens.Duration(tokens.DurationFast))+" "+string(tokens.Easing(tokens.EasingStd))),
@@ -83,9 +88,18 @@ func Toggle(p ToggleProps) Node {
 	if p.DisabledReasonKey != "" {
 		opts = append(opts, html.Aria("describedby", reasonID))
 	}
-	if p.OnChange != nil && !p.Disabled {
+	// Registered every render regardless of p.Disabled — see button.go's
+	// matching comment on why gating hook registration on a value that
+	// varies across renders is unsafe under GWC's positional hook slots.
+	if p.OnChange != nil {
+		onChange := p.OnChange
 		checked := p.Checked
-		opts = append(opts, html.OnClick(func() { p.OnChange(!checked) }))
+		disabled := p.Disabled
+		opts = append(opts, html.OnClick(func() {
+			if !disabled {
+				onChange(!checked)
+			}
+		}))
 	}
 
 	switchNode := h.Button(opts, h.Span(css.Class(knobRules)))

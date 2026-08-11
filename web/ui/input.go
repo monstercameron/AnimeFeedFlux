@@ -88,8 +88,20 @@ func Input(p InputProps) Node {
 	if p.AutoComplete != "" {
 		opts = append(opts, html.AutoComplete(p.AutoComplete))
 	}
-	if p.OnChange != nil && !p.Disabled {
-		opts = append(opts, html.OnInput(func(e gwcui.InputEvent) { p.OnChange(e.GetValue()) }))
+	// Registered every render regardless of p.Disabled — see button.go's
+	// matching comment: html.OnInput claims a positional hook slot on the
+	// enclosing fiber, and gating it on a value that varies across renders
+	// (Disabled) would shift every hook slot after it in the same render.
+	// The native `disabled` attribute above already stops the browser from
+	// ever dispatching input events, so the guard belongs in the callback.
+	if p.OnChange != nil {
+		onChange := p.OnChange
+		disabled := p.Disabled
+		opts = append(opts, html.OnInput(func(e gwcui.InputEvent) {
+			if !disabled {
+				onChange(e.GetValue())
+			}
+		}))
 	}
 
 	children := []Node{

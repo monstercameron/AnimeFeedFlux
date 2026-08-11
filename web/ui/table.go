@@ -34,6 +34,21 @@ type TableProps struct {
 // <th scope="col">, a stable key per row, and token-driven styling. Pair it
 // with the six state components in state.go for loading/empty/error — Table
 // itself only renders the populated case.
+//
+// # D5-01: narrow-width behaviour
+//
+// A seven-column data table does not become usable by shrinking — text
+// wraps mid-word, numeric columns lose alignment, and a stacked
+// label/value presentation would mean re-deriving a bespoke per-column
+// template for every table (and re-deriving it again the next time a
+// column is added). Table instead renders unshrunk inside its own
+// horizontally-scrolling container: the container, not the page, scrolls
+// sideways. That keeps the table's structure (and its <th scope="col">
+// semantics) intact at any viewport, and it is the same behaviour at 320px
+// as at 1440px — there is no separate "mobile table" to keep in sync with
+// the real one. The container is also a keyboard scroll target
+// (tabindex="0" + a visible focus ring), because an overflow:auto box a
+// keyboard user cannot reach is only scrollable with a mouse.
 func Table(p TableProps) Node {
 	headerCells := make([]Node, 0, len(p.Columns))
 	for _, col := range p.Columns {
@@ -57,7 +72,7 @@ func Table(p TableProps) Node {
 		rows = append(rows, html.WithKey(h.Tag("tr", nil, cells), key))
 	}
 
-	return h.Table(
+	table := h.Table(
 		html.ID(p.ID),
 		css.Class([]css.Rule{
 			css.W(css.Length("100%")),
@@ -70,6 +85,18 @@ func Table(p TableProps) Node {
 			css.Raw("border-bottom", "1px solid "+string(tokens.Color(tokens.RoleBorderStrong))),
 		}), h.Tag("tr", nil, headerCells)),
 		h.Tbody(nil, rows),
+	)
+
+	scrollRules := []css.Rule{
+		css.OverflowX.Auto,
+		css.MaxWidth(css.Length("100%")),
+		css.Raw("-webkit-overflow-scrolling", "touch"),
+	}
+	scrollRules = append(scrollRules, focusVisible()...)
+	return h.Div(
+		html.TabIndex(0),
+		css.Class(scrollRules),
+		table,
 	)
 }
 

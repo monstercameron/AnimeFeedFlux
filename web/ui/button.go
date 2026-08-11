@@ -93,8 +93,22 @@ func Button(p ButtonProps) Node {
 	if p.ID != "" {
 		opts = append(opts, html.ID(p.ID))
 	}
-	if p.OnClick != nil && !isDisabled {
-		opts = append(opts, html.OnClick(p.OnClick))
+	// The handler is registered every render regardless of isDisabled — GWC's
+	// html.OnClick ultimately calls ui.UseEvent, which claims a POSITIONAL
+	// hook slot on the enclosing fiber (internal/runtime/hooks.go's
+	// GoUseFunc). Skipping registration only when Disabled/Busy is true would
+	// shift every hook slot claimed after this Button call within the same
+	// render whenever Disabled/Busy flips across renders — the classic
+	// "hooks must be called unconditionally" hazard, not a cosmetic issue.
+	// The native `disabled` attribute above already stops the browser from
+	// ever dispatching the click, so gating registration bought nothing.
+	if p.OnClick != nil {
+		onClick := p.OnClick
+		opts = append(opts, html.OnClick(func() {
+			if !isDisabled {
+				onClick()
+			}
+		}))
 	}
 
 	label := resolve(p.T, p.LabelKey, p.LabelArgs...)

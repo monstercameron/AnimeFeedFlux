@@ -72,8 +72,17 @@ func Select(p SelectProps) Node {
 		html.Aria("invalid", boolStr(hasError)),
 		html.Aria("describedby", helpID),
 	}
-	if p.OnChange != nil && !p.Disabled {
-		opts = append(opts, html.OnChange(func(e gwcui.ChangeEvent) { p.OnChange(e.GetValue()) }))
+	// Registered every render regardless of p.Disabled — see button.go's
+	// matching comment on why gating hook registration on a value that
+	// varies across renders is unsafe under GWC's positional hook slots.
+	if p.OnChange != nil {
+		onChange := p.OnChange
+		disabled := p.Disabled
+		opts = append(opts, html.OnChange(func(e gwcui.ChangeEvent) {
+			if !disabled {
+				onChange(e.GetValue())
+			}
+		}))
 	}
 
 	optionNodes := make([]Node, 0, len(p.Options))

@@ -48,8 +48,14 @@ func TestEmit_CustomPropertiesSurvive(t *testing.T) {
 		t.Fatalf("could not locate light accent value before the dark block in:\n%s", out)
 	}
 	darkSection := out[darkBlockIdx:]
-	if !strings.Contains(strings.ToLower(darkSection), "--color-accent:#34d6c7") {
-		t.Errorf("dark block does not override --color-accent to the dark value, dark section:\n%s", darkSection)
+	// Asserted against DarkTheme's own value rather than a hex literal
+	// repeated here: this test is about the override reaching the emitted
+	// sheet, not about which blue the brand happens to be, and a second
+	// copy of the value only means a palette change fails here for a
+	// reason that has nothing to do with what this test checks.
+	wantDark := strings.ToLower(string(DarkTheme().Colors[RoleAccent]))
+	if !strings.Contains(strings.ToLower(darkSection), "--color-accent:"+wantDark) {
+		t.Errorf("dark block does not override --color-accent to DarkTheme's value (%s), dark section:\n%s", wantDark, darkSection)
 	}
 }
 

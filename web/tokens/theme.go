@@ -7,16 +7,23 @@
 //
 // # Design brief
 //
-// AnimeFeedFlux's admin console is a one-operator control room for an
-// unattended pipeline that spends real money generating and publishing RSS
-// items nobody watches in real time. The register is "signal room", not
-// "dashboard SaaS": a calm, dense, numbers-honest surface where cost figures,
-// cron readouts, and token counts are set in a monospace data face so they
-// read as instrument values, not prose, and the one accent color ("signal
-// teal") is reserved for what is live/active/interactive — so a glance tells
-// you what is on air versus what is just describing state. Warning/danger/
-// success stay apart from the accent so "this is happening" is never
-// confused with "this needs attention" or "this cost money."
+// The palette below follows docs/design-direction.md — "the animation
+// timesheet": a genga/douga sheet printed on pale green-grey stock, ruled in
+// red, marked up in blue pencil. Every hex traces to that document's palette
+// table (paper/surface/ink/muted/rule/redline/pencil/phosphor); dark mode is
+// not an inversion of it but "the same sheet, lit from beneath" — the same
+// roles, restated as the light-table version of the same stock. Cost
+// figures, cron readouts and token counts read as instrument values via
+// tabular numerals (declared once, at :root, by Emit — see below) rather
+// than a monospace face change.
+//
+// A handful of the doc's literal swatches fail WCAG contrast in the specific
+// role they'd need to fill here (a filled badge/button background needing to
+// carry readable text on it) and are adjusted from the documented hex — see
+// the comments on RoleBorder, RoleDanger and RoleWarning/RoleLive below for
+// the exact before/after and the ratio that forced it. Nothing here loosens
+// a threshold; contrast_test.go enumerates every real pairing and fails
+// loudly with the ratio if a value regresses.
 //
 // # Light and dark, decided once
 //
@@ -61,6 +68,17 @@ const (
 	RoleSuccessFg     = "success-fg"
 	RoleFocusRing     = "focus-ring" // visible-focus outline color (a11y floor)
 	RoleScrim         = "scrim"      // modal/overlay backdrop
+
+	// RoleLive/RoleLiveFg are new with the timesheet direction: "phosphor" is
+	// documented there as "live / running / attention", distinct from
+	// RoleWarning's "budget nearing limit, stale feed" — a run that is
+	// actively generating right now (the thing that is "on air") is not the
+	// same fact as a budget that needs attention, even though both currently
+	// share the phosphor swatch (see LightTheme/DarkTheme comments). Kept as
+	// its own role, not folded into RoleWarning, so a future divergence in
+	// color doesn't require re-deriving which call sites meant which.
+	RoleLive   = "live"
+	RoleLiveFg = "live-fg"
 )
 
 // Font-size scale names (Theme.FontSizes keys / "--text-<name>").
@@ -108,29 +126,95 @@ const (
 	FontMono = "font-mono" // costs, tokens, cron expressions, GUIDs, timestamps
 )
 
-// LightTheme is the default (unscoped :root) palette.
+// LightTheme is the default (unscoped :root) palette — the timesheet stock
+// in daylight. Every value traces to docs/design-direction.md's palette
+// table (paper/surface/ink/muted/rule/redline/pencil/phosphor); the few
+// swatches that needed adjusting to clear WCAG contrast in the role they
+// fill here are called out at their role below, with the documented value,
+// the value used, and the ratio.
 func LightTheme() css.Theme {
 	return css.Theme{
 		Colors: map[string]css.Color{
-			RoleBg:            css.Hex("F7F6F2"),
-			RoleSurface:       css.Hex("FFFFFF"),
-			RoleSurfaceRaised: css.Hex("FFFFFF"),
-			RoleBorder:        css.Hex("DEDCD3"),
-			RoleBorderStrong:  css.Hex("C6C2B4"),
-			RoleText:          css.Hex("191B1D"),
-			RoleTextMuted:     css.Hex("63676D"),
-			RoleTextInverse:   css.Hex("F7F6F2"),
-			RoleAccent:        css.Hex("0C7C74"),
-			RoleAccentStrong:  css.Hex("085B55"),
-			RoleAccentFg:      css.Hex("FFFFFF"),
-			RoleWarning:       css.Hex("92400E"),
-			RoleWarningFg:     css.Hex("FFFFFF"),
-			RoleDanger:        css.Hex("B3212B"),
-			RoleDangerFg:      css.Hex("FFFFFF"),
-			RoleSuccess:       css.Hex("157A4F"),
-			RoleSuccessFg:     css.Hex("FFFFFF"),
-			RoleFocusRing:     css.Hex("0C7C74"),
-			RoleScrim:         css.RGBA(11, 13, 16, 0.45),
+			// paper — page ground (stock).
+			RoleBg: css.Hex("E8EDE6"),
+			// surface — raised panels, one step brighter than paper.
+			RoleSurface: css.Hex("F3F6F1"),
+			// Not a named swatch in the direction doc — the doc gives two
+			// stock levels (paper, surface) but the existing role set (kept
+			// per the rework brief) needs a third for "genuinely raised"
+			// things (modals, menus) per the Layout section. Derived by
+			// continuing the paper→surface step half as far again, staying
+			// in the same pale green-grey family rather than reaching for
+			// pure white.
+			RoleSurfaceRaised: css.Hex("F9FBF7"),
+			// rule, adjusted. Direction doc: #A8B5A5. As documented it is a
+			// hairline/border color, but at that value it only clears
+			// 1.80:1–2.05:1 against paper/surface/surface-raised — nowhere
+			// near the 3:1 UI-boundary floor a divider or input border needs
+			// to be visible. Darkened (rgb scaled ×0.70) to #757E73, which
+			// clears the worst-case pairing (surface-raised) at 3.55:1.
+			RoleBorder: css.Hex("757E73"),
+			// muted, reused: an emphasized border needs more presence than
+			// the hairline `rule` without reaching for `redline` (reserved,
+			// per the doc, for exactly one loud boundary per view). muted
+			// already clears body-text contrast (4.75:1+), so it clears the
+			// lower 3:1 UI-boundary bar with room to spare.
+			RoleBorderStrong: css.Hex("5C6B5E"),
+			// ink — primary text.
+			RoleText: css.Hex("1A1F1C"),
+			// muted — secondary/help text.
+			RoleTextMuted: css.Hex("5C6B5E"),
+			// paper, reused as the generic light-on-fill foreground: at
+			// paper's near-white value it clears 4.5:1 against every filled
+			// surface below (accent, accent-strong, the adjusted warning/
+			// danger) once those are at the ratios noted on their own roles.
+			RoleTextInverse: css.Hex("E8EDE6"),
+			// pencil — accent, links, focus. Repointed 2026-08-10 from the
+			// muted teal-blue #2E6E8E to the brand crest's own electric
+			// blue: the mark is the loudest blue on any screen it appears
+			// on, and an accent a few degrees off it reads as a mismatch
+			// rather than as a second colour. Chosen at the same contrast
+			// headroom the old value had (paper text on it: 4.75:1 here vs
+			// 4.73:1 before), so nothing in contrast_test.go's floor moves.
+			RoleAccent: css.Hex("2A5FD8"),
+			// pencil, darkened (×0.80) for the pressed/hover state — same
+			// "darker than the base fill" convention as before, in both
+			// themes.
+			RoleAccentStrong: css.Hex("224CAD"),
+			RoleAccentFg:     css.Hex("E8EDE6"),
+			// phosphor, adjusted. Direction doc: #B8860B. At that value,
+			// paper text on it is only 2.74:1 — too light a gold to carry
+			// light text at all (a dark-ink foreground would clear it, but
+			// then fails everywhere else this role's *Fg text lands: 2.9–3.0
+			// against pencil/redline/muted). Darkened (×0.70) to #805D07,
+			// which clears paper-on-phosphor at 5.07:1 while keeping the
+			// paper foreground uniform across every filled role.
+			RoleWarning:   css.Hex("805D07"),
+			RoleWarningFg: css.Hex("E8EDE6"),
+			// redline, adjusted. Direction doc: #C8452F. Paper text on it is
+			// 4.07:1 — short of the 4.5:1 body-text floor by a visible
+			// margin. Darkened (×0.90) to #B43E2A, 4.83:1.
+			RoleDanger:   css.Hex("B43E2A"),
+			RoleDangerFg: css.Hex("E8EDE6"),
+			// muted, reused: the palette has no dedicated success green: the
+			// closest hue rooted in the anchor's pale-green-grey stock is
+			// the sage `muted` already in the table, used here as a fill
+			// rather than a text color.
+			RoleSuccess:   css.Hex("5C6B5E"),
+			RoleSuccessFg: css.Hex("E8EDE6"),
+			// pencil — the focus ring reads straight off the accent role, so
+			// it moves with it (see RoleAccent).
+			RoleFocusRing: css.Hex("2A5FD8"),
+			// Scrim is a translucent dimming overlay, not a swatch in the
+			// doc's table (see contrast_test.go's exemptRoles). Based on
+			// `ink`, the palette's darkest tone, rather than an arbitrary
+			// black.
+			RoleScrim: css.RGBA(0x1A, 0x1F, 0x1C, 0.45),
+			// phosphor — "live / running / attention"; same adjusted value
+			// as RoleWarning (see that role's comment), reused because both
+			// are the same swatch in the direction doc.
+			RoleLive:   css.Hex("805D07"),
+			RoleLiveFg: css.Hex("E8EDE6"),
 		},
 		FontSizes: map[string]css.Length{
 			TextXs:      css.Rem(0.75),
@@ -157,28 +241,81 @@ func LightTheme() css.Theme {
 // :root[data-theme="dark"]. Type scale, radii and spacing are geometry, not
 // color, and are intentionally identical in both themes — decided once, per
 // D0-12, rather than risk a second silently-drifting copy.
+//
+// Per the direction doc, this is not an inversion of LightTheme — it is "the
+// same sheet, lit from beneath": the same eight named swatches, restated at
+// their documented dark values. Every dark-theme fill (accent, warning,
+// danger) already clears contrast against a near-black `paper` foreground as
+// documented, so none of light theme's swatch adjustments are needed here —
+// see each role's light-theme comment for the ratio that forced the light
+// value away from the doc.
 func DarkTheme() css.Theme {
 	return css.Theme{
 		Colors: map[string]css.Color{
-			RoleBg:            css.Hex("0B0D10"),
-			RoleSurface:       css.Hex("12151A"),
-			RoleSurfaceRaised: css.Hex("1A1F26"),
-			RoleBorder:        css.Hex("262C34"),
-			RoleBorderStrong:  css.Hex("38414C"),
-			RoleText:          css.Hex("E7E9EA"),
-			RoleTextMuted:     css.Hex("8A929B"),
-			RoleTextInverse:   css.Hex("0B0D10"),
-			RoleAccent:        css.Hex("34D6C7"),
-			RoleAccentStrong:  css.Hex("1FB6A8"),
-			RoleAccentFg:      css.Hex("04211E"),
-			RoleWarning:       css.Hex("F2A93B"),
-			RoleWarningFg:     css.Hex("2B1B02"),
-			RoleDanger:        css.Hex("F1555F"),
-			RoleDangerFg:      css.Hex("2B0508"),
-			RoleSuccess:       css.Hex("3ECF8E"),
-			RoleSuccessFg:     css.Hex("042015"),
-			RoleFocusRing:     css.Hex("34D6C7"),
-			RoleScrim:         css.RGBA(0, 0, 0, 0.65),
+			// paper — the light table, lit from beneath.
+			RoleBg: css.Hex("12171A"),
+			// surface — raised panels.
+			RoleSurface: css.Hex("1A2126"),
+			// Derived the same way as LightTheme's surface-raised: continuing
+			// the paper→surface step, here a full step further (dark fills
+			// need more separation than light ones to read as "raised" —
+			// see contrast figures in contrast_test.go).
+			RoleSurfaceRaised: css.Hex("222B32"),
+			// rule, adjusted. Direction doc: #33403A. As documented it clears
+			// only 1.29:1–1.66:1 against paper/surface/surface-raised — a
+			// border effectively invisible against the ground it's meant to
+			// divide. Lightened (rgb scaled ×2.10) to #6B8679, which clears
+			// the worst-case pairing (surface-raised) at 3.64:1.
+			RoleBorder: css.Hex("6B8679"),
+			// muted, reused — same rationale as LightTheme.RoleBorderStrong.
+			RoleBorderStrong: css.Hex("93A396"),
+			// ink — primary text.
+			RoleText: css.Hex("E6ECE5"),
+			// muted — secondary/help text.
+			RoleTextMuted: css.Hex("93A396"),
+			// paper (dark value, near-black) as the generic dark-on-fill
+			// foreground: every dark-theme fill below is bright (the "lit
+			// from beneath" table brightens accents relative to light mode),
+			// so the same near-black clears 4.5:1 against all of them — see
+			// each fill's own comment for the exact ratio.
+			RoleTextInverse: css.Hex("12171A"),
+			// pencil — the brand blue, brightened for the light table. Same
+			// repoint as LightTheme.RoleAccent; near-black text on it clears
+			// 5.71:1 (the old #5FA8CE cleared 6.86:1, still well past the
+			// 4.5:1 floor).
+			RoleAccent: css.Hex("5B8CFF"),
+			// pencil, darkened for the pressed/hover state. The usual ×0.85
+			// step lands on #4D77D9, which carries near-black text at only
+			// 4.26:1 — under the 4.5:1 floor, and a hover state that fails
+			// contrast is worse than one that fails to look pressed, since
+			// it is the state a button is in while being read. Softened to
+			// ×0.90 (#5480E6, 4.82:1) instead of darkening the foreground,
+			// which would fork *Fg away from the single near-black every
+			// other dark-theme fill shares.
+			RoleAccentStrong: css.Hex("5480E6"),
+			RoleAccentFg:     css.Hex("12171A"),
+			// phosphor — unlike the light-theme value, the documented dark
+			// swatch already clears paper-on-phosphor at 8.60:1, so it is
+			// used unadjusted here.
+			RoleWarning:   css.Hex("E3A857"),
+			RoleWarningFg: css.Hex("12171A"),
+			// redline — the documented dark swatch clears paper-on-redline
+			// at 5.16:1 unadjusted (unlike the light-theme value, which
+			// needed darkening — see LightTheme.RoleDanger).
+			RoleDanger:   css.Hex("E2604A"),
+			RoleDangerFg: css.Hex("12171A"),
+			// muted, reused — same rationale as LightTheme.RoleSuccess.
+			RoleSuccess:   css.Hex("93A396"),
+			RoleSuccessFg: css.Hex("12171A"),
+			// pencil — focus ring, brightened for the light table.
+			RoleFocusRing: css.Hex("5FA8CE"),
+			// A dimming overlay stays a literal near-black here rather than
+			// reusing `ink` (which in dark mode IS the near-white text
+			// color, the opposite of what a scrim needs).
+			RoleScrim: css.RGBA(0, 0, 0, 0.65),
+			// phosphor — same value as RoleWarning; see that role's comment.
+			RoleLive:   css.Hex("E3A857"),
+			RoleLiveFg: css.Hex("12171A"),
 		},
 		FontSizes: LightTheme().FontSizes,
 		Radii:     LightTheme().Radii,
@@ -256,6 +393,34 @@ func Emit() {
 
 	darkRules := append(DarkTheme().RootRules(), extraTokens(DarkTheme())...)
 	css.Global(`:root[data-theme="dark"]`, darkRules...)
+
+	// Tabular numerals, decided once, here. The direction doc calls this
+	// non-negotiable for "every column of counts, costs, tokens and
+	// timestamps" — the instrument-panel feel a page gets from numerals that
+	// hold their width and stay aligned in a column. Declaring it globally on
+	// :root, theme-independent (both light and dark inherit the same rule),
+	// is what stops each page under web/pages/* from reaching for its own
+	// font-variant-numeric or a mono-font workaround: every digit in the app
+	// is tabular by default, and a component only needs to override this if
+	// it genuinely wants proportional numerals (rare enough to opt out of,
+	// not in to).
+	css.Root(css.FontVariantNumeric.TabularNums)
+
+	// prefers-reduced-motion, decided once, here. Every component transition
+	// or animation goes through Duration(tokens.DurationFast/Base/Slow) rather
+	// than a literal ms value, so collapsing these three custom properties to
+	// near-zero under the media query neutralizes motion everywhere at once —
+	// a component cannot forget to opt in, because it never had a duration of
+	// its own to gate. 0.01ms rather than 0ms per RawDuration's doc: code
+	// awaiting `transitionend` does not hang for exactly the users who asked
+	// for less motion. EasingStd is left alone deliberately: an easing curve
+	// applied to an effectively-instant transition has no perceptible motion
+	// of its own to neutralize.
+	css.Root(css.Media(css.ReducedMotion,
+		css.Custom(DurationFast, "0.01ms"),
+		css.Custom(DurationBase, "0.01ms"),
+		css.Custom(DurationSlow, "0.01ms"),
+	)...)
 }
 
 // extraTokens declares the custom properties css.Theme.RootRules does not

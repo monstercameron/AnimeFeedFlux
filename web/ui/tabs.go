@@ -12,9 +12,10 @@ import (
 // Tab is one tab. LabelKey is an i18n key (D0-22). PanelID must match the id
 // on the panel element the tab controls (aria-controls/aria-labelledby).
 type Tab struct {
-	ID       string
-	LabelKey string
-	PanelID  string
+	ID        string
+	LabelKey  string
+	LabelArgs []any
+	PanelID   string
 }
 
 // TabsProps configures Tabs. It renders ONLY the tablist — callers render
@@ -37,7 +38,7 @@ func Tabs(p TabsProps) Node {
 	items := make([]gwcui.CompositeItem, 0, len(p.Tabs))
 	activeIndex := 0
 	for i, t := range p.Tabs {
-		items = append(items, gwcui.CompositeItem{ID: t.ID, Text: resolve(p.T, t.LabelKey)})
+		items = append(items, gwcui.CompositeItem{ID: t.ID, Text: resolve(p.T, t.LabelKey, t.LabelArgs...)})
 		if t.ID == p.ActiveID {
 			activeIndex = i
 		}
@@ -58,6 +59,8 @@ func Tabs(p TabsProps) Node {
 		rules := []css.Rule{
 			css.Display.InlineFlex,
 			css.Items.Center,
+			css.Raw("flex-shrink", "0"),
+			css.WhiteSpace.NoWrap,
 			css.Padding(tokens.Space(2)),
 			css.PaddingX(tokens.Space(4)),
 			css.Raw("border", "none"),
@@ -95,10 +98,19 @@ func Tabs(p TabsProps) Node {
 					onClick(id)
 				}
 			}),
-			resolve(p.T, t.LabelKey),
+			resolve(p.T, t.LabelKey, t.LabelArgs...),
 		))
 	}
 
+	// D5-01: the tablist scrolls horizontally inside its own container
+	// rather than wrapping to a second row or shrinking labels — a wrapped
+	// tab row breaks the roving-tabindex arrow-key model's "next/previous"
+	// intuition (arrow-right would jump to a visually-unrelated row), and
+	// the page itself must never scroll sideways for this. NoWrap keeps
+	// tabs on one line; OverflowX.Auto lets that line scroll instead of
+	// wrap. This is the container's behaviour at every width, not just the
+	// narrow one, because tab count (not viewport) is what decides whether
+	// it is needed.
 	return h.Div(
 		html.ID(p.ID),
 		html.Role("tablist"),
@@ -106,6 +118,10 @@ func Tabs(p TabsProps) Node {
 		html.OnKeyDown(func(e gwcui.KeyboardEvent) { nav.OnKeyDown(e) }),
 		css.Class([]css.Rule{
 			css.Display.Flex,
+			css.FlexWrap.NoWrap,
+			css.OverflowX.Auto,
+			css.MaxWidth(css.Length("100%")),
+			css.Raw("-webkit-overflow-scrolling", "touch"),
 			css.Gap(tokens.Space(1)),
 			css.Raw("border-bottom", "1px solid "+string(tokens.Color(tokens.RoleBorder))),
 		}),
