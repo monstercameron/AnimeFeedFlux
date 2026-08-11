@@ -331,6 +331,15 @@ func (s *Store) UpdateItem(ctx context.Context, it model.Item, expectedVersion i
 // forever and the guid is never freed, so a row that stops existing would
 // break both promises. A `PurgeDeleted` RPC was cut from the design for
 // exactly this reason — do not reintroduce it here.
+//
+// NOT the production delete path, and not a §11-safe one. This neither takes
+// an expected_version nor bumps `version`, so it will delete a row another
+// writer just edited without reporting a conflict, and it leaves every holder
+// of the old version unable to tell that anything happened. The admin path is
+// ItemServer.Delete (internal/rpc/item.go), which pins the version in its
+// WHERE clause and increments it; this one exists for cmd/affseed and tests,
+// where there is a single writer and no concurrent reader to mislead. Reach
+// for the RPC method from anything an operator can drive.
 func (s *Store) SoftDeleteItem(ctx context.Context, itemKey string) error {
 	now := formatTime(time.Now())
 	res, err := s.writer.ExecContext(ctx,
@@ -351,6 +360,10 @@ func (s *Store) SoftDeleteItem(ctx context.Context, itemKey string) error {
 
 // RestoreItem clears a soft delete. The item_key and guid never moved, so
 // restoring is just clearing deleted_at — nothing about identity changes.
+//
+// Carries the same caveat as SoftDeleteItem above: no expected_version, no
+// version bump, so it is for the seeder and tests rather than any path an
+// operator drives. ItemServer.Restore is the §11-safe equivalent.
 func (s *Store) RestoreItem(ctx context.Context, itemKey string) error {
 	now := formatTime(time.Now())
 	res, err := s.writer.ExecContext(ctx,
