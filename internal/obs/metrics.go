@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -160,7 +161,25 @@ func looksUnbounded(v string) bool {
 	if strings.Contains(v, "://") {
 		return true
 	}
+	if looksLikeTimestamp(v) {
+		return true
+	}
 	return looksLikeOpaqueToken(v)
+}
+
+// timestampPattern catches RFC3339-shaped values ("2026-08-10T14:23:01Z" and
+// its space-separated cousin): a timestamp is exactly as unbounded as a
+// title or a URL — every call produces a new one — but it defeats the other
+// two backstops. It has no whitespace-that-matters at the point the "T"/" "
+// separator sits, no "://", and looksLikeOpaqueToken's hex-ratio walk
+// returns false the instant it hits the "T", ":", or "Z" characters a
+// timestamp is full of, so without this check a timestamp mistakenly wired
+// up as a label would sail through the heuristic backstop and rely on
+// MaxDistinct learning alone to eventually catch it.
+var timestampPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}`)
+
+func looksLikeTimestamp(v string) bool {
+	return timestampPattern.MatchString(v)
 }
 
 // looksLikeOpaqueToken flags long, mostly-hex strings: content hashes,
@@ -398,6 +417,12 @@ func (m *Metrics) RecordFeedStaleness(ctx context.Context, feedSlug string, ageS
 
 // RecordHTTPRequest increments aff_http_requests_total{route,status}. status
 // is the HTTP status code as a string (e.g. "200", "304").
+//
+// Verified 2026-08-10: unreachable in the tree today. Its rightful caller —
+// same as fields.go's HTTPRequest — is a middleware/wrapper around
+// internal/publish/server.go's NewServer handler, which has no logging or
+// telemetry of any kind yet. See HTTPRequest's doc comment for the full
+// contract.
 func (m *Metrics) RecordHTTPRequest(ctx context.Context, route, status string) error {
 	if err := m.route.Check(route); err != nil {
 		return err
@@ -414,6 +439,10 @@ func (m *Metrics) RecordHTTPRequest(ctx context.Context, route, status string) e
 
 // RecordCacheResult increments aff_cache_hits_total{result}. result is
 // "hit" or "miss".
+//
+// Same unreachable-today status as RecordHTTPRequest above: internal/publish
+// (server.go, cache.go) already implements the cache itself (a hit never
+// touches SQLite, per §6/A9-04) but never reports the hit/miss outcome here.
 func (m *Metrics) RecordCacheResult(ctx context.Context, result string) error {
 	if err := m.result.Check(result); err != nil {
 		return err

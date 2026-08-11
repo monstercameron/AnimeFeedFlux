@@ -263,6 +263,54 @@ func setMeterProvider(mp otelmetric.MeterProvider) {
 	meterMu.Unlock()
 }
 
+// SetTracerProviderForTest installs tp as the process TracerProvider and
+// returns a restore func that puts back whatever was installed before —
+// call it (typically via t.Cleanup) before the calling test returns. This is
+// the seam a consumer package's test needs to assert on span attributes
+// without standing up obs.Setup's real stdout exporter and parsing process
+// stdout — e.g. install an sdktrace.NewTracerProvider backed by a recording
+// SpanProcessor, call the code under test (which reaches obs.Start the
+// normal way), then inspect the recorder directly.
+//
+// This does NOT take a testing.TB parameter, deliberately: an earlier
+// version did, on the theory that requiring a live *testing.T/B would make
+// misuse from production code impossible. It doesn't — "testing" would still
+// have to be imported by this file to spell that parameter type, and
+// importing "testing" into a non-test file pulls the whole test harness
+// (including its own flag.CommandLine registrations) into every binary that
+// links this package, which is a worse defect than the one being guarded
+// against. An export_test.go helper avoids that import but doesn't solve the
+// actual problem either: _test.go files are invisible outside the package
+// they live in, so a consumer package's own test file (e.g.
+// internal/generate/otel_test.go, the test this exists for) could not call
+// it at all. So the guard here is the name and this comment, not the type
+// system: ForTest means for tests, never call it from a production code
+// path. Setup remains the only supported way to install a provider for a
+// running process; this mutates the exact same package-level var Setup
+// does. Do not call it from two tests running in parallel against the same
+// package-level state without coordinating — it is process-wide state, same
+// as Setup's.
+func SetTracerProviderForTest(tp oteltrace.TracerProvider) (restore func()) {
+	prev := GetTracerProvider()
+	setTracerProvider(tp)
+	return func() { setTracerProvider(prev) }
+}
+
+// SetMeterProviderForTest is SetTracerProviderForTest's metrics counterpart,
+// and the same "ForTest is the whole guard, not testing.TB" reasoning
+// applies. Most metrics tests don't need this at all — NewMetrics
+// (metrics.go) already accepts any otelmetric.MeterProvider directly, so a
+// test can pass a sdkmetric.MeterProvider backed by a ManualReader straight
+// to NewMetrics with no global involved. This exists only for the narrower
+// case: code under test that calls obs.GetMeterProvider() itself (rather
+// than receiving a *Metrics via injection) and therefore needs the
+// package-level provider swapped out from under it.
+func SetMeterProviderForTest(mp otelmetric.MeterProvider) (restore func()) {
+	prev := GetMeterProvider()
+	setMeterProvider(mp)
+	return func() { setMeterProvider(prev) }
+}
+
 // defaultErrHandler logs and continues — OTel's "a failing exporter must
 // never block or crash the app" requirement, applied via
 // otel.SetErrorHandler so it covers export errors the SDK itself surfaces

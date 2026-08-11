@@ -63,6 +63,17 @@ func (h contextHandler) Handle(ctx context.Context, r slog.Record) error {
 	if id := RequestID(ctx); id != "" {
 		r.AddAttrs(slog.String("request_id", id))
 	}
+	// trace_id/span_id are the log-to-trace join (§15.0a). TraceContext
+	// (otel.go) reads the span active in ctx and returns "" for both when
+	// there is none — e.g. tracing disabled (the default, AFF_OTEL_ENABLED=0)
+	// or a call site that never wrapped ctx with obs.Start. Adding the
+	// attrs only when traceID is non-empty is what keeps the field genuinely
+	// ABSENT on those lines rather than present-but-empty: a wide event with
+	// a trace_id key that is always "" reads as "correlation is available"
+	// when it is not, which is worse than the field simply not being there.
+	if traceID, spanID := TraceContext(ctx); traceID != "" {
+		r.AddAttrs(slog.String(FieldTraceID, traceID), slog.String(FieldSpanID, spanID))
+	}
 	return h.Handler.Handle(ctx, r)
 }
 

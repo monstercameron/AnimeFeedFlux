@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel/codes"
+	otelmetric "go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
@@ -396,5 +399,143 @@ func TestStdoutRecordEmitsValidJSONLine(t *testing.T) {
 	}
 	if len(b) == 0 {
 		t.Fatal("empty attribute encoding")
+	}
+}
+
+// ---- SetTracerProviderForTest / SetMeterProviderForTest ------------------
+//
+// These cover the test-injection hook a consumer package (internal/generate)
+// needs so its own tests can install a recording TracerProvider and assert
+// on span attributes directly, instead of standing up obs.Setup's real
+// "stdout" exporter and parsing process stdout (see internal/generate's
+// otel_test.go doc comment for the brittle-test shape this replaces).
+
+func TestSetTracerProviderForTestInstallsAndRestores(t *testing.T) {
+	original := GetTracerProvider()
+
+	rec := &recordingExporter{}
+	fake := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSyncer(rec),
+	)
+	restore := SetTracerProviderForTest(fake)
+
+	if GetTracerProvider() != oteltrace.TracerProvider(fake) {
+		t.Fatal("SetTracerProviderForTest did not install the given provider")
+	}
+
+	// Exercise it through the same Start() call site production code uses —
+	// this is the point of the hook: no obs.Setup, no exporter, no stdout.
+	_, span := Start(context.Background(), "generation.run", KindRun)
+	span.End()
+	if len(rec.spans) != 1 {
+		t.Fatalf("got %d spans recorded through the injected provider, want 1", len(rec.spans))
+	}
+	if rec.spans[0].Name() != "generation.run" {
+		t.Errorf("recorded span name = %q", rec.spans[0].Name())
+	}
+
+	restore()
+	if GetTracerProvider() != original {
+		t.Error("restore() did not put back the provider that was installed before")
+	}
+}
+
+func TestSetMeterProviderForTestInstallsAndRestores(t *testing.T) {
+	original := GetMeterProvider()
+
+	reader := sdkmetric.NewManualReader()
+	fake := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	restore := SetMeterProviderForTest(fake)
+
+	if GetMeterProvider() != otelmetric.MeterProvider(fake) {
+		t.Fatal("SetMeterProviderForTest did not install the given provider")
+	}
+
+	m, err := NewMetrics(GetMeterProvider())
+	if err != nil {
+		t.Fatalf("NewMetrics: %v", err)
+	}
+	if err := m.RecordCacheResult(context.Background(), "hit"); err != nil {
+		t.Fatalf("RecordCacheResult: %v", err)
+	}
+	rm := collect(t, reader)
+	if !collectedNames(rm)[MetricCacheHitsTotal] {
+		t.Error("aff_cache_hits_total was not recorded through the injected provider")
+	}
+
+	restore()
+	if GetMeterProvider() != original {
+		t.Error("restore() did not put back the provider that was installed before")
+	}
+}
+
+// ---- hanging exporter must not stall Setup's shutdown --------------------
+//
+// The coordinator's brief is explicit that this must be a HANG, not a
+// refused connection: a refused connection (nothing listening, e.g. port 1)
+// fails fast at the TCP layer and never exercises the shutdown bound at all.
+// A listener that accepts the TCP connection but never reads or writes
+// anything at the application layer reproduces what actually happens in
+// production against a half-dead network path — the gRPC export call blocks
+// waiting on bytes that never arrive, and only Setup's own internal timeout
+// (otel.go's 5s default when the caller's context has no deadline) can save
+// it.
+
+// hangingListener accepts TCP connections and then does nothing with them —
+// no HTTP/2 preface response, no close — so anything that dials it and
+// waits for a reply hangs at the application layer rather than failing at
+// the TCP layer the way an unreachable/refused address would.
+func newHangingListener(t *testing.T) net.Addr {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // listener closed by t.Cleanup
+			}
+			// Deliberately never read/write/close conn: the connection stays
+			// open and silent, which is what makes the client hang instead
+			// of seeing a reset or EOF.
+			_ = conn
+		}
+	}()
+	return ln.Addr()
+}
+
+func TestOtlpExporterHangingEndpointDoesNotStallShutdown(t *testing.T) {
+	addr := newHangingListener(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+addr.String())
+	t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
+
+	shutdown, err := Setup(context.Background(), Config{Enabled: true, Exporter: "otlp", SampleRatio: 1})
+	if err != nil {
+		t.Fatalf("Setup against a hanging endpoint must not fail construction: %v", err)
+	}
+
+	ctx, span := Start(context.Background(), "generation.run", KindRun)
+	_ = ctx
+	span.End()
+
+	// Give the batch processor a moment to actually attempt a send against
+	// the hanging listener, so shutdown's flush genuinely has something to
+	// wait on rather than shutting down before any send starts.
+	time.Sleep(200 * time.Millisecond)
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- shutdown(context.Background()) }()
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed > 6*time.Second {
+			t.Errorf("shutdown took %v against a hanging exporter; want it bounded near the internal 5s default", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("shutdown hung indefinitely against a hanging OTLP endpoint — telemetry must never be able to stall a run")
 	}
 }

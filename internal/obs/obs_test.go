@@ -144,6 +144,65 @@ func TestLoggerRespectsLevel(t *testing.T) {
 	}
 }
 
+// TestLoggerAttachesTraceAndSpanIDsWhenActive checks the join described in
+// PLAN.md §15.0a actually works: a log line written from a context carrying
+// an active span gets trace_id/span_id, matching what TraceContext(ctx)
+// itself reports for that span (otel_test.go's
+// TestTraceContextReflectsActiveSpan already covers TraceContext in
+// isolation; this checks contextHandler.Handle actually calls it).
+func TestLoggerAttachesTraceAndSpanIDsWhenActive(t *testing.T) {
+	shutdown, err := Setup(context.Background(), Config{Enabled: true, Exporter: "stdout", SampleRatio: 1})
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	ctx, span := Start(context.Background(), "generation.run", KindRun)
+	defer span.End()
+	wantTraceID, wantSpanID := TraceContext(ctx)
+	if wantTraceID == "" || wantSpanID == "" {
+		t.Fatalf("TraceContext(ctx) = (%q, %q), want non-empty ids for an active span", wantTraceID, wantSpanID)
+	}
+
+	var buf bytes.Buffer
+	log := NewLogger(Options{Level: slog.LevelInfo, Writer: &buf})
+	log.InfoContext(ctx, "traced line")
+
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("log line is not JSON: %v\n%s", err, buf.String())
+	}
+	if rec[FieldTraceID] != wantTraceID {
+		t.Errorf("trace_id = %v, want %q", rec[FieldTraceID], wantTraceID)
+	}
+	if rec[FieldSpanID] != wantSpanID {
+		t.Errorf("span_id = %v, want %q", rec[FieldSpanID], wantSpanID)
+	}
+}
+
+// TestLoggerOmitsTraceAndSpanIDsWhenNoActiveSpan is the negative half: with
+// no span in context (tracing disabled is the documented default,
+// AFF_OTEL_ENABLED=0), the fields must be ABSENT, not present-and-empty. A
+// wide event carrying trace_id:"" reads as "correlation is available" to
+// anything that just checks the key exists, which is a worse failure mode
+// than the field never appearing at all.
+func TestLoggerOmitsTraceAndSpanIDsWhenNoActiveSpan(t *testing.T) {
+	var buf bytes.Buffer
+	log := NewLogger(Options{Level: slog.LevelInfo, Writer: &buf})
+	log.InfoContext(context.Background(), "untraced line")
+
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("log line is not JSON: %v\n%s", err, buf.String())
+	}
+	if _, ok := rec[FieldTraceID]; ok {
+		t.Errorf("trace_id present with no active span: %v", rec[FieldTraceID])
+	}
+	if _, ok := rec[FieldSpanID]; ok {
+		t.Errorf("span_id present with no active span: %v", rec[FieldSpanID])
+	}
+}
+
 func TestContextHelpersOnNilAndEmpty(t *testing.T) {
 	if RunID(context.Background()) != "" {
 		t.Error("RunID should be empty when unset")

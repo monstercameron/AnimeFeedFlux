@@ -189,6 +189,70 @@ func TestCardinalityGuardAcceptsOrdinaryBoundedValues(t *testing.T) {
 	}
 }
 
+// TestCardinalityGuardRejectsRealisticUnboundedShapes covers the exact
+// values the coordinator's brief calls out — the shapes that would really
+// appear if someone attached the "helpful" thing to a metric while
+// debugging: an LLM-generated item title, a full URL, a UUID, an RFC3339
+// timestamp, and an error string with an embedded network address. Every one
+// of these is unbounded, and every one is exactly the sort of value someone
+// reaches for mid-incident without thinking about cardinality.
+func TestCardinalityGuardRejectsRealisticUnboundedShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"llm-generated item title", "Attack on Titan Season 4 Part 2 Episode 5 Discussion Megathread"},
+		{"full url", "https://myanimelist.net/anime/16498/Shingeki_no_Kyojin?query=foo&page=2"},
+		{"uuid", "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"},
+		{"rfc3339 timestamp", "2026-08-10T14:23:01Z"},
+		{"error with embedded address", "dial tcp 10.0.0.5:8080: connect: connection refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Every one of these must be rejected as a "reason" label — the
+			// field §15.0's canonical table says is "log only, never a
+			// metric label" for exactly this reason.
+			guard := &CardinalityGuard{Label: "reason", MaxDistinct: 100}
+			if err := guard.Check(tc.value); err == nil {
+				t.Errorf("Check(%q) = nil, want ErrUnboundedLabel", tc.value)
+			} else if !errors.Is(err, ErrUnboundedLabel) {
+				t.Errorf("Check(%q) error = %v, want it to wrap ErrUnboundedLabel", tc.value, err)
+			}
+			// And the heuristic backstop alone (looksUnbounded) must catch
+			// each of these too, not just the allow-list/MaxDistinct layer —
+			// this is what makes the guard hold even for a guard configured
+			// with a generous or misconfigured MaxDistinct.
+			if !looksUnbounded(tc.value) {
+				t.Errorf("looksUnbounded(%q) = false, want true", tc.value)
+			}
+		})
+	}
+}
+
+// TestCardinalityGuardTimestampDefeatsOtherHeuristicsWithoutTheDedicatedCheck
+// documents WHY timestampPattern exists: a bare RFC3339 timestamp has no
+// whitespace, no "://", and breaks looksLikeOpaqueToken's hex-ratio walk on
+// its first "T"/":"/"Z" — so without a dedicated check it would sail through
+// every other heuristic despite being exactly as unbounded as a title or a
+// URL (a new distinct value on every call).
+func TestCardinalityGuardTimestampDefeatsOtherHeuristicsWithoutTheDedicatedCheck(t *testing.T) {
+	ts := "2026-08-10T14:23:01Z"
+	if strings.ContainsAny(ts, " \t\n\r") {
+		t.Fatal("test premise wrong: timestamp contains whitespace")
+	}
+	if strings.Contains(ts, "://") {
+		t.Fatal("test premise wrong: timestamp contains ://")
+	}
+	if len(ts) > 64 {
+		t.Fatal("test premise wrong: timestamp exceeds the length backstop")
+	}
+	if looksLikeOpaqueToken(ts) {
+		t.Fatal("test premise wrong: looksLikeOpaqueToken alone already catches this timestamp")
+	}
+	if !looksLikeTimestamp(ts) {
+		t.Error("looksLikeTimestamp must catch an RFC3339 timestamp that defeats every other heuristic")
+	}
+}
+
 func TestLooksUnboundedHeuristics(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -202,6 +266,9 @@ func TestLooksUnboundedHeuristics(t *testing.T) {
 		{"has whitespace", "hello world", true},
 		{"long string", strings.Repeat("a", 65), true},
 		{"opaque hex token", "9f86d081884c7d659a2feaa0c55ad015", true},
+		{"uuid", "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d", true},
+		{"rfc3339 timestamp", "2026-08-10T14:23:01Z", true},
+		{"rfc3339 timestamp space-separated", "2026-08-10 14:23:01", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := looksUnbounded(tc.in); got != tc.want {
