@@ -127,6 +127,35 @@ func TestError_Retryable(t *testing.T) {
 	}
 }
 
+// TestIsAccountScoped verifies the seam a caller (internal/generate, and
+// beyond it the composition root) uses to distinguish an account-wide kill-
+// switch condition from every other failure shape: only Fatal+ScopeAccount
+// trips it, it survives fmt.Errorf wrapping, and it never panics on plain
+// errors or nil.
+func TestIsAccountScoped(t *testing.T) {
+	table := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"account-scoped auth sentinel", Classify(schemaflux.ErrAuthentication), true},
+		{"account-scoped, wrapped", fmt.Errorf("generate: run failed: %w", Classify(schemaflux.ErrAuthentication)), true},
+		{"recipe-scoped configuration sentinel", Classify(schemaflux.ErrConfiguration), false},
+		{"fatal but ScopeNone (canceled)", Classify(context.Canceled), false},
+		{"transient, not fatal", Classify(schemaflux.ErrRateLimited), false},
+		{"plain unwrapped error", errors.New("boom"), false},
+		{"nil *Error typed as error", (*Error)(nil), false},
+	}
+	for _, tc := range table {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsAccountScoped(tc.err); got != tc.want {
+				t.Errorf("IsAccountScoped(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestError_UnwrapAndIs(t *testing.T) {
 	cause := errors.New("underlying")
 	wrapped := &Error{Kind: Invalid, Err: cause}

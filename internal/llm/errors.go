@@ -129,6 +129,28 @@ func (e *Error) Retryable() bool {
 	return e != nil && e.Kind == Transient
 }
 
+// IsAccountScoped reports whether err is a Fatal error whose Scope is
+// ScopeAccount -- PLAN.md §8's global-kill-switch condition: a revoked or
+// exhausted credential, which every feed sharing that credential is about to
+// fail identically, not just the one feed that happened to surface it first.
+//
+// This is the seam internal/generate exposes so its caller (the composition
+// root, e.g. a cmd/ scheduler loop) can act on the distinction instead of it
+// being computed and discarded: internal/generate.RunRecord.AccountScoped
+// (see runner.go) is set from exactly this check on the run's own error, and
+// a caller holding the raw error Run/Sample returned can call
+// llm.IsAccountScoped(err) directly for the same answer.
+//
+// errors.As walks any wrapping, so this is safe to call on an error that
+// passed through fmt.Errorf("...: %w", ...) as well as a bare *Error.
+func IsAccountScoped(err error) bool {
+	var lerr *Error
+	if !errors.As(err, &lerr) || lerr == nil {
+		return false
+	}
+	return lerr.Kind == Fatal && lerr.Scope == ScopeAccount
+}
+
 // Classify maps a SchemaFlux (or transport) failure onto Kind/Scope.
 //
 // It never calls SchemaFlux's own internal/llm.Classify -- that package is

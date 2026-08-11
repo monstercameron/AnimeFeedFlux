@@ -9,9 +9,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/monstercameron/schemaflux"
+
+	"github.com/monstercameron/AnimeFeedFlux/internal/obs"
 )
 
 // GeneratedItem is the generation contract every recipe produces (PLAN.md
@@ -27,6 +30,28 @@ type GeneratedItem struct {
 	AnswerHTML  string   `json:"answer_html,omitempty"`
 }
 
+// generatedBatch wraps the item slice in an object.
+//
+// It exists because OpenAI's structured-output contract REQUIRES the
+// response_format schema to have `"type": "object"` at the root, and
+// schemaflux.Generating[[]GeneratedItem] derives its schema from the type
+// parameter — a slice, so an array. Every call therefore came back:
+//
+//	invalid_json_schema: schema must be a JSON Schema of 'type: "object"',
+//	got 'type: "array"' (param text.format.schema)
+//
+// which means generation had NEVER worked against a real provider. Nothing
+// caught it: internal/llm's FakeProvider replays canned JSON and never
+// builds a schema, so the whole default test suite exercises the decode path
+// and none of the contract the provider actually enforces. Found by the
+// first live call (TODOS.md A4-30), which is precisely what that ticket
+// exists for.
+type generatedBatch struct {
+	// Items is the field the model fills. Named in the schema, so the
+	// steering text below and the schema agree on what is being asked for.
+	Items []GeneratedItem `json:"items"`
+}
+
 // Request is one generation call. System and MaxItems are folded into
 // SchemaFlux's Steer() text: the fluent Generate API has no separate
 // system-prompt slot and Count>1 is unimplemented upstream (batch generation
@@ -40,6 +65,17 @@ type Request struct {
 	Temperature float64
 	MaxItems    int
 	RequestID   string
+
+	// Effort selects SchemaFlux's Speed tier: "smart" (thorough, the
+	// default), "fast", or "quick". It is the only per-call effort knob
+	// SchemaFlux's public API exposes — PLAN.md §8.1 records that there is
+	// no temperature control at all, "only Mode and Speed tiers" — so it is
+	// named for what it actually selects rather than for a scale this
+	// package would then have to invent a mapping for.
+	//
+	// Empty means smart, which is what this package did implicitly before
+	// the setting existed by setting no tier.
+	Effort string
 }
 
 // Result is what a Provider call produced, with SchemaFlux's own result
@@ -87,6 +123,13 @@ type Config struct {
 	// ProviderName selects the SchemaFlux-registered backend. Empty defaults
 	// to "openai", the only one PLAN.md §8 calls live-verified.
 	ProviderName string
+
+	// Logger receives the WARN/ERROR line Generate emits on failure (§15.0,
+	// TODOS A0-L07). Nil defaults to slog.Default() so a caller that has not
+	// wired its own logger through still gets the level distinction rather
+	// than silence; see logGenerateFailure's doc comment for why the level
+	// choice is the whole point of this field existing.
+	Logger *slog.Logger
 }
 
 // SchemaFluxProvider implements Provider over an explicit, per-instance
@@ -107,6 +150,7 @@ type Config struct {
 type SchemaFluxProvider struct {
 	client *schemaflux.Client
 	name   string
+	logger *slog.Logger
 }
 
 // NewSchemaFluxProvider builds a provider bound to one explicit Client.
@@ -129,7 +173,12 @@ func NewSchemaFluxProvider(cfg Config) (*SchemaFluxProvider, error) {
 		return nil, &Error{Kind: Fatal, Scope: ScopeRecipe, Err: fmt.Errorf("llm: configuring provider %q: %w", providerName, err)}
 	}
 
-	return &SchemaFluxProvider{client: client, name: providerName}, nil
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	return &SchemaFluxProvider{client: client, name: providerName, logger: logger}, nil
 }
 
 // Name implements Provider.
@@ -152,21 +201,41 @@ func (p *SchemaFluxProvider) Generate(ctx context.Context, req Request) (Result,
 
 	steer := buildSteering(req)
 
-	builder := schemaflux.Generating[[]GeneratedItem](req.Prompt).Strict()
+	// Generating[generatedBatch], not Generating[[]GeneratedItem]: the
+	// provider rejects a top-level array schema outright. See
+	// generatedBatch's doc comment.
+	builder := schemaflux.Generating[generatedBatch](req.Prompt).Strict()
 	if steer != "" {
 		builder = builder.Steer(steer)
 	}
 	if req.Model != "" {
 		builder = builder.Model(req.Model)
 	}
+	// The Speed tier. Unknown values fall through to the library default
+	// rather than erroring here: the RPC layer already rejects anything
+	// outside the three tiers on save (internal/rpc's validProviderEfforts),
+	// so a bad value reaching this point means a config path that bypassed
+	// validation, and refusing to generate at all would be a worse outcome
+	// than generating at the default effort.
+	switch req.Effort {
+	case "fast":
+		builder = builder.Fast()
+	case "quick":
+		builder = builder.Quick()
+	case "smart":
+		builder = builder.Smart()
+	}
 	if req.RequestID != "" {
 		builder = builder.RequestID(req.RequestID)
 	}
 
-	items, err := builder.Run(ctx)
+	batch, err := builder.Run(ctx)
 	if err != nil {
-		return Result{}, Classify(err)
+		classified := Classify(err)
+		logGenerateFailure(ctx, p.logger, req.Model, classified)
+		return Result{}, classified
 	}
+	items := batch.Items
 
 	raw, _ := json.Marshal(items)
 	return Result{
@@ -174,6 +243,56 @@ func (p *SchemaFluxProvider) Generate(ctx context.Context, req Request) (Result,
 		Raw:   string(raw),
 		Model: req.Model,
 	}, nil
+}
+
+// logGenerateFailure logs a Generate failure at the level PLAN.md §15.0
+// requires (TODOS A0-L07): ERROR means a human must look, WARN means it
+// self-healed and only recurrence matters.
+//
+// Why the level is decided by Kind alone, not by counting retries: SchemaFlux
+// already retries a Transient failure internally (decorrelated-jitter
+// backoff, mw.Retry) before Run ever returns to this call site, so an error
+// reaching here has already survived every retry SchemaFlux was going to
+// make -- there is no "recovered mid-flight" case for this function to see,
+// only "still transient after retrying" or "not retryable at all". The
+// distinction §15.0 actually cares about still holds at that boundary:
+// Kind == Transient means the *next* attempt -- this generation run's own
+// retry if internal/generate has one, or simply the feed's next scheduled
+// run -- is expected to succeed without anyone doing anything, which is
+// WARN's definition ("failed but self-healed, recurrence matters"). Kind ==
+// Invalid or Fatal means nothing about the next attempt is expected to be
+// different, which is ERROR's definition ("a human must look now").
+//
+// A per-attempt hook into SchemaFlux's own retry loop was investigated and
+// does not exist in v1.1.0: mw.Retry (github.com/monstercameron/schemaflux/
+// mw/retry.go) is unexported from the fluent Generate path with no
+// caller-supplied callback, and the library's own extension point for this
+// -- telemetry.Observer's OperationStarted/OperationFinished, installed via
+// telemetry/otel.Install -- is never invoked by the real Generate/Extract/
+// Transform call path (internal/ops/core.go logs through its own private
+// logger.GetLogger() instead); grepping the vendored source for
+// OperationStarted(/OperationFinished( call sites outside their own
+// definition and tests returns nothing. Wiring Install would tick a box
+// with no span ever opening, which is the "wired to nothing" failure mode
+// this repo has shipped before -- see the task report.
+//
+// RULE-3 (never log model output): only Kind, a closed-set enum, ever
+// reaches the log line. err.Err's message is never logged -- a schema-
+// violation or malformed-output error can and does echo the model's raw
+// text back (errors.go's Classify), the same reason otel.go's
+// OperationFinished records "the kind, not the message" on its own span.
+func logGenerateFailure(ctx context.Context, logger *slog.Logger, model string, err *Error) {
+	if logger == nil || err == nil {
+		return
+	}
+	level := slog.LevelError
+	if err.Kind == Transient {
+		level = slog.LevelWarn
+	}
+	logger.LogAttrs(ctx, level, "llm.generate_failed",
+		slog.String(obs.FieldModel, model),
+		slog.String(obs.FieldReason, "llm_"+err.Kind.String()),
+	)
 }
 
 // buildSteering folds Request.System and Request.MaxItems into SchemaFlux's
@@ -185,7 +304,11 @@ func buildSteering(req Request) string {
 		parts = append(parts, req.System)
 	}
 	if req.MaxItems > 0 {
-		parts = append(parts, fmt.Sprintf("Generate at most %d items.", req.MaxItems))
+		// Names the "items" field explicitly: the schema now nests the
+		// slice under an object (generatedBatch), and the steering text has
+		// to ask for the same shape the schema describes or the model fills
+		// the wrapper and leaves the array empty.
+		parts = append(parts, fmt.Sprintf("Return at most %d items in the \"items\" array.", req.MaxItems))
 	}
 	return strings.Join(parts, " ")
 }

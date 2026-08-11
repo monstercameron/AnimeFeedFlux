@@ -110,7 +110,7 @@ func TestFake_ImplementsProvider(t *testing.T) {
 
 func TestBuildSteering(t *testing.T) {
 	got := buildSteering(Request{System: "Be concise.", MaxItems: 3})
-	want := "Be concise. Generate at most 3 items."
+	want := "Be concise. Return at most 3 items in the \"items\" array."
 	if got != want {
 		t.Errorf("buildSteering() = %q, want %q", got, want)
 	}
