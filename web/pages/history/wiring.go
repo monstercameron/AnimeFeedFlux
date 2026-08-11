@@ -24,6 +24,7 @@ import (
 type Deps struct {
 	Runs  RunsClient
 	Items ItemsClient
+	Feeds FeedsClient
 	T     Catalog
 }
 
@@ -66,6 +67,31 @@ func Render() ui.Node {
 		return renderNotWired()
 	}
 
+	// D0-08: this page was previously never registering a dirty check at
+	// all, so a session expiry while mid-edit on the Items tab's editor
+	// (forms_ui.go's title/summary/body/... ui.UseState fields) silently
+	// dropped to ANON, discarding the in-progress edit with no warning.
+	// The precise per-field predicate generate/render.go's DraftDirty uses
+	// (comparing a live draft against its last-loaded snapshot) is not
+	// reachable from this file without editing forms_ui.go/items_ui.go/
+	// root.go, all out of this change's allowed paths — their edit-form
+	// state lives entirely in those components' own local hooks, which a
+	// sibling file has no way to read. Registered here is the conservative
+	// substitute available at this boundary: while /history is mounted and
+	// wired, treat it as potentially dirty, so every session expiry holds
+	// and shows the confirmation modal rather than ever silently
+	// discarding an open edit. The tradeoff is an occasional unnecessary
+	// prompt (e.g. expiry while only browsing the read-only Runs tab) in
+	// exchange for D0-08's actual requirement — never lose work silently —
+	// which this satisfies exactly, just at page granularity instead of
+	// field granularity. Registered every render, matching
+	// generate/render.go's own DraftDirty registration, so it always
+	// reflects whichever page most recently rendered (see
+	// web/shell/session.go's dirtyCheck doc comment).
+	shell.RegisterDirtyCheck(func() bool {
+		return wired
+	})
+
 	sess := state.UseAtomKey(shell.SessionAtom)
 	disconnected := sess.Get() == appstate.Disconnected
 
@@ -85,7 +111,9 @@ func Render() ui.Node {
 	return ui.CreateElement(History, RootProps{
 		Runs:           deps.Runs,
 		Items:          deps.Items,
+		Feeds:          deps.Feeds,
 		T:              deps.T,
+		Ready:          sess.Get() == appstate.Auth || sess.Get() == appstate.Killed,
 		Disconnected:   disconnected,
 		DisabledReason: disabledReason,
 	})
@@ -94,11 +122,16 @@ func Render() ui.Node {
 // renderNotWired is shown instead of a blank page or a nil-client panic
 // when Init has not been called yet (or was called with an incomplete
 // Deps) — mirrors generatepage.renderNotWired/settings.renderNotWired.
-// Routed through fallbackCatalog rather than a literal English string:
-// there is no "history.notWired" entry in the real catalogue (unlike
-// generate.notWired/settings.notWired.message), so per D6-07 this
-// deliberately renders the key itself rather than inventing wording here
-// that would just be a second, competing catalogue.
+// Routed through fallbackCatalog rather than a literal English string, so
+// the wording lives in the catalogue with every other string.
+//
+// This comment used to say the opposite — that no "history.notWired" entry
+// existed and that rendering the raw key was therefore correct per D6-07.
+// D6-07 describes what a MISSING key degrades to, not a design to aim for,
+// and generate.notWired/settings.notWired.message both carried real copy for
+// the identical state. The entry was added 2026-08-10 (web/i18n/
+// keys_history.go) after web/i18n's new call-site test flagged this as the
+// last key in the app referenced by a page and defined nowhere.
 func renderNotWired() ui.Node {
 	return h.Div(
 		h.ClassStr("history-page history-page--not-wired"),

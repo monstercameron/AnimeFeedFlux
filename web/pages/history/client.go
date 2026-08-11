@@ -10,3 +10,9 @@ import affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 // ItemServiceClient once wsconn grows those fields.
 type RunsClient = affv1.RunServiceClient
 type ItemsClient = affv1.ItemServiceClient
+
+// FeedsClient is used for ONE thing: turning the Runs tab's feed filter
+// from a numeric feed-id box into a menu of feed titles. A filter that asks
+// an operator to type a database id is a filter nobody can use — the ids are
+// not shown anywhere on the page it filters.
+type FeedsClient = affv1.FeedServiceClient

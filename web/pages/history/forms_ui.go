@@ -15,12 +15,22 @@ import (
 // ItemFormProps drives the create/edit form (PLAN.md §12.4, TODOS.md
 // D3-11..D3-14). Item is nil when IsCreate is true.
 type ItemFormProps struct {
-	T               Catalog
-	Item            *affv1.Item
+	T    Catalog
+	Item *affv1.Item
+	// Feeds populates the create form's feed picker. An item belongs to a
+	// feed and the server rejects feed_id == 0, so without this the form
+	// could not produce a saveable item at all.
+	Feeds           []*affv1.Feed
 	IsCreate        bool
 	NewestPublished time.Time
-	OnCancel        func()
-	OnSave          func(before ItemSnapshot, req *affv1.Item, expectedVersion int64, isCreate bool)
+	// Err is the last save mutation's failure (TODOS.md D0-10) —
+	// distinguished into disconnected/rejected/unexpected by
+	// mutationErrorText rather than shown as an undifferentiated failure;
+	// the form stays open and the operator's edits are preserved either
+	// way (no field is cleared on a failed save).
+	Err      error
+	OnCancel func()
+	OnSave   func(req *affv1.Item, expectedVersion int64, isCreate bool)
 }
 
 // ItemForm is a controlled form: every field is held in component state
@@ -38,6 +48,10 @@ func ItemForm(props ItemFormProps) ui.Node {
 	tags := ui.UseState(strings.Join(initial.Tags, ", "))
 	publishedAt := ui.UseState(formatDateTimeLocal(initial.PublishedAt))
 	backdateOverride := ui.UseState(false)
+	// Defaults to the item's own feed when editing, and to the first
+	// available feed when creating — a create form that starts on "nothing
+	// selected" makes the commonest case (one feed) an extra step.
+	feedID := ui.UseState(initialFeedID(props))
 
 	proposed := parseDateTimeLocal(publishedAt.Get())
 	decision := ValidatePublishedAt(proposed, props.NewestPublished, backdateOverride.Get())
@@ -47,6 +61,7 @@ func ItemForm(props ItemFormProps) ui.Node {
 			return
 		}
 		item := &affv1.Item{
+			FeedId:      feedID.Get(),
 			Title:       title.Get(),
 			SummaryText: summary.Get(),
 			BodyHtml:    body.Get(),
@@ -60,8 +75,7 @@ func ItemForm(props ItemFormProps) ui.Node {
 			item.Origin = props.Item.Origin
 			expectedVersion = props.Item.Version
 		}
-		before := initial
-		props.OnSave(before, item, expectedVersion, props.IsCreate)
+		props.OnSave(item, expectedVersion, props.IsCreate)
 	}
 
 	return h.Div(
@@ -71,6 +85,11 @@ func ItemForm(props ItemFormProps) ui.Node {
 			h.P(props.T.T("history.items.guid_never_changes", nil)),
 			h.P(itemKeyOf(props.Item)),
 		)),
+		// Only on create: an existing item cannot be moved between feeds —
+		// its guid and its position in a published feed are already out in
+		// the world (§5.5), so the field is shown as fixed context instead.
+		h.If(props.IsCreate, renderFeedPicker(props, feedID.Get(), feedID.Set)),
+
 		h.Label(h.For("history-form-title"), props.T.T("history.items.field_title", nil)),
 		h.Input(h.ID("history-form-title"), h.Value(title.Get()), h.OnInput(func(ev ui.InputEvent) { title.Set(ev.GetValue()) })),
 
@@ -98,10 +117,45 @@ func ItemForm(props ItemFormProps) ui.Node {
 		)),
 		h.If(decision.WarnKey != "", h.P(h.ClassStr("history-backdate-warning"), props.T.T(decision.WarnKey, nil))),
 
+		h.If(props.Err != nil, h.Div(h.ClassStr("history-form-error"), mutationErrorText(props.T, props.Err))),
+
 		h.Div(h.ClassStr("history-form-actions"),
 			h.Button(h.Type("button"), h.Disabled(decision.Blocked), h.OnClick(save), props.T.T("history.save", nil)),
 			h.Button(h.Type("button"), h.OnClick(props.OnCancel), props.T.T("history.cancel", nil)),
 		),
+	)
+}
+
+// initialFeedID picks the feed the form starts on.
+func initialFeedID(props ItemFormProps) int64 {
+	if props.Item != nil && props.Item.GetFeedId() != 0 {
+		return props.Item.GetFeedId()
+	}
+	if len(props.Feeds) > 0 {
+		return props.Feeds[0].GetId()
+	}
+	return 0
+}
+
+// renderFeedPicker is the create form's feed selector. With no feeds loaded
+// it says so rather than rendering an empty menu that silently produces an
+// unsaveable item.
+func renderFeedPicker(props ItemFormProps, selected int64, onSelect func(int64)) ui.Node {
+	if len(props.Feeds) == 0 {
+		return h.P(h.ClassStr("history-form-error"), props.T.T("history.items.field_feed_none", nil))
+	}
+	opts := make([]any, 0, len(props.Feeds)+3)
+	opts = append(opts,
+		h.ID("history-form-feed"),
+		h.OnChange(ui.UseEvent(func(ev ui.InputEvent) { onSelect(parseInt64(ev.GetValue())) })),
+	)
+	for _, f := range props.Feeds {
+		id := f.GetId()
+		opts = append(opts, h.Option(h.Value(int64Str(id)), h.SelectedIf(id == selected), h.Text(f.GetTitle())))
+	}
+	return h.Fragment(
+		h.Label(h.For("history-form-feed"), props.T.T("history.items.field_feed", nil)),
+		h.Select(opts...),
 	)
 }
 

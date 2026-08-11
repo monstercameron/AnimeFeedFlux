@@ -57,7 +57,12 @@ func TypedConfirm(props TypedConfirmProps) ui.Node {
 			h.ClassStr("history-confirm-dialog"),
 			h.H2(h.ID(props.LabelledBy), props.T.T(props.TitleKey, nil)),
 			h.P(props.T.T(props.PromptKey, map[string]any{"word": props.MatchWord})),
+			// The field had no accessible name at all: the prompt above it is
+			// a sibling paragraph, which a screen reader does not associate
+			// with the input. The word to type IS the label.
 			h.Input(
+				h.ID("history-confirm-input"),
+				h.Aria("label", props.T.T(props.PromptKey, map[string]any{"word": props.MatchWord})),
 				h.Value(typed.Get()),
 				h.OnInput(func(ev ui.InputEvent) { typed.Set(ev.GetValue()) }),
 			),

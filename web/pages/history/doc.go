@@ -4,11 +4,12 @@
 // Layout of this package:
 //
 //   - Pure, host-testable logic carries no build tag: request builders for
-//     RunService.History / ItemService.List (runs_filter.go, items_filter.go),
-//     pagination boundaries (pagination.go), the no-backdating guard as a
-//     pure predicate (backdating.go), revision diff computation (diff.go)
-//     plus the client-side revision store that stands in for a missing RPC
-//     (revisions.go — see the doc comment there), bulk-selection state
+//     RunService.History / ItemService.List / ItemService.ListRevisions
+//     (runs_filter.go, items_filter.go, revisions.go), pagination boundaries
+//     (pagination.go), the no-backdating guard as a pure predicate
+//     (backdating.go), revision diff computation (diff.go, revisions.go —
+//     RevisionFieldDiffs turns an *affv1.ItemRevision's already-recorded
+//     per-field Changes into line-level diffs), bulk-selection state
 //     (selection.go), and the six-state screen matrix (screenstate.go).
 //   - Browser-dependent rendering sits behind `//go:build js` (root.go,
 //     runs_ui.go, items_ui.go, forms_ui.go): GWC v5 components, hooks, and
@@ -42,19 +43,25 @@
 //     five owned directories), so whatever wires web/wsconn's *Conn to
 //     this page just needs to hand over those two client values.
 //
-// §12.4 assumption that did NOT hold, reported per the task brief: the
-// plan requires "Items: revision history with a diff view and revert"
-// (D3-15), but proto/aff/v1/item.proto's ItemService has no RPC to list or
-// revert item_revisions rows — Update's own comment says edits "are
-// recorded in item_revisions with a diff view and revert (PLAN.md §12.4)"
-// but no ListRevisions/RevertRevision RPC exists to read them back. This
-// package therefore keeps its own client-side, in-session RevisionStore
-// (revisions.go) that snapshots an item's editable fields immediately
-// before each successful Update and computes the diff locally; "revert"
-// re-submits that prior snapshot through the ordinary Update RPC. This is
-// honest about what it can promise: revisions recorded before the current
-// page session started are not recoverable this way. A real fix needs a
-// server-side item_revisions read (and ideally revert) RPC; until then the
-// UI says so explicitly rather than pretending session-local history is
-// the durable one item_revisions already stores server-side.
+// D3-15 ("Items: revision history with a diff view and revert") is wired to
+// the real RPCs: ItemService.ListRevisions backs the history list
+// (items_ui.go's loadRevisions) and ItemService.RevertRevision backs revert
+// (items_ui.go's revertRevision) — both go through props.Client directly,
+// with expected_version always the currently-loaded item's version so a
+// revert racing an edit surfaces as IsVersionConflict (mutationerror.go)
+// rather than silently clobbering. This replaces an earlier client-side,
+// in-session RevisionStore stopgap that stood in for these RPCs before they
+// existed server-side; that stopgap is gone, along with the "revisions are
+// visible for this session only" notice it required — real history is
+// visible after a reload now, because it always was, server-side.
+//
+// What the RPCs still cannot give this UI: item_revisions never records a
+// `tags` change (internal/rpc/item.go's itemDiff has no `tags` case, and
+// RevertRevision's field-apply switch has no `tags` case either — see its
+// doc comment), so an edit that only changes tags produces no revision row
+// at all, and reverting to an older revision cannot restore a prior tags
+// value even though the edit form lets an operator change tags. This is a
+// server-side gap, not something this page can work around: the fix is
+// adding a `tags` case to itemDiff/itemApplyRevisionField, which is outside
+// this page's allowed paths.
 package history

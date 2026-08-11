@@ -13,7 +13,17 @@ import (
 type RootProps struct {
 	Runs  RunsClient
 	Items ItemsClient
+	Feeds FeedsClient
 	T     Catalog
+
+	// Ready reports that the session can actually carry an RPC (AUTH or
+	// KILLED). It is NOT the negation of Disconnected: appstate.Anon is the
+	// zero value, so `state != Disconnected` is already true before there is
+	// any session at all. A tab that loads on mount without consulting this
+	// fires its request into a socket that is still handshaking, which is how
+	// this page came to sit on "Loading…" forever whenever it was opened
+	// directly rather than navigated to.
+	Ready bool
 
 	// Disconnected mirrors the shell's DISCONNECTED application state
 	// (TODOS.md D-FLOW); this page never dials the socket itself.
@@ -59,13 +69,17 @@ func History(props RootProps) ui.Node {
 		),
 		h.If(activeTab.Get() == tabRuns, ui.CreateElement(RunsTab, RunsTabProps{
 			Client:       props.Runs,
+			Feeds:        props.Feeds,
 			T:            props.T,
 			Disconnected: props.Disconnected,
+			Ready:        props.Ready,
 		})),
 		h.If(activeTab.Get() == tabItems, ui.CreateElement(ItemsTab, ItemsTabProps{
 			Client:       props.Items,
+			Feeds:        props.Feeds,
 			T:            props.T,
 			Disconnected: props.Disconnected,
+			Ready:        props.Ready,
 		})),
 	)
 }

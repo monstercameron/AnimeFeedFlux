@@ -1,11 +1,16 @@
 package history
 
-import "time"
+import (
+	"time"
 
-// ItemSnapshot is the editable-field subset of an Item (PLAN.md §12.4:
-// "Update — title, summary, body, link, tags, publish date"). ItemKey is
-// deliberately absent: it never changes on edit (PLAN.md §5.1) and is not
-// part of any revision.
+	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+)
+
+// ItemSnapshot is the editable-field subset of an Item used to seed the
+// create/edit form (forms_ui.go's formStateFromItem/snapshotOf) — PLAN.md
+// §12.4: "Update — title, summary, body, link, tags, publish date".
+// ItemKey is deliberately absent: it never changes on edit or revert
+// (PLAN.md §5.1).
 type ItemSnapshot struct {
 	Title       string
 	SummaryText string
@@ -15,80 +20,39 @@ type ItemSnapshot struct {
 	PublishedAt time.Time
 }
 
-// Revision is one recorded edit: the state immediately before the edit
-// (Before), the state it produced (After), and when it happened. See
-// doc.go for why this is a client-side, in-session stand-in for the
-// server-side item_revisions table rather than a read of it — no RPC
-// exists yet to list or revert that table's rows.
-type Revision struct {
-	At     time.Time
-	Before ItemSnapshot
-	After  ItemSnapshot
-}
-
-// Diff computes the per-field diff view for this revision, omitting
-// fields that did not change.
-func (r Revision) Diff() []FieldDiff {
-	candidates := []FieldDiff{
-		{Field: "title", Lines: DiffLines(r.Before.Title, r.After.Title)},
-		{Field: "summary_text", Lines: DiffLines(r.Before.SummaryText, r.After.SummaryText)},
-		{Field: "body_html", Lines: DiffLines(r.Before.BodyHTML, r.After.BodyHTML)},
-		{Field: "link", Lines: DiffLines(r.Before.Link, r.After.Link)},
-		{Field: "tags", Lines: DiffLines(joinTags(r.Before.Tags), joinTags(r.After.Tags))},
-		{Field: "published_at", Lines: DiffLines(r.Before.PublishedAt.Format(time.RFC3339), r.After.PublishedAt.Format(time.RFC3339))},
-	}
-	out := make([]FieldDiff, 0, len(candidates))
-	for _, c := range candidates {
-		if c.Changed() {
-			out = append(out, c)
-		}
+// RevisionFieldDiffs turns one ItemRevision's already-recorded per-field
+// old/new values into line-level diffs for display. PLAN.md §12.4: "each
+// ItemRevision carries id, at and all changes, so a diff renders without a
+// second call" — item_revisions stores only the fields that actually
+// changed for that edit (internal/rpc/item.go's itemDiff only writes a row
+// when old != new), so every entry in rev.Changes is, by construction, an
+// actual change: no comparison is needed here, just DiffLines applied to
+// each field's stored old/new pair.
+func RevisionFieldDiffs(rev *affv1.ItemRevision) []FieldDiff {
+	changes := rev.GetChanges()
+	out := make([]FieldDiff, 0, len(changes))
+	for _, ch := range changes {
+		out = append(out, FieldDiff{
+			Field: ch.GetField(),
+			Lines: DiffLines(ch.GetOldValue(), ch.GetNewValue()),
+		})
 	}
 	return out
 }
 
-func joinTags(tags []string) string {
-	out := ""
-	for i, t := range tags {
-		if i > 0 {
-			out += "\n"
-		}
-		out += t
+// BuildListRevisionsRequest constructs ItemService.ListRevisions' request.
+// Pagination is by `at` (PLAN.md §12.4; internal/rpc/item.go's
+// ListRevisions doc comment: "paginated by at so a page boundary can never
+// split one edit's field changes across two pages"), via the same opaque
+// page_token/page_size contract ItemService.List already uses
+// (pagination.go's ClampPageSize). Nothing on this page re-groups pages
+// client-side — each returned page's Revisions are already complete edit
+// groups, so honouring the boundary just means never merging two pages'
+// results into one re-sorted list.
+func BuildListRevisionsRequest(itemID int64, pageToken string, pageSize int32) *affv1.ItemServiceListRevisionsRequest {
+	return &affv1.ItemServiceListRevisionsRequest{
+		ItemId:    itemID,
+		PageSize:  ClampPageSize(pageSize),
+		PageToken: pageToken,
 	}
-	return out
-}
-
-// RevisionStore holds session-local revision history per item id. It is
-// not persisted (a reload loses it, honestly reflecting that it is not
-// backed by the server's item_revisions table — see doc.go).
-type RevisionStore struct {
-	byItem map[int64][]Revision
-}
-
-// NewRevisionStore returns an empty store.
-func NewRevisionStore() *RevisionStore {
-	return &RevisionStore{byItem: make(map[int64][]Revision)}
-}
-
-// Record appends a revision for itemID. Call it immediately before
-// submitting an Update RPC, with before = the snapshot as loaded and
-// after = the snapshot about to be submitted.
-func (s *RevisionStore) Record(itemID int64, before, after ItemSnapshot, at time.Time) {
-	s.byItem[itemID] = append(s.byItem[itemID], Revision{At: at, Before: before, After: after})
-}
-
-// List returns itemID's revisions, oldest first.
-func (s *RevisionStore) List(itemID int64) []Revision {
-	return s.byItem[itemID]
-}
-
-// RevertTarget returns the snapshot to restore an item to when reverting
-// revision index revIndex (0-based, oldest first) in itemID's history: the
-// state that revision's edit overwrote. ok is false if itemID/revIndex is
-// out of range.
-func RevertTarget(s *RevisionStore, itemID int64, revIndex int) (snap ItemSnapshot, ok bool) {
-	revs := s.byItem[itemID]
-	if revIndex < 0 || revIndex >= len(revs) {
-		return ItemSnapshot{}, false
-	}
-	return revs[revIndex].Before, true
 }

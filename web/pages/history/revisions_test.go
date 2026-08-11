@@ -3,70 +3,80 @@ package history
 import (
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 )
 
-func TestRevisionStoreRecordAndList(t *testing.T) {
-	s := NewRevisionStore()
-	before := ItemSnapshot{Title: "Old title", SummaryText: "Old summary"}
-	after := ItemSnapshot{Title: "New title", SummaryText: "Old summary"}
-	at := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
-
-	s.Record(42, before, after, at)
-
-	revs := s.List(42)
-	if len(revs) != 1 {
-		t.Fatalf("len(List(42)) = %d, want 1", len(revs))
-	}
-	if !revs[0].At.Equal(at) {
-		t.Errorf("At = %v, want %v", revs[0].At, at)
-	}
-	if revs[0].Before.Title != "Old title" || revs[0].After.Title != "New title" {
-		t.Errorf("unexpected revision snapshots: %+v", revs[0])
+func TestRevisionFieldDiffs(t *testing.T) {
+	at := timestamppb.New(time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC))
+	rev := &affv1.ItemRevision{
+		Id:     7,
+		ItemId: 42,
+		At:     at,
+		Changes: []*affv1.ItemRevisionChange{
+			{Field: "title", OldValue: "Old title", NewValue: "New title"},
+			{Field: "link", OldValue: "https://x/1", NewValue: "https://x/2"},
+		},
 	}
 
-	if got := s.List(99); got != nil {
-		t.Errorf("List for unknown item = %+v, want nil", got)
+	diffs := RevisionFieldDiffs(rev)
+	if len(diffs) != 2 {
+		t.Fatalf("len(diffs) = %d, want 2", len(diffs))
 	}
-}
-
-func TestRevisionDiffOmitsUnchangedFields(t *testing.T) {
-	before := ItemSnapshot{Title: "A", SummaryText: "same", Link: "https://x/1"}
-	after := ItemSnapshot{Title: "B", SummaryText: "same", Link: "https://x/1"}
-	rev := Revision{Before: before, After: after}
-
-	diffs := rev.Diff()
-	if len(diffs) != 1 {
-		t.Fatalf("len(diffs) = %d, want 1 (only title changed): %+v", len(diffs), diffs)
+	if diffs[0].Field != "title" || !diffs[0].Changed() {
+		t.Errorf("diffs[0] = %+v, want changed title diff", diffs[0])
 	}
-	if diffs[0].Field != "title" {
-		t.Errorf("diffs[0].Field = %q, want title", diffs[0].Field)
+	if diffs[1].Field != "link" || !diffs[1].Changed() {
+		t.Errorf("diffs[1] = %+v, want changed link diff", diffs[1])
+	}
+
+	// Every recorded change is a real change by construction (item_revisions
+	// only ever gets a row when old != new — internal/rpc/item.go's
+	// itemDiff), so the diff for each field must contain at least one
+	// non-equal line.
+	for _, d := range diffs {
+		if !d.Changed() {
+			t.Errorf("field %q: expected a non-equal diff line, got %+v", d.Field, d.Lines)
+		}
 	}
 }
 
-func TestRevertTarget(t *testing.T) {
-	s := NewRevisionStore()
-	before1 := ItemSnapshot{Title: "v1"}
-	after1 := ItemSnapshot{Title: "v2"}
-	before2 := ItemSnapshot{Title: "v2"}
-	after2 := ItemSnapshot{Title: "v3"}
-	now := time.Now()
-
-	s.Record(1, before1, after1, now)
-	s.Record(1, before2, after2, now)
-
-	snap, ok := RevertTarget(s, 1, 0)
-	if !ok || snap.Title != "v1" {
-		t.Fatalf("RevertTarget(1,0) = %+v ok=%v, want v1/true", snap, ok)
+func TestRevisionFieldDiffsEmpty(t *testing.T) {
+	rev := &affv1.ItemRevision{Id: 1, ItemId: 1}
+	if diffs := RevisionFieldDiffs(rev); len(diffs) != 0 {
+		t.Fatalf("len(diffs) = %d, want 0 for a revision with no changes", len(diffs))
 	}
-	snap, ok = RevertTarget(s, 1, 1)
-	if !ok || snap.Title != "v2" {
-		t.Fatalf("RevertTarget(1,1) = %+v ok=%v, want v2/true", snap, ok)
+}
+
+func TestRevisionFieldDiffsNilRevision(t *testing.T) {
+	if diffs := RevisionFieldDiffs(nil); len(diffs) != 0 {
+		t.Fatalf("RevisionFieldDiffs(nil) = %+v, want empty", diffs)
+	}
+}
+
+func TestBuildListRevisionsRequest(t *testing.T) {
+	req := BuildListRevisionsRequest(42, "tok", 10)
+	if req.ItemId != 42 {
+		t.Errorf("ItemId = %d, want 42", req.ItemId)
+	}
+	if req.PageToken != "tok" {
+		t.Errorf("PageToken = %q, want tok", req.PageToken)
+	}
+	if req.PageSize != 10 {
+		t.Errorf("PageSize = %d, want 10", req.PageSize)
+	}
+}
+
+func TestBuildListRevisionsRequestClampsPageSize(t *testing.T) {
+	req := BuildListRevisionsRequest(42, "", 0)
+	if req.PageSize != DefaultPageSize {
+		t.Errorf("PageSize = %d, want DefaultPageSize %d for a non-positive request", req.PageSize, DefaultPageSize)
 	}
 
-	if _, ok := RevertTarget(s, 1, 2); ok {
-		t.Fatalf("RevertTarget out of range should return ok=false")
-	}
-	if _, ok := RevertTarget(s, 999, 0); ok {
-		t.Fatalf("RevertTarget for unknown item should return ok=false")
+	req = BuildListRevisionsRequest(42, "", MaxPageSize+50)
+	if req.PageSize != MaxPageSize {
+		t.Errorf("PageSize = %d, want MaxPageSize %d for an oversized request", req.PageSize, MaxPageSize)
 	}
 }
