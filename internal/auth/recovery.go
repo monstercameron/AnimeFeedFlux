@@ -10,10 +10,17 @@ import (
 )
 
 // recoveryAlphabet excludes characters humans commonly confuse when
-// transcribing a code off a screen or a printed sheet: 0/O, 1/I/L, and the
-// rest of the vowels are dropped too so the codes don't spell words. PLAN.md
+// transcribing a code off a screen or a printed sheet: 0/O, 1/I/L. PLAN.md
 // §12.2 calls these "one of only two ways back in" (the other is SSH
 // break-glass), so legibility under stress matters as much as entropy.
+//
+// It holds 30 symbols. This comment used to add that "the rest of the vowels
+// are dropped too so the codes don't spell words", which is not what the
+// string does — A and E are both in it, so a code can spell one. Corrected
+// rather than changed: dropping A and E now would invalidate nothing (codes
+// are hashed, and verification reads the stored hash), but it would shrink
+// the alphabet for a property the codes were never actually getting, and the
+// entropy is what matters here (A8-39).
 const recoveryAlphabet = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 const (
@@ -61,13 +68,15 @@ func generateOneCode() (string, error) {
 		if i > 0 && i%recoveryGroupLen == 0 {
 			b.WriteString(recoverySeparator)
 		}
-		// v is a uniform random byte in [0,255]; recoveryAlphabet has 31
-		// symbols, which does not evenly divide 256. A single mod-31 pass
-		// introduces a slight bias (symbols 0..255%31-1 are ~1/6 more
-		// likely). Recovery codes are shown once and never reused, and the
-		// bias is far too small to matter for 20-character codes drawn from
-		// crypto/rand, so plain modulo is used rather than rejection
-		// sampling, trading a negligible statistical property for simplicity.
+		// v is a uniform random byte in [0,255]; recoveryAlphabet has 30
+		// symbols, which does not evenly divide 256. 256 = 8*30 + 16, so a
+		// single mod-30 pass makes the first 16 symbols land 9 times per 256
+		// values against 8 for the other 14 — 12.5% more likely, not the
+		// "~1/6" this note claimed while computing off 31 symbols it does not
+		// have. The conclusion is unchanged: recovery codes are shown once
+		// and never reused, and that bias is far too small to matter for
+		// 20-character codes drawn from crypto/rand, so plain modulo is used
+		// rather than rejection sampling (A8-39).
 		b.WriteByte(recoveryAlphabet[int(v)%alphaLen])
 	}
 

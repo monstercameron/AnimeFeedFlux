@@ -689,12 +689,23 @@ closing note).
       an attacker pausing between attempts does not get a free reset: the entry, and the failure count that
       makes the next delay longer, outlives the window. Tests pin all three properties, including that a
       sweep never releases an address still inside its window.
-- [ ] `A8-39` Small inaccuracies found while reading, none of them exploitable: `recoveryAlphabet`'s
-      comment claims 31 symbols and says vowels are dropped (it holds 30, and `A`/`E` are in it — the
-      modulo-bias note is computed off the wrong number, though its conclusion still stands);
-      `auth.NewResetToken` calls `time.Now()` directly rather than an injected clock, unlike the rest
-      of the package; `totp_used` accumulates a row per successful login and is not among the
-      nightly prune's three tables.
+- [x] `A8-39` **FIXED 2026-08-11 (all three recorded or corrected).** Small inaccuracies found while reading,
+      none of them exploitable.
+      `recoveryAlphabet`'s comment claimed 31 symbols and said vowels were dropped: it holds 30 and both `A`
+      and `E` are in it, so a code can spell a word. The comment is corrected rather than the alphabet
+      changed — dropping two symbols now would shrink the space for a property the codes were never
+      actually getting. The modulo-bias note is recomputed off the real number: 256 = 8*30 + 16, so the
+      first 16 symbols land 9 times per 256 against 8 for the other 14 — 12.5% more likely, not the "~1/6"
+      it claimed. The conclusion stands and plain modulo remains.
+      `auth.NewResetToken` calls `time.Now()` directly rather than taking the injected clock the rest of the
+      package uses. Left as-is with the reason stated in the code: it has four return values and one caller,
+      threading a clock through would change a signature for a value nothing asserts on, and no test needs to
+      control this expiry. Now a decision rather than an oversight.
+      `totp_used` accumulates a row per successful login and is not among the nightly prune's three tables —
+      recorded, not pruned, for the same reason `PurgeExpiredSessions` was left unwired: one admin logging in
+      daily is a few hundred rows a year, and `internal/ops.Prune`'s package doc states its three-table scope
+      deliberately. If the deployment shape changes, both want adding together, and rows older than the ±1
+      step replay window are the ones that can go.
 
 Second pass, widening past the credential path itself into what a session can
 reach and what untrusted input can reach:

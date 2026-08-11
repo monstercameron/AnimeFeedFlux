@@ -33,6 +33,12 @@ func NewResetToken() (raw string, hash string, expiresAt time.Time, err error) {
 	}
 	raw = base64.RawURLEncoding.EncodeToString(buf)
 	hash = hashResetToken(raw)
+	// time.Now() directly, unlike the rest of this package, which takes an
+	// injected clock. Left as-is deliberately: NewResetToken has four return
+	// values and one caller, threading a clock through it would change a
+	// signature for a value nothing asserts on, and no test in the suite needs
+	// to control this expiry. Recorded so the inconsistency is a decision
+	// rather than an oversight (A8-39).
 	expiresAt = time.Now().UTC().Add(resetTokenTTL)
 	return raw, hash, expiresAt, nil
 }
