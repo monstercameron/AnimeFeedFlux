@@ -27,12 +27,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
 
+	schemafluxotel "github.com/monstercameron/schemaflux/telemetry/otel"
 	openai "github.com/sashabaranov/go-openai"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
@@ -46,6 +50,8 @@ import (
 	"github.com/monstercameron/AnimeFeedFlux/internal/llm"
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
 	"github.com/monstercameron/AnimeFeedFlux/internal/novelty"
+	"github.com/monstercameron/AnimeFeedFlux/internal/obs"
+	"github.com/monstercameron/AnimeFeedFlux/internal/ops"
 	"github.com/monstercameron/AnimeFeedFlux/internal/publish"
 	"github.com/monstercameron/AnimeFeedFlux/internal/rpc"
 	"github.com/monstercameron/AnimeFeedFlux/internal/schedule"
@@ -80,8 +86,14 @@ const (
 	// httpShutdownTimeout is how long the two HTTP servers get to drain
 	// (PLAN.md §15). The scheduler has its own, longer budget
 	// (schedule.DefaultShutdownTimeout) for in-flight generation, which is
-	// the one a partially-charged LLM call actually needs.
+	// the one a partially-charged LLM call actually needs. It also bounds
+	// the telemetry flush (obs.Setup's shutdown func) — see runAll's
+	// deferred call for why that reuse is deliberate.
 	httpShutdownTimeout = 20 * time.Second
+
+	// nightlyRunRetention is the ops scheduler's PruneOptions.RunRetention
+	// (PLAN.md §15: "runs older than 180 days are pruned except failures").
+	nightlyRunRetention = 180 * 24 * time.Hour
 )
 
 // =====================================================================
@@ -181,6 +193,52 @@ func specFromRow(row feedRow) (feedspec.Spec, error) {
 	return fs, nil
 }
 
+// loadPriceTableAtBoot applies the stored rates before the first scheduled
+// run, so a restart does not silently revert to an empty table (and with an
+// empty table every cost reads $0.0000 and no ceiling can ever trip).
+func loadPriceTableAtBoot(ctx context.Context, r store.Reader, t *budget.Table) error {
+	var raw string
+	err := r.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'provider'`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("wire: reading provider settings: %w", err)
+	}
+	p := &affv1.Settings_Provider{}
+	if err := json.Unmarshal([]byte(raw), p); err != nil {
+		return fmt.Errorf("wire: parsing provider settings: %w", err)
+	}
+	applyPriceTable(t, p.GetPriceTable())
+	return nil
+}
+
+// applyPriceTable copies the operator-configured rates into the live
+// budget.Table every cost figure and every §13 ceiling is computed from.
+//
+// **Unit conversion, and it matters.** The wire field is
+// usd_per_1k_tokens_in/out; budget.Price is per MILLION tokens. Passing one
+// straight into the other is a 1000x error in either direction — in the
+// dangerous direction it makes every run look 1000x cheaper than it is and
+// no ceiling ever trips. The multiplication below is the only place the two
+// units meet.
+func applyPriceTable(t *budget.Table, entries []*affv1.PriceEntry) {
+	if t == nil {
+		return
+	}
+	for _, e := range entries {
+		model := strings.TrimSpace(e.GetModel())
+		if model == "" {
+			continue
+		}
+		t.Set(budget.Price{
+			Model:         model,
+			InputPerMTok:  e.GetUsdPer_1KTokensIn() * 1000,
+			OutputPerMTok: e.GetUsdPer_1KTokensOut() * 1000,
+		})
+	}
+}
+
 // generateSpecFrom maps the recipe layer (internal/feedspec) onto the
 // pipeline layer (internal/generate) — the two packages deliberately don't
 // know about each other (generate/runner.go's header), so this file is the
@@ -234,7 +292,15 @@ func loadGenerationSettings(ctx context.Context, r store.Reader, defaultEnabled 
 	var raw string
 	err := r.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'generation'`).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return &affv1.Settings_Generation{Enabled: defaultEnabled}, nil
+		// Same cold-start values the RPC seeds, from the same constants — a
+		// zero ceiling means "no limit" to internal/budget, so a fallback
+		// that quietly returned zeros would disable §13's backstop for
+		// exactly the deployment that never opened the settings screen.
+		return &affv1.Settings_Generation{
+			Enabled:                    defaultEnabled,
+			GlobalDailyTokenCeiling:    rpc.DefaultGlobalDailyTokenCeiling,
+			GlobalDailySpendCeilingUsd: rpc.DefaultGlobalDailySpendCeilingUSD,
+		}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("wire: reading generation settings: %w", err)
@@ -433,10 +499,15 @@ type genGate struct {
 	cfg    *config.Config
 	prices *budget.Table
 	log    *slog.Logger
+
+	// monthlyCeilingUSD is cfg.MonthlySpendCeilingUSD, hoisted so Allowed
+	// can skip the month-to-date query entirely when it is zero.
+	monthlyCeilingUSD float64
 }
 
 func (g *genGate) Allowed(feedID int64) (bool, string) {
 	ctx := context.Background()
+	now := time.Now()
 
 	settings, err := loadGenerationSettings(ctx, g.st.Reader(), g.cfg.GenerationEnabled)
 	if err != nil {
@@ -475,11 +546,27 @@ func (g *genGate) Allowed(feedID int64) (bool, string) {
 		PerFeedDailyRuns:   fs.Budgets.DailyRuns,
 		GlobalDailyTokens:  int(settings.GetGlobalDailyTokenCeiling()),
 		GlobalDailyUSD:     settings.GetGlobalDailySpendCeilingUsd(),
+		// The monthly ceiling had no caller at all, so the mechanism existed
+		// and bounded nothing. A daily cap does not bound a month, and §19's
+		// done-criterion is stated per BILLING MONTH — unmeasurable while
+		// nothing supplied this.
+		MonthlyUSDCeiling: g.monthlyCeilingUSD,
 	}
 	feedSpend := budget.Spend{TokensIn: feedIn, TokensOut: feedOut, Runs: runs, USD: feedUSD}
 	globalSpend := budget.Spend{TokensIn: globalIn, TokensOut: globalOut, USD: globalUSD}
 
-	decision := budget.Check(limits, feedSpend, globalSpend, 0)
+	// Month-to-date across every feed. Only queried when a ceiling is set:
+	// an unlimited month should not pay for a wider scan on every run.
+	var monthSpend budget.Spend
+	if g.monthlyCeilingUSD > 0 {
+		mIn, mOut, mUSD, err := g.st.SpendSince(ctx, 0, budget.MonthStart(now))
+		if err != nil {
+			return false, "budget_lookup_failed"
+		}
+		monthSpend = budget.Spend{TokensIn: mIn, TokensOut: mOut, USD: mUSD}
+	}
+
+	decision := budget.CheckRequest(limits, feedSpend, globalSpend, budget.Request{MonthlySpend: monthSpend})
 	if !decision.Allow {
 		return false, string(decision.Reason)
 	}
@@ -572,6 +659,7 @@ type genExecutor struct {
 	fetcher  generate.Fetcher
 	ids      ids.Source
 	prices   *budget.Table
+	metrics  *obs.Metrics
 	inv      publish.Invalidator
 	log      *slog.Logger
 	holder   string
@@ -605,6 +693,7 @@ func (e *genExecutor) Execute(ctx context.Context, feedID int64, trigger string)
 		Fetcher:  e.fetcher,
 		Provider: e.provider,
 		IDs:      e.ids,
+		Metrics:  e.metrics,
 	}
 	result, err := generate.Run(ctx, deps, row.Feed, generateSpecFrom(fs, trigger, e.prices))
 	if err == nil && result.Run.Status == generate.StatusCompleted && e.inv != nil {
@@ -636,6 +725,7 @@ type wireRunExecutor struct {
 	fetcher  generate.Fetcher
 	ids      ids.Source
 	prices   *budget.Table
+	metrics  *obs.Metrics
 	inv      publish.Invalidator
 	sem      *schedule.Semaphore
 	log      *slog.Logger
@@ -671,6 +761,7 @@ func (e *wireRunExecutor) ExecuteRun(feedID, runID int64) {
 			Fetcher:  e.fetcher,
 			Provider: e.provider,
 			IDs:      e.ids,
+			Metrics:  e.metrics,
 		}
 		result, err := generate.Run(ctx, deps, row.Feed, generateSpecFrom(fs, "manual", e.prices))
 		if err == nil && result.Run.Status == generate.StatusCompleted && e.inv != nil {
@@ -784,12 +875,15 @@ func (b sampleBudget) RemainingDailyUSD(ctx context.Context, feedID int64) (floa
 // buildScheduler assembles the cron loop (PLAN.md §9, §13, §14.3): one Job
 // per enabled, non-aggregate feed, an Executor that runs generate.Run, and a
 // Gate combining the live kill switch with the §13 budget check. provider,
-// nov and prices are constructed once by the caller (runAll) and passed in
-// rather than rebuilt here, so the scheduler and the control plane's
-// RunNow/Sample paths share identical novelty/pricing configuration — only
-// the provider SEMAPHORE (not the provider itself) needs to be the literal
-// same instance (§13); sharing the rest avoids two independently-editable
-// copies of the same config drifting apart.
+// nov, prices and metrics are constructed once by the caller (runAll) and
+// passed in rather than rebuilt here, so the scheduler and the control
+// plane's RunNow/Sample paths share identical novelty/pricing/metrics
+// configuration — only the provider SEMAPHORE (not the provider itself)
+// needs to be the literal same instance (§13); sharing the rest avoids two
+// independently-editable copies of the same config drifting apart. metrics
+// feeds both schedule.WithMetrics (the Runner's own aff_runs_total
+// recording for gate-blocked dispatch) and generate.Deps.Metrics (via
+// genExecutor, for every run that actually executes).
 func buildScheduler(
 	ctx context.Context,
 	st *store.Store,
@@ -797,6 +891,7 @@ func buildScheduler(
 	provider llm.Provider,
 	nov generate.Novelty,
 	prices *budget.Table,
+	metrics *obs.Metrics,
 	inv publish.Invalidator,
 	log *slog.Logger,
 ) (*schedule.Runner, error) {
@@ -831,19 +926,136 @@ func buildScheduler(
 		fetcher:  noFetcher{},
 		ids:      ids.NewSource(),
 		prices:   prices,
+		metrics:  metrics,
 		inv:      inv,
 		log:      log,
 		holder:   "scheduler",
 	}
-	gate := &genGate{st: st, cfg: cfg, prices: prices, log: log}
+	gate := &genGate{st: st, cfg: cfg, prices: prices, log: log, monthlyCeilingUSD: cfg.MonthlySpendCeilingUSD}
 
 	r := schedule.New(realClock{}, jobs, exec, gate,
 		schedule.WithMaxConcurrent(cfg.MaxConcurrentRuns),
 		schedule.WithProviderLimit(cfg.ProviderMaxInflight),
 		schedule.WithJitterWindow(cfg.ScheduleJitter),
 		schedule.WithLogger(log),
+		schedule.WithMetrics(metrics),
 	)
 	return r, nil
+}
+
+// =====================================================================
+// Admin listener mux — bridge (control plane) + static (admin UI bundle)
+// =====================================================================
+
+// adminMux is the ADMIN listener's top-level handler (PLAN.md §2, §16).
+//
+// An earlier version gave the bridge "/" and static everything else, because
+// wsconn.DefaultEndpoint was "/" and web/wsconn was out of that change's
+// scope. Running the server exposed what that costs, and it is not subtle:
+// the SPA declares <base href="/"> and so must LOAD at "/", which returned
+// the bridge's 401; and every client-side route (/login, /generate) returned
+// 404 because no asset lives at those paths. The admin UI was unreachable at
+// its own base URL and every deep link and page refresh was broken — none of
+// it visible to any test, because no test loads the app over HTTP.
+//
+// So the bridge now owns one explicit path, bridgeEndpoint, and the UI owns
+// the rest. Two rules:
+//
+//   - A path that names a real asset is served as that asset.
+//   - Anything else is served index.html, so the WASM router can resolve it.
+//     This is the server half of <base href>; without it the client router
+//     never gets the chance to run, because the document never loads.
+//
+// wsconn.DefaultEndpoint must equal bridgeEndpoint. A mismatch here fails as
+// "the UI cannot connect" with no useful error anywhere, discoverable only in
+// a browser — so it is asserted in wire_test.go rather than left to comments.
+//
+// static is nil when the bundle directory was absent at boot (the normal
+// state before `make web` has run). Then every path falls through to the
+// bridge, which is the pre-static behaviour: unauthenticated requests get
+// 401, nothing panics.
+type adminMux struct {
+	bridge http.Handler
+	static *publish.StaticHandler
+}
+
+// bridgeEndpoint is the control-plane WebSocket path. It must stay in sync
+// with web/wsconn.DefaultEndpoint.
+//
+// There is deliberately no HTTP `/auth/login` (or `/auth/logout`) route
+// alongside it anymore. One used to live here, in internal/bridge/httpauth.go,
+// because the bridge's own ServeHTTP required a valid session cookie before
+// it would even attempt the WebSocket upgrade — a browser with no cookie
+// yet could not open the control-plane socket at all, and AuthService.Login
+// (the only thing that mints one) lived nowhere else, so there was no way
+// to ever get from "no session" to "session." That was worked around with
+// a plain HTTP side door, which itself violated PLAN.md §3's "gRPC, no
+// HTTP" rule for the control plane. The actual fix is internal/bridge/
+// server.go now allowing an ANONYMOUS WebSocket upgrade (internal/rpc's
+// interceptor confines it to Login/RecoverWithCode) and Login/RecoverWithCode
+// handing back a single-use login TICKET (internal/rpc/auth.go's
+// SessionTicketHeader) a reconnect can present to receive the real cookie —
+// see internal/bridge/ticket.go and server.go's NewServer doc comment for
+// the full mechanism. That closes the chicken-and-egg gap without a second
+// login mechanism, which is the property httpauth.go's removal is for:
+// there is now exactly one way to authenticate a browser, the bridge.
+const bridgeEndpoint = "/grpc"
+
+func (m *adminMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == bridgeEndpoint || m.static == nil {
+		m.bridge.ServeHTTP(w, r)
+		return
+	}
+	if !m.static.Has(r.URL.Path) {
+		// A client-side route, not a missing asset. Serve the shell and let
+		// the router decide — including for an unknown route, which the
+		// client renders as its own not-found rather than as a bare HTTP 404
+		// with no way back into the app.
+		r = r.Clone(r.Context())
+		r.URL.Path = "/"
+	}
+	m.static.ServeHTTP(w, r)
+}
+
+// =====================================================================
+// Admin listener router — plain gRPC (cmd/aff) vs. everything else
+// =====================================================================
+
+// adminRouter is the ADMIN listener's actual top-level handler: it sits in
+// front of adminMux and gives cmd/aff a real transport to dial.
+//
+// Before this type existed, the admin listener was ONLY adminMux — a plain
+// HTTP mux serving the bridge's WebSocket tunnel and the admin UI static
+// bundle. cmd/aff's client.go dials with a bare grpc.NewClient(a.Server,
+// grpc.WithTransportCredentials(insecure.NewCredentials())), i.e. a real
+// gRPC/HTTP2 client — but no *grpc.Server was ever listening anywhere on
+// that address, so every CLI command failed at the transport, and
+// specifically `aff login` reported the exact same "authentication failed"
+// a wrong password produces (auth_cmd.go's errAuthFailed-shaped message),
+// because the RPC never reached the server at all. This is what closes that
+// gap: *grpc.Server implements http.Handler (grpc-go's own doc comment on
+// Server.ServeHTTP), so the SAME admin port can serve gRPC directly by
+// routing on the request shape, with no second listener and no change to
+// the §2 two-listener boundary (this is still the ADMIN listener only).
+//
+// Routing rule: an HTTP/2 request whose Content-Type is (or begins)
+// "application/grpc" is gRPC — grpc-go's own client always sets exactly
+// this, and it is the same signature (*grpc.Server).ServeHTTP checks
+// internally, so this router agrees with the server it hands requests to
+// about what counts as a gRPC request. Everything else — the bridge's
+// WebSocket upgrade (HTTP/1.1) and the admin UI's ordinary asset/page
+// fetches — falls through to mux unchanged.
+type adminRouter struct {
+	grpcServer *grpc.Server
+	mux        http.Handler
+}
+
+func (r *adminRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.ProtoMajor == 2 && strings.HasPrefix(req.Header.Get("Content-Type"), "application/grpc") {
+		r.grpcServer.ServeHTTP(w, req)
+		return
+	}
+	r.mux.ServeHTTP(w, req)
 }
 
 // =====================================================================
@@ -876,8 +1088,42 @@ func buildControlPlane(
 	nov generate.Novelty,
 	prices *budget.Table,
 	sem *schedule.Semaphore,
+	metrics *obs.Metrics,
 ) (http.Handler, error) {
-	authSrv, err := rpc.NewAuthServer(st, []byte(cfg.SecretKey.Reveal()))
+	// tickets is the single-use login-ticket store Login/RecoverWithCode mint
+	// from for a bridge-transport caller (internal/rpc/auth.go's
+	// SessionTicketHeader) and internal/bridge/server.go's ServeHTTP redeems
+	// on the reconnect that follows — see ticket.go's package doc comment.
+	// ONE instance, shared between the two, is what makes "the ticket Login
+	// minted is the ticket the upgrade redeems" true; two independently
+	// constructed stores would never agree on what tickets exist.
+	tickets := bridge.NewTicketStore()
+
+	authOpts := []rpc.AuthServerOption{rpc.WithTicketStore(tickets)}
+	// AFF_DEV_INSECURE_AUTH drops TOTP replay rejection and login backoff so
+	// the dev build's one-click prefilled sign-in actually works on the
+	// second click. Read with os.Getenv rather than through internal/config
+	// deliberately: this must never become a documented, first-class setting
+	// that looks deployable, and it must never appear in deploy/env
+	// templates.
+	//
+	// The loopback check is the real guard. A bound address of 127.0.0.1 or
+	// ::1 means nothing off this machine can reach the admin plane at all,
+	// so the controls being dropped are ones that could only ever have been
+	// protecting against the operator themselves. Anything else — including
+	// the 0.0.0.0 an env file copied to a real host would carry — refuses
+	// and says so, rather than honouring the variable quietly.
+	if os.Getenv("AFF_DEV_INSECURE_AUTH") == "1" {
+		if isLoopbackAddr(cfg.AdminAddr) {
+			authOpts = append(authOpts, rpc.WithDevInsecureAuth())
+			slog.Warn("AFF_DEV_INSECURE_AUTH=1: TOTP replay rejection and login backoff are DISABLED. " +
+				"Never run this on anything reachable from a network.")
+		} else {
+			slog.Error("AFF_DEV_INSECURE_AUTH=1 ignored: the admin listener is not loopback-only",
+				"admin_addr", cfg.AdminAddr)
+		}
+	}
+	authSrv, err := rpc.NewAuthServer(st, []byte(cfg.SecretKey.Reveal()), authOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("wire: building auth server: %w", err)
 	}
@@ -886,12 +1132,13 @@ func buildControlPlane(
 
 	feedSrv := rpc.NewFeedServer(st, inv, &wireRunExecutor{
 		st: st, provider: provider, novelty: nov, fetcher: noFetcher{},
-		ids: ids.NewSource(), prices: prices, inv: inv, sem: sem, log: log,
+		ids: ids.NewSource(), prices: prices, metrics: metrics, inv: inv, sem: sem, log: log,
 	})
 	itemSrv := rpc.NewItemServer(st, inv, ids.NewSource())
 	runSrv := rpc.NewRunServer(st, log)
 	sysSrv := rpc.NewSystemServer(st, log,
 		rpc.WithVersionInfo(version, commit, time.Now()),
+		rpc.WithPriceSink(func(entries []*affv1.PriceEntry) { applyPriceTable(prices, entries) }),
 		rpc.WithDefaultGenerationEnabled(cfg.GenerationEnabled))
 	sampleSrv := rpc.NewSampleServer(rpc.SampleServerConfig{
 		Feeds:      feedLookup{st: st, prices: prices},
@@ -925,6 +1172,24 @@ func buildControlPlane(
 		affv1.RegisterSystemServiceServer(gs, sysSrv)
 	}
 
+	// plainGRPCServer is a SECOND *grpc.Server, distinct from the one
+	// bridge.NewServer builds internally for its WebSocket tunnel (that one
+	// is never exposed outside internal/bridge — there is no seam to reuse
+	// it here). Both multiplexers register the SAME service objects
+	// (authSrv, feedSrv, ...) constructed once above, so a request answered
+	// through this direct path and one answered through the bridge tunnel
+	// run identical business logic; only the framing differs. The
+	// interceptor chain is copied from bridge.Config.GRPCOptions below
+	// (authSrv.UnaryInterceptor/StreamInterceptor) so a direct gRPC caller
+	// gets the exact same per-RPC session re-check the bridge path gets —
+	// PLAN.md §11's "the CLI is a client of the same AuthService the UI
+	// uses, not a bypass of it" applies to authorization, not just routing.
+	plainGRPCServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(authSrv.UnaryInterceptor()),
+		grpc.ChainStreamInterceptor(authSrv.StreamInterceptor()),
+	)
+	register(plainGRPCServer)
+
 	// The bridge's own SessionValidator (below) checks the cookie once at
 	// WebSocket upgrade and periodically thereafter (internal/bridge's own
 	// concern, session identity only). internal/rpc's interceptor
@@ -956,6 +1221,13 @@ func buildControlPlane(
 		SessionCookieName: auth.CookieName(),
 		AllowedOrigins:    cfg.AllowedOrigins,
 		Validator:         validator,
+		// Tickets is the SAME store authSrv (rpc.WithTicketStore, above)
+		// mints into — see that construction's comment for why sharing one
+		// instance is load-bearing. This is what lets an anonymous upgrade's
+		// Login/RecoverWithCode call turn a following reconnect into an
+		// authenticated one (server.go's ServeHTTP), which is the mechanism
+		// that replaces the removed HTTP `/auth/login` side door.
+		Tickets: tickets,
 		GRPCOptions: []grpc.ServerOption{
 			grpc.ChainUnaryInterceptor(authSrv.UnaryInterceptor()),
 			grpc.ChainStreamInterceptor(authSrv.StreamInterceptor()),
@@ -965,7 +1237,32 @@ func buildControlPlane(
 		return nil, fmt.Errorf("wire: building bridge server: %w", err)
 	}
 
-	return bridgeHandler, nil
+	// The admin UI bundle (internal/publish/static.go's own doc comment is
+	// explicit that this is where it must be mounted: the ADMIN listener,
+	// never the public publish plane). A missing directory is the normal
+	// state before web/build.sh / `make web` has run — NOT a fatal boot
+	// error here: the control plane (this bridge, and the CLI at
+	// cmd/aff, which is a gRPC client against the same services per
+	// PLAN.md §11 — "no privileged back door") is fully usable without it,
+	// and wire_test.go's own tests boot runAll against exactly this
+	// unbuilt state. Treating it as fatal would mean a fresh clone cannot
+	// even start the server to run `go test`. It is still a clear,
+	// loud STARTUP log — never a per-request panic, and never silent.
+	// Concrete type, not http.Handler: the mux needs Has() to tell a real
+	// asset from a client-side route, and a nil *StaticHandler compares
+	// correctly against nil where a nil-valued interface would not.
+	var static *publish.StaticHandler
+	if sh, err := publish.NewStaticHandler(cfg.AdminStaticDir); err != nil {
+		log.Error("admin UI bundle not available; admin listener will serve the control-plane API only, no static UI",
+			slog.String("dir", cfg.AdminStaticDir), slog.Any("error", err))
+	} else {
+		static = sh
+	}
+
+	return &adminRouter{
+		grpcServer: plainGRPCServer,
+		mux:        &adminMux{bridge: bridgeHandler, static: static},
+	}, nil
 }
 
 // =====================================================================
@@ -982,7 +1279,7 @@ func buildControlPlane(
 // internal/publish/invalidate.go's doc comment for why that gap exists and
 // why duplicating this ~15-line constructor is the documented way around
 // it. Every line below except the last mirrors buildPublishHandler exactly.
-func buildPublishHandlerWithInvalidator(st *store.Store, cfg *config.Config, version string) (http.Handler, publish.Invalidator, error) {
+func buildPublishHandlerWithInvalidator(st *store.Store, cfg *config.Config, version string, log *slog.Logger, metrics *obs.Metrics) (http.Handler, publish.Invalidator, error) {
 	reader := st.Reader()
 
 	tagYear, err := bootTagYear(context.Background(), reader)
@@ -991,6 +1288,54 @@ func buildPublishHandlerWithInvalidator(st *store.Store, cfg *config.Config, ver
 	}
 
 	deps := publish.Deps{
+		// Logger and Metrics were absent here, and their absence was silent
+		// in the worst way: internal/publish's handlers DO call
+		// obs.HTTPRequest and Metrics.RecordHTTPRequest/RecordCacheResult on
+		// every request, so the call sites looked wired and the tasks looked
+		// done. With these two fields unset the metrics incremented nothing
+		// and the canonical wide event fell through to an unconfigured
+		// slog.Default(), leaving the entire public surface — the only part
+		// of this product a subscriber ever touches — unobservable.
+		Logger:  log,
+		Metrics: metrics,
+
+		// HealthFeeds is what makes /healthz report staleness rather than
+		// mere liveness (§15). BuildHealthReport existed and was tested;
+		// nothing supplied it, so a silently-stopped generator stayed
+		// invisible on the one endpoint an uptime check watches — which is
+		// precisely the absence-of-work failure §15 is written against.
+		HealthFeeds: func(ctx context.Context) ([]publish.FeedHealthInput, error) {
+			now := time.Now()
+			statuses, err := ops.LiveFeedStatuses(ctx, st.Writer(), now)
+			if err != nil {
+				return nil, err
+			}
+			// error_count was in the /healthz JSON from the start and was
+			// hardcoded to 0 for every feed, because nothing ever queried it.
+			// A field that always reads zero is worse than an absent one: it
+			// answers the question "is this feed erroring?" with a confident
+			// no.
+			errCounts, err := ops.LiveFeedErrorCounts(ctx, st.Writer(), now, 0)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]publish.FeedHealthInput, 0, len(statuses))
+			for _, fs := range statuses {
+				out = append(out, publish.FeedHealthInput{
+					FeedStatus: fs,
+					ErrorCount: errCounts[fs.FeedSlug],
+				})
+			}
+			return out, nil
+		},
+
+		// Without this, /healthz computed staleness against
+		// publish.DefaultHealthGrace while the nightly webhook and `aff doctor`
+		// used ops.ResolveStaleGrace() — so setting AFF_STALE_GRACE_FACTOR
+		// moved two of the three surfaces and left the endpoint an uptime
+		// check actually watches on the old threshold. health.go's own doc
+		// comment warns against exactly this drift.
+		HealthGrace: ops.ResolveStaleGrace(),
 		GetFeed: func(ctx context.Context, slug string) (model.Feed, bool, error) {
 			return getFeedBySlug(ctx, reader, slug)
 		},
@@ -1021,6 +1366,68 @@ func buildPublishHandlerWithInvalidator(st *store.Store, cfg *config.Config, ver
 // *http.Server values bound to cfg.PublishAddr and cfg.AdminAddr
 // respectively, so the public surface has no code path to the admin one.
 func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
+	// obs.Setup installs the real TracerProvider/MeterProvider EARLY, before
+	// anything below can emit a span or a metric — every call site in this
+	// process (including the store open just below) already calls
+	// obs.Start/the Metrics recorders unconditionally; before this call they
+	// ran against the real no-op OTel providers (obs/otel.go's package-level
+	// defaults), which is cheap but means nothing was ever exported. cfg's
+	// OTelEnabled/OTelExporter/TraceSampleRatio/OTelServiceName default to
+	// "off" (config.go), so a deployment that never touches those variables
+	// gets identical behavior to before this change.
+	obsShutdown, err := obs.Setup(ctx, obs.Config{
+		Enabled:     cfg.OTelEnabled,
+		Exporter:    cfg.OTelExporter,
+		ServiceName: cfg.OTelServiceName,
+		Version:     version,
+		Commit:      commit,
+		SampleRatio: cfg.TraceSampleRatio,
+	})
+	if err != nil {
+		log.Error("setting up telemetry", slog.Any("error", err))
+		return exitRuntimeFail
+	}
+
+	// SchemaFlux emits its own spans (schemaflux.<operation>, one per LLM
+	// call — PLAN.md §15.0a's diagram names this "llm.generate", but the
+	// library itself names it "schemaflux."+operation; that is a plan
+	// documentation discrepancy, not something to paper over here by
+	// renaming anything) but only attaches them to OUR trace once the host
+	// calls schemaflux/telemetry/otel.Install with OUR TracerProvider — the
+	// library deliberately never calls otel.SetTracerProvider itself (that
+	// package's own doc comment: "a library that sets it cannot be embedded
+	// twice"). This MUST run after obs.Setup above, using
+	// obs.GetTracerProvider() (the provider Setup just installed): calling
+	// it any earlier would capture the package-level no-op default and
+	// silently produce the exact gap it exists to close, just harder to
+	// notice because the call site is present. Without this, the slowest
+	// and most expensive span in every run (the LLM call) never appears as
+	// a child of generation.run — the run just looks like unexplained
+	// latency.
+	schemafluxRestore, err := schemafluxotel.Install(obs.GetTracerProvider())
+	if err != nil {
+		log.Error("installing schemaflux telemetry", slog.Any("error", err))
+		return exitRuntimeFail
+	}
+
+	// metrics is the §15.0a instrument set, built from the SAME
+	// MeterProvider obs.Setup installed above — passed to both the
+	// generation scheduler (schedule.WithMetrics, buildScheduler) and every
+	// generate.Run call (generate.Deps.Metrics, genExecutor/
+	// wireRunExecutor below) so aff_runs_total/aff_run_duration_seconds/
+	// aff_tokens_total/aff_cost_usd_total are recorded from a real run,
+	// not merely registered and never fed. A nil MeterProvider (OTelEnabled
+	// = false) still returns a working *Metrics here — NewMetrics registers
+	// against otelmetric/noop's real no-op MeterProvider in that case, which
+	// records into nothing rather than needing a nil check at every call
+	// site (the same "genuine no-op, not a nil check" contract obs/otel.go
+	// documents for the providers themselves).
+	metrics, err := obs.NewMetrics(obs.GetMeterProvider())
+	if err != nil {
+		log.Error("building metrics", slog.Any("error", err))
+		return exitRuntimeFail
+	}
+
 	st, err := openStore(ctx, cfg)
 	if err != nil {
 		log.Error("opening store", slog.Any("error", err))
@@ -1032,7 +1439,38 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 		}
 	}()
 
-	publishHandler, inv, err := buildPublishHandlerWithInvalidator(st, cfg, version)
+	// Registered AFTER st's own defer above, so defer's LIFO order runs
+	// these two FIRST at return — flushing telemetry (and detaching
+	// SchemaFlux's observer) before the store closes — which is the
+	// ordering runAll's shutdown sequence needs (dispatch stopped,
+	// in-flight work drained, THEN flush, THEN close the store): every
+	// explicit statement below (including both schedulers' drain waits)
+	// runs and completes before any defer fires, so by the time these run,
+	// dispatch is already stopped and drained regardless of which return
+	// path got here.
+	defer schemafluxRestore()
+	// obs.Setup's shutdown func self-bounds to 5s if the context it's given
+	// has no deadline of its own; httpShutdownTimeout gives it an explicit
+	// one here instead of relying on that fallback.
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
+		defer cancel()
+		if err := obsShutdown(shutdownCtx); err != nil {
+			log.Error("shutting down telemetry", slog.Any("error", err))
+		}
+	}()
+
+	if cfg.SlackWebhookURL == "" {
+		// Visible, not silent: a disabled webhook is a valid, safe
+		// configuration (ops.Notify/NotifyBackupAlert/NotifyOpsAlert all
+		// no-op cleanly against an empty URL), but the whole point of the
+		// nightly alerting subsystem is that its absence must never be
+		// discoverable only by noticing, weeks later, that nothing ever
+		// alerted.
+		log.Warn("AFF_SLACK_WEBHOOK_URL not set; nightly backup/prune/staleness alerting is disabled")
+	}
+
+	publishHandler, inv, err := buildPublishHandlerWithInvalidator(st, cfg, version, log, metrics)
 	if err != nil {
 		log.Error("building publish handler", slog.Any("error", err))
 		return exitRuntimeFail
@@ -1046,6 +1484,13 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 	embedder := novelty.NewOpenAIEmbedder(cfg.ProviderAPIKey.Reveal(), embeddingModel, embeddingDim)
 	nov := noveltyAdapter{st: st, embedder: embedder, threshold: defaultNoveltyThreshold, window: defaultNoveltyWindow}
 	prices := budget.NewTable()
+	if err := loadPriceTableAtBoot(ctx, st.Reader(), prices); err != nil {
+		// Not fatal: an unreadable price row degrades to "cost unknown",
+		// which internal/budget already treats as a reason to refuse rather
+		// than as free. Logged loudly because that refusal will otherwise
+		// look inexplicable.
+		log.Error("loading price table", slog.Any("error", err))
+	}
 
 	// runCtx is derived from ctx (not ctx itself) so the scheduler can be
 	// stopped unconditionally during shutdown even when shutdown was
@@ -1054,7 +1499,7 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
-	scheduler, err := buildScheduler(runCtx, st, cfg, provider, nov, prices, inv, log)
+	scheduler, err := buildScheduler(runCtx, st, cfg, provider, nov, prices, metrics, inv, log)
 	if err != nil {
 		log.Error("building scheduler", slog.Any("error", err))
 		return exitRuntimeFail
@@ -1065,7 +1510,33 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 	// via the publish plane regardless of its value (PLAN.md §13).
 	sem := scheduler.ProviderSemaphore()
 
-	controlHandler, err := buildControlPlane(st, cfg, inv, log, provider, nov, prices, sem)
+	// The ops scheduler (internal/ops.Scheduler, PLAN.md §15.4) is a SEPARATE
+	// scheduler from the generation cron dispatcher above: it runs once
+	// nightly (backup, prune, the staleness watchdog), not per-feed cron
+	// jobs, and it must not be merged into the generation scheduler's loop
+	// — see schedule.go's own package doc for why the nightly maintenance
+	// job stays in-process here rather than becoming a second cron entry.
+	// It shares the SAME metrics instance built above, so its
+	// aff_feed_staleness_seconds observations land on the one real
+	// pipeline obsShutdown flushes at shutdown.
+	opsScheduler := ops.NewScheduler(ops.SchedulerConfig{
+		Logger:     log,
+		DBPath:     cfg.DBPath,
+		BackupDir:  cfg.BackupDir,
+		OffsiteDir: cfg.OffsiteDir,
+		Writer:     st.Writer(),
+		PruneOpts: ops.PruneOptions{
+			RunRetention:    nightlyRunRetention,
+			EmbeddingWindow: defaultNoveltyWindow,
+		},
+		StaleFn: func(ctx context.Context, now time.Time) ([]ops.FeedStatus, error) {
+			return ops.LiveFeedStatuses(ctx, st.Writer(), now)
+		},
+		WebhookURL: cfg.SlackWebhookURL,
+		Metrics:    metrics,
+	})
+
+	controlHandler, err := buildControlPlane(st, cfg, inv, log, provider, nov, prices, sem, metrics)
 	if err != nil {
 		log.Error("building control plane", slog.Any("error", err))
 		return exitRuntimeFail
@@ -1081,8 +1552,26 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 		MaxHeaderBytes:    1 << 16,
 	}
 	adminSrv := &http.Server{
-		Addr:              cfg.AdminAddr,
-		Handler:           controlHandler,
+		Addr:    cfg.AdminAddr,
+		Handler: controlHandler,
+		// UnencryptedHTTP2 makes the admin listener understand cleartext
+		// HTTP/2 — grpc-go's client (cmd/aff, dialing with
+		// insecure.NewCredentials()) speaks HTTP/2 with prior knowledge,
+		// sending the h2c client preface directly over the plain TCP
+		// connection rather than negotiating it via TLS ALPN or an
+		// HTTP/1.1 Upgrade. Without it, net/http's default protocol set is
+		// HTTP/1.1 plus TLS-only h2: the connection is never promoted,
+		// every gRPC frame is misread as malformed HTTP/1.1, and
+		// adminRouter's req.ProtoMajor == 2 check never sees a 2 to route
+		// on. HTTP1 stays in the set because plain HTTP/1.1 traffic (the
+		// bridge's WebSocket upgrade, the admin UI's asset/page fetches)
+		// shares this listener — see adminRouter's own comment for why
+		// this stays admin-only and never touches publishSrv.
+		//
+		// This replaced golang.org/x/net/http2/h2c, which the same lines
+		// used until x/net deprecated the package in favour of this field.
+		Protocols: adminProtocols(),
+
 		ReadHeaderTimeout: 5 * time.Second,
 		// No WriteTimeout/IdleTimeout on the admin listener: it carries a
 		// long-lived WebSocket (GoGRPCBridge) that a fixed write deadline
@@ -1107,6 +1596,12 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 
 	schedDone := make(chan error, 1)
 	go func() { schedDone <- scheduler.Run(runCtx) }()
+
+	// opsScheduler shares runCtx with the generation scheduler: the same
+	// cancelRun() below stops both dispatch loops together, and both are
+	// drained (below) before the deferred telemetry flush runs.
+	opsDone := make(chan error, 1)
+	go func() { opsDone <- opsScheduler.Run(runCtx) }()
 
 	select {
 	case err := <-errCh:
@@ -1149,6 +1644,16 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 	if err := <-schedDone; err != nil {
 		record(fmt.Errorf("scheduler shutdown: %w", err))
 	}
+	// Same drain discipline for the ops scheduler: Scheduler.Run (unlike the
+	// generation scheduler) has no in-flight-timeout of its own to wait
+	// out — it fires at most once a day and simply returns nil once runCtx
+	// is Done — but it must still be waited on rather than assumed finished
+	// the instant cancelRun() returned, for the identical reason: a nightly
+	// job that is mid-VACUUM-INTO when the deferred telemetry flush (and
+	// then st.Close()) runs would be racing the very store it is backing up.
+	if err := <-opsDone; err != nil {
+		record(fmt.Errorf("ops scheduler shutdown: %w", err))
+	}
 
 	if shutdownErr != nil {
 		log.Error("shutdown did not complete cleanly", slog.Any("error", shutdownErr))
@@ -1156,4 +1661,35 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 	}
 	log.Info("stopped cleanly")
 	return exitOK
+}
+
+// isLoopbackAddr reports whether addr ("host:port") binds only to this
+// machine. Used as the gate on AFF_DEV_INSECURE_AUTH: a loopback-only admin
+// listener cannot be reached from anywhere else, which is the whole basis
+// for relaxing controls that exist to stop a remote attacker.
+//
+// A missing or unparseable host fails CLOSED (not loopback), as does the
+// empty host in ":8082" — that form binds every interface, which is exactly
+// the case this must refuse.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// adminProtocols is the protocol set for the admin listener: HTTP/1.1 for
+// the browser and the WebSocket upgrade, cleartext HTTP/2 for grpc-go's
+// prior-knowledge client. Written as a helper so the set is stated once and
+// so the &http.Server literal below stays readable.
+func adminProtocols() *http.Protocols {
+	var p http.Protocols
+	p.SetHTTP1(true)
+	p.SetUnencryptedHTTP2(true)
+	return &p
 }

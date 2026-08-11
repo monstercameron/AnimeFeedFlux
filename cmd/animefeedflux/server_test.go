@@ -10,6 +10,8 @@ import (
 
 	"github.com/monstercameron/AnimeFeedFlux/internal/config"
 	"github.com/monstercameron/AnimeFeedFlux/internal/store"
+	"io"
+	"log/slog"
 )
 
 // openTestStore opens and migrates a fresh temp-file SQLite database, the
@@ -103,7 +105,7 @@ func newTestHandler(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
 	st := openTestStore(t)
 	cfg := testConfig(t)
-	h, _, err := buildPublishHandlerWithInvalidator(st, cfg, "test")
+	h, _, err := buildPublishHandlerWithInvalidator(st, cfg, "test", slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	if err != nil {
 		t.Fatalf("buildPublishHandlerWithInvalidator: %v", err)
 	}

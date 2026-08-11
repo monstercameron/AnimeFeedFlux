@@ -1,19 +1,36 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+
+	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/internal/budget"
 	"github.com/monstercameron/AnimeFeedFlux/internal/config"
 	"github.com/monstercameron/AnimeFeedFlux/internal/ids"
 	"github.com/monstercameron/AnimeFeedFlux/internal/llm"
 	"github.com/monstercameron/AnimeFeedFlux/internal/novelty"
+	"github.com/monstercameron/AnimeFeedFlux/internal/obs"
+	"github.com/monstercameron/AnimeFeedFlux/internal/publish"
+	"strconv"
 )
 
 // countingInvalidator records every InvalidateFeed/InvalidateAll call, the
@@ -119,19 +136,160 @@ func TestRunAllTwoListenersAdminPathNotOnPublish(t *testing.T) {
 	}
 
 	// And the reverse property that makes the split meaningful: the admin
-	// listener does not serve the publish plane's index at all (it requires
-	// a session cookie before anything, including "/", is answered).
+	// listener does not serve the publish plane's content.
+	//
+	// This asserted 401 when the bridge owned "/". It no longer does — the
+	// bridge owns exactly bridgeEndpoint and the admin UI owns the rest, so
+	// "/" is the SPA shell. That is a routing change, not a boundary change,
+	// and the boundary is what this test is for: whatever the admin listener
+	// answers at "/", it must not be the public feed index.
 	resp2, err := http.Get("http://" + adminAddr + "/")
 	if err != nil {
 		t.Fatalf("GET admin listener /: %v", err)
 	}
 	defer func() { _ = resp2.Body.Close() }()
-	if resp2.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("admin listener / = %d, want 401 (no session cookie)", resp2.StatusCode)
+	body2, _ := io.ReadAll(resp2.Body)
+	if bytes.Contains(body2, []byte("/feeds/")) {
+		t.Fatalf("admin listener / served the publish plane's feed index; the two planes must not share content")
 	}
 
 	if publishAddr == adminAddr {
 		t.Fatal("publish and admin must not share an address")
+	}
+}
+
+// --- Admin UI bundle is mounted on the ADMIN listener, never the publish ---
+// --- plane -------------------------------------------------------------
+
+// TestAdminStaticBundleNotServedFromPublishListener asserts the constraint
+// internal/publish/static.go's own doc comment calls out by name: the admin
+// UI bundle must never be reachable from the public, unauthenticated
+// publish plane. It extends TestRunAllTwoListenersAdminPathNotOnPublish's
+// pattern (same two-listener runAll, same "GET the wrong listener, want
+// 404" shape) rather than inventing a new one, but targets a static-asset
+// path instead of a gRPC-method-shaped path.
+func TestAdminStaticBundleNotServedFromPublishListener(t *testing.T) {
+	publishAddr := "127.0.0.1:18475"
+	adminAddr := "127.0.0.1:18476"
+	cfg := wireTestConfig(t, publishAddr, adminAddr, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() { done <- runAll(ctx, cfg, discardLogger()) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("runAll did not exit after cancel")
+		}
+	})
+
+	waitUntilUp(t, "http://"+publishAddr+"/healthz", 5*time.Second)
+
+	// wireTestConfig sets no AFF_ADMIN_STATIC_DIR, so this run has no admin
+	// bundle at all (config.DefaultAdminStaticDir won't exist relative to
+	// the test binary's working directory) — which only strengthens the
+	// assertion: even the asset names the bundle WOULD serve if built
+	// (app.wasm, wasm_exec.js, index.html) must 404 on the publish plane
+	// rather than ever reaching a static handler there.
+	for _, path := range []string{"/app.wasm", "/wasm_exec.js", "/index.html"} {
+		resp, err := http.Get("http://" + publishAddr + path)
+		if err != nil {
+			t.Fatalf("GET publish %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("admin bundle path %s on publish listener = %d, want 404", path, resp.StatusCode)
+		}
+	}
+}
+
+// TestAdminMuxKeepsBridgeOnRootAndRoutesEverythingElseToStatic is a direct,
+// server-less test of adminMux's routing rule: "/" (wsconn.DefaultEndpoint,
+// web/wsconn/conn.go, out of scope for this change) must always reach the
+// bridge, and any other path must reach static when one is configured.
+// TestAdminMuxRoutesBridgeAndSPA pins the routing that makes the admin UI
+// reachable at all. The earlier arrangement gave the bridge "/" and 404'd
+// every client-side route; both failures were invisible to the test suite
+// and immediately obvious the first time a browser loaded the app.
+func TestAdminMuxRoutesBridgeAndSPA(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "index.html"), "<!doctype html><title>shell</title>")
+	writeFile(t, filepath.Join(dir, "app.wasm"), "\x00asm")
+	sh, err := publish.NewStaticHandler(dir)
+	if err != nil {
+		t.Fatalf("NewStaticHandler: %v", err)
+	}
+
+	bridgeHit := false
+	mux := &adminMux{
+		bridge: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { bridgeHit = true }),
+		static: sh,
+	}
+
+	get := func(path string) *httptest.ResponseRecorder {
+		bridgeHit = false
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec
+	}
+
+	// The bridge owns exactly one path, and it must be the one the client
+	// dials. A mismatch here fails as "the UI cannot connect", with no
+	// useful error anywhere and no way to see it except in a browser.
+	get(bridgeEndpoint)
+	if !bridgeHit {
+		t.Fatalf("GET %s: want bridge", bridgeEndpoint)
+	}
+	// web/wsconn is js-tagged, so this package cannot import it to compare
+	// the constants directly. Read the source instead: crude, but it is a
+	// real check, and the failure it prevents ("the UI cannot connect", no
+	// error anywhere, visible only in a browser) is worth an ugly test.
+	src, err := os.ReadFile(filepath.Join("..", "..", "web", "wsconn", "conn.go"))
+	if err != nil {
+		t.Fatalf("reading wsconn source: %v", err)
+	}
+	want := "const DefaultEndpoint = " + strconv.Quote(bridgeEndpoint)
+	if !strings.Contains(string(src), want) {
+		t.Fatalf("web/wsconn.DefaultEndpoint does not match bridgeEndpoint %q — the client would dial a path the server does not answer",
+			bridgeEndpoint)
+	}
+
+	// A real asset is served as itself.
+	if rec := get("/app.wasm"); rec.Code != http.StatusOK || bridgeHit {
+		t.Fatalf("GET /app.wasm: code=%d bridgeHit=%v, want 200 from static", rec.Code, bridgeHit)
+	}
+
+	// The SPA loads at its own base href, and every client-side route
+	// serves the shell so the WASM router gets a chance to run.
+	for _, path := range []string{"/", "/login", "/generate", "/history", "/settings", "/nope"} {
+		rec := get(path)
+		if bridgeHit {
+			t.Fatalf("GET %s: reached the bridge; a client route must serve the shell", path)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: code=%d, want 200 serving index.html", path, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "<title>shell</title>") {
+			t.Fatalf("GET %s: did not serve the SPA shell", path)
+		}
+	}
+
+	// Bundle missing at boot (before `make web`): everything falls through
+	// to the bridge rather than panicking on a nil static handler.
+	bridgeHit = false
+	nilStatic := &adminMux{bridge: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { bridgeHit = true })}
+	nilStatic.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/app.wasm", nil))
+	if !bridgeHit {
+		t.Fatal("GET /app.wasm with static=nil: want fallback to bridge")
+	}
+}
+
+func writeFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
 
@@ -364,7 +522,7 @@ func TestGenGateKillSwitchBlocksDispatchNotServing(t *testing.T) {
 	// (buildPublishHandlerWithInvalidator) with no reference to genGate —
 	// serving is unaffected by the switch by construction. Prove it still
 	// serves the feed seeded above.
-	handler, _, err := buildPublishHandlerWithInvalidator(st, cfg, "test")
+	handler, _, err := buildPublishHandlerWithInvalidator(st, cfg, "test", slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	if err != nil {
 		t.Fatalf("buildPublishHandlerWithInvalidator: %v", err)
 	}
@@ -383,7 +541,7 @@ func TestSchedulerAndSampleShareOneProviderSemaphore(t *testing.T) {
 	// slot is enough to prove sharing.
 
 	provider := llm.NewFake()
-	runner, err := buildScheduler(t.Context(), st, cfg, provider, nil, budget.NewTable(), nil, discardLogger())
+	runner, err := buildScheduler(t.Context(), st, cfg, provider, nil, budget.NewTable(), nil, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("buildScheduler: %v", err)
 	}
@@ -414,5 +572,323 @@ func TestSchedulerAndSampleShareOneProviderSemaphore(t *testing.T) {
 	}
 	if shortCtx.Err() == nil {
 		t.Fatalf("Generate failed for a reason other than the blocked semaphore: %v", genErr)
+	}
+}
+
+// --- runAll actually wires obs.Setup and the ops scheduler --------------
+//
+// This is the gap that let two whole subsystems (obs.Setup's real
+// TracerProvider/MeterProvider, internal/ops.Scheduler's nightly
+// backup/prune/staleness job) ship fully tested in their own packages and
+// never run in production: every existing test above proves the listeners
+// bind and serve, which passes identically whether or not either subsystem
+// is wired into runAll at all. These tests instead assert the composition
+// root itself constructs and starts both, and that shutdown actually
+// flushes/drains them — not merely that obs and ops work correctly when
+// exercised directly against their own packages (schedule_test.go and
+// otel_test.go already cover that).
+
+// captureStdout redirects the process's real os.Stdout to a pipe for the
+// duration of the test, returning a function that restores it and returns
+// everything written. obs.Setup's "stdout" exporter (otel.go's
+// setupTraces/setupMetrics) writes to the literal os.Stdout package
+// variable, not to any injectable io.Writer, so this is the only way to
+// observe what it exported without editing otel.go (off-limits).
+func captureStdout(t *testing.T) func() string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	outCh := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		outCh <- buf.String()
+	}()
+	return func() string {
+		os.Stdout = orig
+		_ = w.Close()
+		out := <-outCh
+		_ = r.Close()
+		return out
+	}
+}
+
+// lockedBuffer is a concurrency-safe io.Writer, since runAll logs from
+// multiple goroutines (listeners, both schedulers) concurrently with the
+// test reading the buffer after shutdown.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestRunAllWiresObsSetupAndFlushesOnShutdown asserts two things a
+// listeners-bind-and-serve test cannot: (1) the global TracerProvider and
+// MeterProvider obs.Start/obs.NewMetrics read (obs/otel.go's package-level
+// vars) are no longer the no-op defaults once runAll is running with
+// AFF_OTEL_ENABLED=1 — proving runAll actually calls obs.Setup, not merely
+// that obs.Setup works when called directly (otel_test.go already proves
+// that); and (2) a metric recorded through that same provider while runAll
+// is up is actually exported to the configured "stdout" exporter only once
+// shutdown runs — proving the shutdown func obs.Setup returned is both
+// wired into runAll's shutdown path AND actually invoked (flushed), not
+// merely constructed and discarded.
+func TestRunAllWiresObsSetupAndFlushesOnShutdown(t *testing.T) {
+	publishAddr := "127.0.0.1:18480"
+	adminAddr := "127.0.0.1:18481"
+	env := map[string]string{
+		"AFF_DB_PATH":               filepath.Join(t.TempDir(), "aff.db"),
+		"AFF_PUBLISH_ADDR":          publishAddr,
+		"AFF_ADMIN_ADDR":            adminAddr,
+		"AFF_PUBLIC_BASE_URL":       "https://anime.example.com",
+		"AFF_ALLOWED_ORIGINS":       "https://admin.example.com",
+		"AFF_SECRET_KEY":            "test-secret-key-0123456789",
+		"SCHEMAFLUX_API_KEY":        "test-provider-key",
+		"AFF_GENERATION_ENABLED":    "true",
+		"AFF_PROVIDER_MAX_INFLIGHT": "1",
+		"AFF_OTEL_ENABLED":          "true",
+		"AFF_OTEL_EXPORTER":         "stdout",
+		"AFF_TRACE_SAMPLE_RATIO":    "1",
+	}
+	cfg, err := config.Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	restoreStdout := captureStdout(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() { done <- runAll(ctx, cfg, discardLogger()) }()
+
+	waitUntilUp(t, "http://"+publishAddr+"/healthz", 5*time.Second)
+
+	// (1) The composition root, not just the obs package, installed real
+	// providers.
+	if tp := obs.GetTracerProvider(); fmt.Sprintf("%T", tp) == fmt.Sprintf("%T", tracenoop.NewTracerProvider()) {
+		t.Fatal("TracerProvider is still the package no-op default while runAll is up with AFF_OTEL_ENABLED=1 " +
+			"— runAll did not call obs.Setup")
+	}
+	if mp := obs.GetMeterProvider(); fmt.Sprintf("%T", mp) == fmt.Sprintf("%T", metricnoop.NewMeterProvider()) {
+		t.Fatal("MeterProvider is still the package no-op default while runAll is up with AFF_OTEL_ENABLED=1 " +
+			"— runAll did not call obs.Setup")
+	}
+
+	// (2) Record one data point on the SAME MeterProvider runAll's obs.Setup
+	// installed (obs.GetMeterProvider(), not a second one), the same way
+	// internal/ops.Scheduler's nightly staleness check would. The default
+	// PeriodicReader export interval is far longer than this test's
+	// lifetime, so this metric reaching stdout at all can only be
+	// attributed to the explicit ForceFlush an OTel MeterProvider.Shutdown
+	// performs — i.e. to runAll's deferred obsShutdown call actually
+	// running.
+	metrics, err := obs.NewMetrics(obs.GetMeterProvider())
+	if err != nil {
+		t.Fatalf("obs.NewMetrics: %v", err)
+	}
+	const probeFeedSlug = "wire-test-flush-probe"
+	if err := metrics.RecordFeedStaleness(context.Background(), probeFeedSlug, 42); err != nil {
+		t.Fatalf("RecordFeedStaleness: %v", err)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(httpShutdownTimeout + 10*time.Second):
+		t.Fatal("runAll did not return after ctx cancellation")
+	}
+
+	out := restoreStdout()
+	if !strings.Contains(out, "aff_feed_staleness_seconds") || !strings.Contains(out, probeFeedSlug) {
+		t.Fatalf("shutdown did not flush the recorded metric to the stdout exporter; "+
+			"captured output:\n%s", out)
+	}
+}
+
+// TestRunAllStartsAndDrainsOpsScheduler asserts the composition root builds
+// and starts internal/ops.Scheduler (PLAN.md §15.4) alongside the
+// generation scheduler, and that shutdown genuinely drains it rather than
+// leaking a goroutine: runAll's shutdown sequence blocks on `<-opsDone`
+// after cancelRun(), so if the ops scheduler were never constructed or
+// never handed runCtx (i.e. this wiring regressed to what it was before
+// this change), that read would block forever and this test would time out
+// instead of returning within httpShutdownTimeout. It also asserts the
+// visibility requirement: an unset AFF_SLACK_WEBHOOK_URL must be a loud
+// startup warning, not a silent gap.
+func TestRunAllStartsAndDrainsOpsScheduler(t *testing.T) {
+	publishAddr := "127.0.0.1:18482"
+	adminAddr := "127.0.0.1:18483"
+	env := map[string]string{
+		"AFF_DB_PATH":               filepath.Join(t.TempDir(), "aff.db"),
+		"AFF_PUBLISH_ADDR":          publishAddr,
+		"AFF_ADMIN_ADDR":            adminAddr,
+		"AFF_PUBLIC_BASE_URL":       "https://anime.example.com",
+		"AFF_ALLOWED_ORIGINS":       "https://admin.example.com",
+		"AFF_SECRET_KEY":            "test-secret-key-0123456789",
+		"SCHEMAFLUX_API_KEY":        "test-provider-key",
+		"AFF_GENERATION_ENABLED":    "true",
+		"AFF_PROVIDER_MAX_INFLIGHT": "1",
+		"AFF_BACKUP_DIR":            filepath.Join(t.TempDir(), "backups"),
+		"AFF_OFFSITE_DIR":           filepath.Join(t.TempDir(), "offsite"),
+		// AFF_SLACK_WEBHOOK_URL deliberately left unset.
+	}
+	cfg, err := config.Load(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	logBuf := &lockedBuffer{}
+	log := slog.New(slog.NewTextHandler(logBuf, nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() { done <- runAll(ctx, cfg, log) }()
+
+	waitUntilUp(t, "http://"+publishAddr+"/healthz", 5*time.Second)
+
+	if !strings.Contains(logBuf.String(), "nightly backup/prune/staleness alerting is disabled") {
+		t.Fatalf("no visible warning for an unset AFF_SLACK_WEBHOOK_URL; log so far:\n%s", logBuf.String())
+	}
+
+	start := time.Now()
+	cancel()
+	select {
+	case code := <-done:
+		if code != exitOK {
+			t.Fatalf("runAll exit code = %d, want %d", code, exitOK)
+		}
+		if elapsed := time.Since(start); elapsed > httpShutdownTimeout+5*time.Second {
+			t.Fatalf("shutdown took %s, want well under %s — the ops scheduler may not be draining on runCtx",
+				elapsed, httpShutdownTimeout)
+		}
+	case <-time.After(httpShutdownTimeout + 10*time.Second):
+		t.Fatal("runAll did not return after ctx cancellation — the ops scheduler goroutine likely was never " +
+			"started (or never wired to runCtx), so <-opsDone in runAll's shutdown path is blocking forever")
+	}
+}
+
+// --- Admin listener serves plain gRPC AND everything else on one port ------
+
+// TestAdminListenerServesPlainGRPC reproduces the defect cmd/aff hit against
+// a running server: `grpc.NewClient(a.Server, ...)` (cmd/aff/client.go's
+// realDial) had no *grpc.Server to talk to, because runAll's admin listener
+// was ONLY adminMux — a plain http.Handler, never wrapped for h2c, with no
+// gRPC surface at all. Every CLI command failed at the transport before this
+// change; this proves a real, unauthenticated AuthService call now reaches
+// AuthServer.Login (codes.Unauthenticated, the server's genuine credential
+// verdict — NOT a transport error, which is exactly the distinction that
+// matters: an Unavailable/transport error here would mean the request never
+// arrived).
+func TestAdminListenerServesPlainGRPC(t *testing.T) {
+	publishAddr := "127.0.0.1:18484"
+	adminAddr := "127.0.0.1:18485"
+	cfg := wireTestConfig(t, publishAddr, adminAddr, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() { done <- runAll(ctx, cfg, discardLogger()) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("runAll did not exit after cancel")
+		}
+	})
+
+	waitUntilUp(t, "http://"+adminAddr+"/", 5*time.Second)
+
+	conn, err := grpc.NewClient(adminAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := affv1.NewAuthServiceClient(conn)
+	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer rcancel()
+	_, err = client.Login(rctx, &affv1.AuthServiceLoginRequest{Password: "wrong", TotpCode: "000000"})
+	if err == nil {
+		t.Fatal("expected Login to fail (no admin has been provisioned in this test store), but it succeeded")
+	}
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("Login error code = %v (%v), want Unauthenticated — a different code (esp. Unavailable) "+
+			"would mean the request never reached the gRPC server at all", status.Code(err), err)
+	}
+
+	// The same port must still answer plain HTTP alongside gRPC: a browser
+	// request gets a real HTTP response rather than a gRPC-framing error or
+	// a hang, proving adminRouter's fallthrough to adminMux still works.
+	//
+	// The status is deliberately not asserted to be 401 any more. It was,
+	// back when the bridge owned "/" and refused without a cookie; that
+	// refusal is exactly what made login impossible, since the socket was
+	// the only route to the call that mints the cookie. What matters here is
+	// that the content-type routing works at all.
+	resp, err := http.Get("http://" + adminAddr + "/")
+	if err != nil {
+		t.Fatalf("GET admin listener /: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 500 {
+		t.Fatalf("GET admin listener / = %d; a plain HTTP request must not hit a server error on the gRPC-sharing port", resp.StatusCode)
+	}
+}
+
+// TestPublishListenerHasNoGRPCSurface asserts the §2 boundary this change
+// must not weaken: the ADMIN listener gained a gRPC surface, but the PUBLISH
+// listener — public, read-only, HTTP/1.1 only — must not. A plain gRPC
+// dial against the publish address must fail at the transport (the publish
+// server never speaks h2c), never reach a service, and never hang.
+func TestPublishListenerHasNoGRPCSurface(t *testing.T) {
+	publishAddr := "127.0.0.1:18486"
+	adminAddr := "127.0.0.1:18487"
+	cfg := wireTestConfig(t, publishAddr, adminAddr, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() { done <- runAll(ctx, cfg, discardLogger()) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("runAll did not exit after cancel")
+		}
+	})
+
+	waitUntilUp(t, "http://"+publishAddr+"/healthz", 5*time.Second)
+
+	conn, err := grpc.NewClient(publishAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := affv1.NewAuthServiceClient(conn)
+	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer rcancel()
+	_, err = client.Login(rctx, &affv1.AuthServiceLoginRequest{Password: "wrong", TotpCode: "000000"})
+	if err == nil {
+		t.Fatal("expected a plain gRPC call against the PUBLISH listener to fail; it must have no gRPC surface")
+	}
+	if status.Code(err) == codes.Unauthenticated {
+		t.Fatalf("Login on the publish listener returned a real credential verdict (Unauthenticated) — "+
+			"the publish plane must never reach an RPC service at all: %v", err)
 	}
 }
