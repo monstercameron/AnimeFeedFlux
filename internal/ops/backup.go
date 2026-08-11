@@ -33,6 +33,29 @@ func backupTimestamp(t time.Time) string {
 	return fmt.Sprintf("%019d", t.UTC().UnixNano())
 }
 
+// backupTimestampDigits is the width backupTimestamp always produces. Stated
+// once, because retainBackups decides what to DELETE by this exact shape.
+const backupTimestampDigits = 19
+
+// isSnapshotName reports whether name is a snapshot this base owns:
+// "<base>-<19 digits>.db", exactly. See retainBackups for why a prefix match
+// is not good enough.
+func isSnapshotName(name, base string) bool {
+	prefix, suffix := base+"-", ".db"
+	if len(name) != len(prefix)+backupTimestampDigits+len(suffix) {
+		return false
+	}
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+		return false
+	}
+	for _, r := range name[len(prefix) : len(name)-len(suffix)] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // backupBaseName derives the backup file's stem from the source database's
 // filename, so multiple databases can share one outDir without colliding.
 func backupBaseName(dbPath string) string {
@@ -196,10 +219,37 @@ func copyFile(src, dst string) error {
 // removes the rest. Filenames sort lexically in creation order because
 // backupTimestamp is fixed-width, so a plain reverse string sort is exact —
 // no need to stat or parse anything.
+//
+// # What counts as "mine"
+//
+// The glob alone does not answer that, and getting it wrong here deletes
+// backups. `base+"-*.db"` looks specific and is not: for base "aff" the
+// wildcard also swallows "test-<timestamp>", so every backup of a database
+// called aff-test matched too — and backupBaseName exists precisely so
+// "multiple databases can share one outDir without colliding".
+//
+// The miscount was not the damage. Names sort reverse-lexically and 't' > '0',
+// so the foreign aff-test files sorted ahead of every genuine aff backup:
+// with keep=2, both survivors were aff-test's and ALL THREE real aff backups
+// were deleted. The routine whose job is retaining backups removed exactly
+// the ones that mattered, and reported success.
+//
+// So membership is checked rather than assumed: a snapshot is
+// "<base>-<19 digits>.db" and nothing else. That also excludes a
+// hand-renamed or half-written file someone left in the directory — likely
+// the very thing they are mid-recovery on — and it restores the fixed-width
+// premise the reverse sort above depends on, which only holds if every
+// element really is a timestamp for this base.
 func retainBackups(outDir, base string, keep int) error {
-	matches, err := filepath.Glob(filepath.Join(outDir, base+"-*.db"))
+	globbed, err := filepath.Glob(filepath.Join(outDir, base+"-*.db"))
 	if err != nil {
 		return fmt.Errorf("ops: listing backups in %s: %w", outDir, err)
+	}
+	matches := make([]string, 0, len(globbed))
+	for _, m := range globbed {
+		if isSnapshotName(filepath.Base(m), base) {
+			matches = append(matches, m)
+		}
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
 
