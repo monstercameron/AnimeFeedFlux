@@ -36,6 +36,10 @@ func TestConfigValidate(t *testing.T) {
 		{"blank origin entry", func(c Config) Config { c.AllowedOrigins = []string{" "}; return c }, true},
 		{"missing validator", func(c Config) Config { c.Validator = nil; return c }, true},
 		{"negative revalidate interval", func(c Config) Config { c.RevalidateInterval = -1; return c }, true},
+		{"negative max message bytes", func(c Config) Config { c.MaxMessageBytes = -1; return c }, true},
+		{"negative max active connections", func(c Config) Config { c.MaxActiveConnections = -1; return c }, true},
+		{"negative max connections per client", func(c Config) Config { c.MaxConnectionsPerClient = -1; return c }, true},
+		{"negative max upgrades per client per minute", func(c Config) Config { c.MaxUpgradesPerClientPerMinute = -1; return c }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,6 +71,45 @@ func TestConfigWithDefaults_Keepalive(t *testing.T) {
 	}
 	if _, ok := resolved.Clock.(RealClock); !ok {
 		t.Fatalf("Clock default = %T, want RealClock", resolved.Clock)
+	}
+	if resolved.MaxMessageBytes != defaultMaxMessageBytes {
+		t.Fatalf("MaxMessageBytes = %d, want %d", resolved.MaxMessageBytes, defaultMaxMessageBytes)
+	}
+	if resolved.MaxActiveConnections != defaultMaxActiveConnections {
+		t.Fatalf("MaxActiveConnections = %d, want %d", resolved.MaxActiveConnections, defaultMaxActiveConnections)
+	}
+	if resolved.MaxConnectionsPerClient != defaultMaxConnectionsPerClient {
+		t.Fatalf("MaxConnectionsPerClient = %d, want %d", resolved.MaxConnectionsPerClient, defaultMaxConnectionsPerClient)
+	}
+	if resolved.MaxUpgradesPerClientPerMinute != defaultMaxUpgradesPerClientPerMinute {
+		t.Fatalf("MaxUpgradesPerClientPerMinute = %d, want %d", resolved.MaxUpgradesPerClientPerMinute, defaultMaxUpgradesPerClientPerMinute)
+	}
+}
+
+// TestConfigWithDefaults_LimitsNotOverridden proves explicit caller-supplied
+// limits survive withDefaults unchanged, the same additive-not-overwrite
+// property TestConfigWithDefaults_CustomKeepaliveIsNotOverridden pins down
+// for the keepalive fields.
+func TestConfigWithDefaults_LimitsNotOverridden(t *testing.T) {
+	cfg := baseTestConfig()
+	cfg.MaxMessageBytes = 1
+	cfg.MaxActiveConnections = 2
+	cfg.MaxConnectionsPerClient = 3
+	cfg.MaxUpgradesPerClientPerMinute = 4
+
+	resolved := cfg.withDefaults()
+
+	if resolved.MaxMessageBytes != 1 {
+		t.Fatalf("MaxMessageBytes = %d, want caller override 1", resolved.MaxMessageBytes)
+	}
+	if resolved.MaxActiveConnections != 2 {
+		t.Fatalf("MaxActiveConnections = %d, want caller override 2", resolved.MaxActiveConnections)
+	}
+	if resolved.MaxConnectionsPerClient != 3 {
+		t.Fatalf("MaxConnectionsPerClient = %d, want caller override 3", resolved.MaxConnectionsPerClient)
+	}
+	if resolved.MaxUpgradesPerClientPerMinute != 4 {
+		t.Fatalf("MaxUpgradesPerClientPerMinute = %d, want caller override 4", resolved.MaxUpgradesPerClientPerMinute)
 	}
 }
 
