@@ -180,6 +180,28 @@ func scanItem(sc rowScanner) (model.Item, error) {
 	return it, nil
 }
 
+// truncatePublishedAt normalizes a published_at to whole-second precision
+// before it is ever compared or stored by this package.
+//
+// RSS's RFC 822 pubDate (internal/render's RFC822, §5.1) has one-second
+// resolution — there is no fractional-second slot in "Mon, 02 Jan 2006
+// 15:04:05 -0700". items.published_at is UNIQUE(feed_id, published_at)
+// (migrations/0002_feeds_items.sql), but that constraint only actually
+// prevents "two items share a rendered pubDate" (the failure PLAN.md §5.5
+// warns about — Slack's bookmark advances past the newer of the two and the
+// other is invisible forever, silently) if the column being compared is at
+// the SAME granularity the wire format renders. Storing at sub-second
+// precision let two items land less than a second apart, pass the UNIQUE
+// check as distinct rows, and still collide byte-for-byte once rendered.
+// Truncating here — the single place every write in this package funnels
+// through — makes the existing index do the right thing by construction,
+// the same choice PromoteSample (internal/store/samples.go) and
+// PublishCorrection (internal/rpc/item.go) already made for their own
+// stamps.
+func truncatePublishedAt(t time.Time) time.Time {
+	return t.Truncate(time.Second)
+}
+
 // InsertItem creates a new item and returns its id.
 //
 // tokens_in/out, model, prompt_hash and run_id belong to the generation
@@ -188,6 +210,7 @@ func scanItem(sc rowScanner) (model.Item, error) {
 // see scanItem.
 func (s *Store) InsertItem(ctx context.Context, it model.Item) (int64, error) {
 	now := formatTime(time.Now())
+	published := truncatePublishedAt(it.PublishedAt)
 	res, err := s.writer.ExecContext(ctx, `
 		INSERT INTO items (feed_id, item_key, content_hash, title, summary_text, body_html,
 		                    answer_html, link, source_name, published_at, origin,
@@ -195,7 +218,7 @@ func (s *Store) InsertItem(ctx context.Context, it model.Item) (int64, error) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		it.FeedID, it.ItemKey, it.ContentHash, it.Title, it.SummaryText, it.BodyHTML,
 		nullString(it.AnswerHTML), nullString(it.Link), nullString(it.SourceName),
-		formatTime(it.PublishedAt), string(it.Origin),
+		formatTime(published), string(it.Origin),
 		now, now)
 	if err != nil {
 		return 0, fmt.Errorf("store: inserting item %q: %w", it.ItemKey, err)
@@ -281,13 +304,14 @@ func (s *Store) ListItems(ctx context.Context, feedID int64, limit int, includeD
 // duplicate in every subscriber's inbox.
 func (s *Store) UpdateItem(ctx context.Context, it model.Item, expectedVersion int64) error {
 	now := time.Now()
+	published := truncatePublishedAt(it.PublishedAt)
 	res, err := s.writer.ExecContext(ctx, `
 		UPDATE items
 		SET title = ?, summary_text = ?, body_html = ?, answer_html = ?, link = ?, source_name = ?,
 		    published_at = ?, origin = ?, edited_at = ?, updated_at = ?, version = version + 1
 		WHERE id = ? AND version = ?`,
 		it.Title, it.SummaryText, it.BodyHTML, nullString(it.AnswerHTML), nullString(it.Link), nullString(it.SourceName),
-		formatTime(it.PublishedAt), string(it.Origin), formatTime(now), formatTime(now),
+		formatTime(published), string(it.Origin), formatTime(now), formatTime(now),
 		it.ID, expectedVersion)
 	if err != nil {
 		return fmt.Errorf("store: updating item %d: %w", it.ID, err)

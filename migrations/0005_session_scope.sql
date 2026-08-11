@@ -1,0 +1,23 @@
+-- 0005 — session scope (PLAN.md §4, §12.2; TODOS.md BF-32).
+--
+-- BF-32 ("an ELEVATED session cannot reach anything but password reset and
+-- TOTP re-enrollment") was left unwritten because sessions carried no notion
+-- of scope at all: the 10-minute elevated window RecoverWithCode opens
+-- (§12.2) was tracked only in the server's process memory
+-- (internal/rpc/auth.go's elevatedTracker), never on the session row itself.
+-- That made the guarantee only as good as the interceptor's in-memory map
+-- agreeing with reality, rather than something the session carried.
+--
+-- scope defaults to 'full' so every session that exists at deploy time keeps
+-- working exactly as it did before this column existed — a migration that
+-- narrowed live sessions would lock the admin out at deploy time, which is a
+-- self-inflicted outage. Only a RecoverWithCode session is ever moved to
+-- 'elevated', and only by the interceptor (internal/rpc/interceptor.go),
+-- which is also where the scope is enforced: an elevated session reaching
+-- any method outside its allowlist is refused there, centrally, not by each
+-- handler remembering to check.
+--
+-- The CHECK is a closed set on purpose. A typo'd scope value must fail loud
+-- at write time, not silently grant or deny access depending on how an
+-- unrecognized string compares against the allowlist.
+ALTER TABLE sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'full' CHECK (scope IN ('full', 'elevated'));

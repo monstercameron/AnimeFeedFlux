@@ -1,14 +1,32 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// decodeLogRecords parses buf as a stream of JSON slog records.
+func decodeLogRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var recs []map[string]any
+	dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
+	for dec.More() {
+		var rec map[string]any
+		if err := dec.Decode(&rec); err != nil {
+			t.Fatalf("log line is not JSON: %v\n%s", err, buf.String())
+		}
+		recs = append(recs, rec)
+	}
+	return recs
+}
 
 func openTemp(t *testing.T) *Store {
 	t.Helper()
@@ -351,5 +369,98 @@ func TestCloseIsSafeAndCheckpoints(t *testing.T) {
 		t.Errorf("WAL is %d bytes after close; checkpoint did not truncate", fi.Size())
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("stat wal: %v", err)
+	}
+}
+
+// TestOpenLogsPathAtDebugAndShortened covers the deliberate deviation from
+// PLAN.md §15.0's canonical field set: "store open" is boot-time detail, not
+// a unit of work, so it stays at DEBUG rather than the reserved-for-wide-
+// events INFO level (§15.0's level policy). Its "path" attribute is not
+// promoted into internal/obs's canonical set either — a filesystem path is
+// exactly the kind of value that should not travel verbatim into a shared
+// log aggregator, so only the basename is logged even though the full
+// absolute path is what Open actually resolves and holds.
+func TestOpenLogsPathAtDebugAndShortened(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "aff.db")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	s, err := Open(t.Context(), Options{Path: path, Log: logger})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	var found bool
+	for _, rec := range decodeLogRecords(t, &buf) {
+		if rec["msg"] != "store open" {
+			continue
+		}
+		found = true
+		if rec["level"] != "DEBUG" {
+			t.Errorf("store open logged at %v, want DEBUG", rec["level"])
+		}
+		p, _ := rec["path"].(string)
+		if p == "" {
+			t.Fatalf("store open record has no path field: %v", rec)
+		}
+		if p != filepath.Base(path) {
+			t.Errorf("path = %q, want basename %q (full path must not reach the log)", p, filepath.Base(path))
+		}
+		if strings.ContainsAny(p, `/\`) {
+			t.Errorf("path %q still contains a directory separator", p)
+		}
+	}
+	if !found {
+		t.Fatal("no \"store open\" record was logged at Debug level")
+	}
+}
+
+// TestMigrateLogsAtDebugNotInfo: PLAN.md §15.0 reserves INFO for the two
+// canonical wide events (run.finished, http.request). Per-migration
+// commentary is boot detail, so it must not appear at INFO — that is what
+// keeps INFO worth reading.
+func TestMigrateLogsAtDebugNotInfo(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	s, err := Open(t.Context(), Options{Path: filepath.Join(t.TempDir(), "aff.db"), Log: logger})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	buf.Reset() // isolate from Open's own "store open" record
+	applied, err := s.Migrate(t.Context())
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if applied == 0 {
+		t.Fatal("expected at least one migration to apply on a fresh database")
+	}
+
+	var sawMigrationLog bool
+	for _, rec := range decodeLogRecords(t, &buf) {
+		if rec["msg"] != "migration applied" {
+			continue
+		}
+		sawMigrationLog = true
+		if rec["level"] != "DEBUG" {
+			t.Errorf("migration applied logged at %v, want DEBUG", rec["level"])
+		}
+		if _, ok := rec["version"]; !ok {
+			t.Error("migration applied record missing version")
+		}
+		if _, ok := rec["name"]; !ok {
+			t.Error("migration applied record missing name")
+		}
+	}
+	if !sawMigrationLog {
+		t.Fatal("no \"migration applied\" record was logged")
 	}
 }

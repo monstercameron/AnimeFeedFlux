@@ -128,6 +128,72 @@ func TestInsertItemAndGetItemRoundTrip(t *testing.T) {
 	}
 }
 
+// TestInsertItemTruncatesPublishedAtToWholeSecond proves the store's write
+// path normalizes published_at to the granularity RSS's RFC 822 pubDate can
+// actually render (§5.1/§5.5): a sub-second value must not survive a round
+// trip, so the DB's UNIQUE(feed_id, published_at) index — which operates on
+// whatever precision is actually stored — agrees with what two items look
+// like once rendered.
+func TestInsertItemTruncatesPublishedAtToWholeSecond(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	feedID, err := s.CreateFeed(ctx, makeFeed("trivia"))
+	if err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+
+	withFrac := time.Date(2026, 8, 9, 12, 0, 0, 500_000_000, time.UTC) // .5s
+	if _, err := s.InsertItem(ctx, makeItem(feedID, "k1", withFrac)); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	got, err := s.GetItem(ctx, "k1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	want := withFrac.Truncate(time.Second)
+	if !got.PublishedAt.Equal(want) {
+		t.Fatalf("published_at = %v, want truncated %v (sub-second component must not survive)", got.PublishedAt, want)
+	}
+	if got.PublishedAt.Nanosecond() != 0 {
+		t.Fatalf("published_at retained a sub-second component: %v", got.PublishedAt)
+	}
+}
+
+// TestInsertItemTwoSubSecondApartCollideAtSecondGranularity is the defect
+// this whole change exists to close: two items whose published_at differ
+// only within the same second must NOT both be insertable into one feed,
+// because RFC 822 pubDate (one-second resolution) would render them
+// byte-identical — the exact "one item is invisible forever, silently"
+// failure §5.5 describes for Slack's bookmark model. Before truncation, the
+// UNIQUE(feed_id, published_at) constraint did not catch this because the
+// two rows were genuinely distinct at the sub-second precision the column
+// was stored at; after truncation they collide in the database exactly as
+// they collide on the wire.
+func TestInsertItemTwoSubSecondApartCollideAtSecondGranularity(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	feedID, err := s.CreateFeed(ctx, makeFeed("trivia"))
+	if err != nil {
+		t.Fatalf("create feed: %v", err)
+	}
+
+	base := time.Date(2026, 8, 9, 12, 0, 0, 100_000_000, time.UTC) // .1s
+	if _, err := s.InsertItem(ctx, makeItem(feedID, "first", base)); err != nil {
+		t.Fatalf("insert first: %v", err)
+	}
+
+	// 400ms later, same second once truncated.
+	second := base.Add(400 * time.Millisecond)
+	_, err = s.InsertItem(ctx, makeItem(feedID, "second", second))
+	if err == nil {
+		t.Fatal("expected a UNIQUE(feed_id, published_at) collision for two items truncating to the same second, got nil error")
+	}
+	if !isUniquePublishedAtViolation(err) {
+		t.Fatalf("expected a UNIQUE constraint violation, got: %v", err)
+	}
+}
+
 func TestGetItemMissingReturnsErrNotFound(t *testing.T) {
 	s := newTestStore(t)
 	_, err := s.GetItem(t.Context(), "no-such-key")

@@ -120,7 +120,14 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("store: connecting reader (writer must be opened first): %w", err)
 	}
 
-	log.Info("store open", slog.String("path", abs))
+	// DEBUG, not the canonical INFO wide events (PLAN.md §15.0 reserves INFO
+	// for run.finished/http.request) — "store open" is once-per-process boot
+	// detail, not a unit of work. "path" also isn't promoted to the canonical
+	// set: it's a filesystem path, which is exactly the kind of value that
+	// ends up verbatim in a shared log aggregator, so only the basename is
+	// logged rather than the full absolute path this function otherwise
+	// resolves and holds.
+	log.Debug("store open", slog.String("path", filepath.Base(abs)))
 
 	return &Store{writer: writer, reader: reader, path: abs, log: log}, nil
 }
@@ -237,7 +244,15 @@ func (s *Store) Migrate(ctx context.Context) (applied int, err error) {
 			return applied, err
 		}
 		applied++
-		s.log.Info("migration applied",
+		// DEBUG, not INFO (PLAN.md §15.0 reserves INFO for the two canonical
+		// wide events) — this is per-migration boot commentary, not a unit of
+		// work. "version"/"name" stay bare rather than joining the canonical
+		// set: they're migration-scoped, not something any other package
+		// would ever want to group logs by, so promoting them to the shared
+		// vocabulary would just be adding fields nobody else uses. Unlike
+		// "path" above, neither carries anything sensitive, so no shortening
+		// is needed.
+		s.log.Debug("migration applied",
 			slog.Int("version", m.version),
 			slog.String("name", m.name))
 	}

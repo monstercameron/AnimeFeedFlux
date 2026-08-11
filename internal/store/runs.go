@@ -243,6 +243,28 @@ const insertRunItemSQL = `
 // commit atomically together, so each embedding is inserted in THIS
 // transaction, keyed off the item id CommitRun itself just minted — not
 // looked up afterward, and never on a separate connection.
+// commitRunPreCommitFailure, when non-nil, is invoked immediately before
+// CommitRun's own tx.Commit(), with the transaction already fully staged
+// (every item inserted, the run row's closing UPDATE applied) and its
+// rollback already deferred. Production leaves this nil.
+//
+// crash_test.go (C4-14) sets it to simulate a process crash landing in the
+// exact gap PLAN.md §9 calls out — "the gap between items committed and run
+// marked finished" — by making the transaction fail to commit after
+// everything has been staged inside it. Returning a non-nil error here makes
+// CommitRun return before calling tx.Commit(), so the deferred tx.Rollback()
+// discards the whole transaction: nothing lands, exactly as a real crash in
+// that window would leave things (SQLite never durably commits a transaction
+// the process died inside). This is deliberately an injected in-transaction
+// failure rather than closing s.writer or killing a process: closing the
+// shared *sql.DB would poison every other concurrent use of this *Store
+// (StartRun, ListRuns, other tests sharing the pool), which is collateral
+// damage the real failure mode does not have. It follows the same
+// package-level test-hook pattern samples.go already uses
+// (promoteAfterReadNewestHook) for the same reason: an otherwise-unreachable
+// timing/failure window that only a deliberate hook can open deterministically.
+var commitRunPreCommitFailure func() error
+
 func (s *Store) CommitRun(ctx context.Context, runID int64, items []model.Item, summary RunSummary, embeddings ...ItemEmbedding) error {
 	reasonsJSON, err := summary.reasonsJSON()
 	if err != nil {
@@ -307,6 +329,12 @@ func (s *Store) CommitRun(ctx context.Context, runID int64, items []model.Item, 
 	}
 	if n == 0 {
 		return fmt.Errorf("store: committing run %d: %w", runID, ErrNotFound)
+	}
+
+	if commitRunPreCommitFailure != nil {
+		if err := commitRunPreCommitFailure(); err != nil {
+			return fmt.Errorf("store: simulated crash before committing run %d: %w", runID, err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -529,4 +557,78 @@ func (s *Store) SpendSince(ctx context.Context, feedID int64, since time.Time) (
 		return 0, 0, 0, fmt.Errorf("store: summing spend since %s: %w", formatTime(since), err)
 	}
 	return tokensIn, tokensOut, costUSD, nil
+}
+
+// DailySpend is one UTC calendar day of provider spend.
+type DailySpend struct {
+	Date      string // "YYYY-MM-DD", UTC
+	CostUSD   float64
+	Runs      int64
+	TokensIn  int64
+	TokensOut int64
+}
+
+// SpendByDay buckets run spend into UTC calendar days from since (inclusive)
+// to now, so §13's cost model is something an operator can SEE over time
+// rather than a single running total.
+//
+// Days with no runs are RETURNED, zeroed, rather than omitted. A gap in
+// generation — the feed that quietly stopped, which PLAN.md §15 calls "the
+// real failure mode" — is exactly what someone reads this chart to find, and
+// a sparse series hides it by drawing a straight line from the day before to
+// the day after. Filling here rather than in the UI means every consumer
+// gets the same honest shape.
+//
+// UTC because internal/budget's monthly ceiling already uses UTC calendar
+// months; two different day boundaries in one cost story would make the
+// chart and the ceiling disagree at midnight.
+//
+// Failed runs are included, for the same reason SpendSince includes them:
+// money already spent is spent (§22 J5, "a failure that spent money must
+// still show the money").
+func (s *Store) SpendByDay(ctx context.Context, since time.Time) ([]DailySpend, error) {
+	// substr over the stored RFC3339 text rather than SQLite's date()
+	// function: formatTime writes UTC already, so the first ten characters
+	// ARE the UTC calendar day, and slicing avoids depending on how the
+	// driver's date() handles the stored offset.
+	const query = `SELECT substr(started_at, 1, 10) AS day,
+	                      COALESCE(SUM(est_cost_usd), 0),
+	                      COUNT(*),
+	                      COALESCE(SUM(tokens_in), 0),
+	                      COALESCE(SUM(tokens_out), 0)
+	               FROM runs
+	               WHERE started_at >= ?
+	               GROUP BY day`
+
+	rows, err := s.writer.QueryContext(ctx, query, formatTime(since))
+	if err != nil {
+		return nil, fmt.Errorf("store: bucketing spend by day: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	found := map[string]DailySpend{}
+	for rows.Next() {
+		var d DailySpend
+		if err := rows.Scan(&d.Date, &d.CostUSD, &d.Runs, &d.TokensIn, &d.TokensOut); err != nil {
+			return nil, fmt.Errorf("store: scanning daily spend: %w", err)
+		}
+		found[d.Date] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: reading daily spend: %w", err)
+	}
+
+	out := make([]DailySpend, 0, 32)
+	day := since.UTC().Truncate(24 * time.Hour)
+	end := time.Now().UTC().Truncate(24 * time.Hour)
+	for !day.After(end) {
+		key := day.Format("2006-01-02")
+		if d, ok := found[key]; ok {
+			out = append(out, d)
+		} else {
+			out = append(out, DailySpend{Date: key})
+		}
+		day = day.AddDate(0, 0, 1)
+	}
+	return out, nil
 }

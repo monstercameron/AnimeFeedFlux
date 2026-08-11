@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -286,6 +287,167 @@ func TestSessionCreateLookupTouchRevoke(t *testing.T) {
 	}
 	if revoked.RevokedAt.IsZero() {
 		t.Error("session not revoked")
+	}
+}
+
+// TestNewSessionDefaultsToFullScope proves migrations/0005_session_scope.sql's
+// DEFAULT 'full' applies to every session CreateSession inserts, not just
+// rows that existed before the column was added — CreateSession's INSERT
+// never mentions the scope column, so this is entirely the schema default
+// doing the work.
+func TestNewSessionDefaultsToFullScope(t *testing.T) {
+	s := openTemp(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+
+	id, err := s.CreateSession(ctx, makeTestSession(now, "scope-default-token"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	scope, err := s.SessionScope(ctx, id)
+	if err != nil {
+		t.Fatalf("SessionScope: %v", err)
+	}
+	if scope != SessionScopeFull {
+		t.Errorf("new session scope = %q, want %q", scope, SessionScopeFull)
+	}
+}
+
+// TestSessionScopeRoundTrip: setting elevated and reading it back returns
+// exactly what was set, and it is distinguishable from the full default.
+func TestSessionScopeRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+
+	id, err := s.CreateSession(ctx, makeTestSession(now, "scope-roundtrip-token"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	if err := s.SetSessionScope(ctx, id, SessionScopeElevated); err != nil {
+		t.Fatalf("SetSessionScope(elevated): %v", err)
+	}
+	got, err := s.SessionScope(ctx, id)
+	if err != nil {
+		t.Fatalf("SessionScope: %v", err)
+	}
+	if got != SessionScopeElevated {
+		t.Errorf("scope after setting elevated = %q, want %q", got, SessionScopeElevated)
+	}
+
+	if err := s.SetSessionScope(ctx, id, SessionScopeFull); err != nil {
+		t.Fatalf("SetSessionScope(full): %v", err)
+	}
+	got, err = s.SessionScope(ctx, id)
+	if err != nil {
+		t.Fatalf("SessionScope: %v", err)
+	}
+	if got != SessionScopeFull {
+		t.Errorf("scope after setting full = %q, want %q", got, SessionScopeFull)
+	}
+}
+
+// TestSetSessionScopeUnknownIDIsNotFound covers the RowsAffected == 0 path.
+func TestSetSessionScopeUnknownIDIsNotFound(t *testing.T) {
+	s := openTemp(t)
+	err := s.SetSessionScope(t.Context(), 999999, SessionScopeElevated)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetSessionScope on unknown id: err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestSessionScopeColumnRejectsUnknownValue pins the CHECK constraint
+// (migrations/0005_session_scope.sql): scope is a closed set, and a typo'd
+// value must fail loudly at write time rather than silently landing in a
+// column an enforcement check does not recognize as either full or elevated.
+func TestSessionScopeColumnRejectsUnknownValue(t *testing.T) {
+	s := openTemp(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+
+	id, err := s.CreateSession(ctx, makeTestSession(now, "scope-check-token"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	err = s.SetSessionScope(ctx, id, "root")
+	if !isConstraintErr(err) {
+		t.Fatalf("SetSessionScope(\"root\") error = %v, want a CHECK constraint violation", err)
+	}
+}
+
+// TestMigration0005AppliesOnto0004AndLeavesExistingSessionsFull is the
+// deploy-safety property migrations/0005_session_scope.sql's own comment
+// commits to: applying it onto a database that already has live sessions
+// (i.e. one migrated only through 0004) must not narrow any of them — a
+// migration that invalidated or restricted live sessions would lock the
+// admin out at deploy time.
+func TestMigration0005AppliesOnto0004AndLeavesExistingSessionsFull(t *testing.T) {
+	ctx := t.Context()
+	s, err := Open(ctx, Options{Path: filepath.Join(t.TempDir(), "pre-0005.db")})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if _, err := s.writer.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version    INTEGER PRIMARY KEY,
+			name       TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		) STRICT`); err != nil {
+		t.Fatalf("creating schema_migrations: %v", err)
+	}
+
+	all, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	for _, m := range all {
+		if m.version > 4 {
+			continue
+		}
+		if err := s.applyOne(ctx, m); err != nil {
+			t.Fatalf("applying migration %d: %v", m.version, err)
+		}
+	}
+
+	// A live session, as it would exist in production the instant before
+	// 0005 lands — inserted with raw SQL because sessions.scope does not
+	// exist yet at this point in the test.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.writer.ExecContext(ctx, `
+		INSERT INTO sessions (token_hash, created_at, last_seen_at, expires_at)
+		VALUES (?, ?, ?, ?)`,
+		"pre-existing-session-token-hash", now, now, now)
+	if err != nil {
+		t.Fatalf("seeding a pre-0005 session: %v", err)
+	}
+	preexistingID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("pre-existing session id: %v", err)
+	}
+
+	applied, err := s.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("migrating onto 0004: %v", err)
+	}
+	if applied == 0 {
+		t.Fatal("Migrate applied nothing — 0005 (and anything after it) did not run")
+	}
+
+	scope, err := s.SessionScope(ctx, preexistingID)
+	if err != nil {
+		t.Fatalf("SessionScope for pre-existing session: %v", err)
+	}
+	if scope != SessionScopeFull {
+		t.Errorf("pre-existing session scope after migrating onto 0005 = %q, want %q (full access preserved)", scope, SessionScopeFull)
+	}
+
+	// And the session is still otherwise usable — GetSessionByTokenHash
+	// (the path the interceptor actually uses) still resolves it.
+	if _, err := s.GetSessionByTokenHash(ctx, "pre-existing-session-token-hash"); err != nil {
+		t.Fatalf("pre-existing session unusable after migrating onto 0005: %v", err)
 	}
 }
 

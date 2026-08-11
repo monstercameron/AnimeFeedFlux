@@ -494,6 +494,61 @@ func (s *Store) ListSessions(ctx context.Context) ([]auth.Session, error) {
 	return out, nil
 }
 
+// --- session scope -----------------------------------------------------
+
+// SessionScopeFull and SessionScopeElevated are the two values
+// sessions.scope can hold (migrations/0005_session_scope.sql, whose CHECK
+// constraint is the authority — these constants exist so nothing in Go
+// spells either value as a bare string literal that could drift from it).
+//
+// Full is what every session Login mints gets, and what every session that
+// existed before this column did — an ordinary session must keep reaching
+// everything it always could. Elevated is the narrow scope a
+// RecoverWithCode session is moved into; PLAN.md §12.2 requires it reach
+// only password change and TOTP re-enrollment, enforced centrally by
+// internal/rpc/interceptor.go's authorize, not by individual handlers.
+const (
+	SessionScopeFull     = "full"
+	SessionScopeElevated = "elevated"
+)
+
+// SetSessionScope sets the scope column on session id. The interceptor
+// calls this on every authorized request so a session's row always
+// reflects what the session currently is — full or elevated — rather than
+// that fact living only in the server's process memory, which would not
+// survive being read back by anything else and would not be "the session
+// itself" carrying its own scope.
+func (s *Store) SetSessionScope(ctx context.Context, id int64, scope string) error {
+	res, err := s.writer.ExecContext(ctx,
+		`UPDATE sessions SET scope = ? WHERE id = ?`, scope, id)
+	if err != nil {
+		return fmt.Errorf("store: setting session %d scope: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: rows affected setting session %d scope: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("store: setting session %d scope: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// SessionScope returns the current scope column for session id — the value
+// authorize's default-deny check enforces against.
+func (s *Store) SessionScope(ctx context.Context, id int64) (string, error) {
+	var scope string
+	err := s.writer.QueryRowContext(ctx,
+		`SELECT scope FROM sessions WHERE id = ?`, id).Scan(&scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("store: session %d: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: getting session %d scope: %w", id, err)
+	}
+	return scope, nil
+}
+
 // --- password reset tokens --------------------------------------------------
 
 // CreatePasswordResetToken persists a newly issued reset token by its hash
