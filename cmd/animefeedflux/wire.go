@@ -594,6 +594,45 @@ func (g *genGate) Allowed(feedID int64) (bool, string) {
 		return false, "spec_parse_failed"
 	}
 
+	// A model with no row in the price table prices at ZERO, and zero is not
+	// a small number here — it is a disabled ceiling.
+	//
+	// generateSpecFrom leaves PriceInputPerMToken/PriceOutputPerMToken at 0
+	// when Lookup misses, so every run that model performs records
+	// est_cost_usd = 0. SpendSince sums that column, budget.CheckRequest
+	// compares the sum against GlobalDailyUSD and MonthlyUSDCeiling, and a
+	// running total that is always 0 never reaches either. The dashboard
+	// agrees, reporting $0.00 for a feed that is billing normally. Only the
+	// token and run caps still bound anything — and those are themselves
+	// unlimited unless the operator set them, since every limit treats 0 as
+	// "no limit". So an operator whose budget is expressed in dollars, which
+	// is how §19 states its own done-criterion, has no bound at all.
+	//
+	// Reaching it takes nothing exotic: point a feed at a model whose name
+	// is not in the table — a version bump, a rename, a typo — and the
+	// ceiling silently stops existing. budget.Table.Cost's doc already says
+	// what to do ("a reason to refuse the call, not a reason to let it
+	// through for free"); nothing was asking it.
+	//
+	// WARNS rather than refuses, deliberately and provisionally. Refusing is
+	// what Cost's doc argues for, but DefaultGlobalDailySpendCeilingUSD is
+	// 5.0, so a USD ceiling is set in the DEFAULT configuration — refusing
+	// here would stop generation outright on any install whose price table
+	// does not name the configured model, including a fresh one with an empty
+	// table. Choosing between "bill with no enforceable ceiling" and "generate
+	// nothing until prices are entered" is an operator's call, not this
+	// function's; until it is made, the misconfiguration is at least no longer
+	// silent. Logged per run on purpose: it is not noise, it is a ceiling that
+	// is not doing anything.
+	if _, priced := g.prices.Lookup(fs.Model.Model); !priced {
+		if settings.GetGlobalDailySpendCeilingUsd() > 0 || g.monthlyCeilingUSD > 0 {
+			g.log.Warn("gate: model has no price entry, so every USD ceiling is inert for this feed — runs will bill and record $0.00",
+				"feed_id", feedID, "model", fs.Model.Model,
+				"global_daily_usd_ceiling", settings.GetGlobalDailySpendCeilingUsd(),
+				"monthly_usd_ceiling", g.monthlyCeilingUSD)
+		}
+	}
+
 	since := midnightUTC(time.Now())
 	feedIn, feedOut, feedUSD, err := g.st.SpendSince(ctx, feedID, since)
 	if err != nil {
