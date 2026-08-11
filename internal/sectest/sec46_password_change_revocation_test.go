@@ -17,21 +17,25 @@ import (
 // the new password is.
 func TestChangePassword_RevokesOtherSessions(t *testing.T) {
 	srv, st, secret := newTestServer(t)
-	base := time.Now()
-
 	// Two independent logins ("two browsers/devices"), then ChangePassword
 	// from the second one. ValidateCode accepts the current TOTP step and its
-	// immediate ±1 neighbors (§4's drift window), and this whole test runs in
-	// well under 30s of wall-clock time, so offsetting by exactly one period
-	// each way lands each call on a DISTINCT step (base-30s, base, base+30s)
-	// while staying inside the real skew window around whatever the actual
-	// wall clock is when each RPC executes — avoiding a same-step TOTP replay
-	// between the three calls without needing to fake the server's clock
-	// (srv.now is unexported and unreachable from this package).
-	tokenA := login(t, srv, secret, "10.30.0.1", base)
-	tokenB := login(t, srv, secret, "10.30.0.2", base.Add(30*time.Second))
+	// immediate ±1 neighbours (§4's drift window), so the three calls need
+	// three DISTINCT steps to avoid a same-step replay — while each stays
+	// inside the window around the wall clock at the moment the SERVER
+	// validates.
+	//
+	// Each offset is therefore computed at call time, not from one instant
+	// captured up front. Steps are aligned to absolute unix time (unix/30),
+	// not to any captured `base`: once the wall clock crosses a boundary
+	// between capturing base and the server validating — which argon2id at
+	// DefaultParams under a parallel suite run easily takes — a base-30s code
+	// sits two steps from the server's centre and is refused. That surfaced
+	// as an intermittent "authentication failed" that reads exactly like a
+	// real auth bug. Anchoring mid-step leaves 15s of slack either side.
+	tokenA := login(t, srv, secret, "10.30.0.1", stepTime(0))
+	tokenB := login(t, srv, secret, "10.30.0.2", stepTime(1))
 
-	changeAt := base.Add(-30 * time.Second)
+	changeAt := stepTime(-1)
 	newPassword := "a brand new much longer passphrase for sec46"
 
 	ctx := rpc.ContextWithSessionToken(t.Context(), tokenB)
@@ -77,4 +81,13 @@ func TestChangePassword_RevokesOtherSessions(t *testing.T) {
 	if ok, _, verr := auth.Verify(testPassword, admin.PasswordHash); verr == nil && ok {
 		t.Error("the OLD password still verifies against the stored hash after a change")
 	}
+}
+
+// stepTime returns an instant mid-way through the TOTP step `steps` away
+// from the one the wall clock is in right now. See the comment in
+// TestChangePassword_RevokesOtherSessions for why the offset is taken from
+// the live clock rather than a captured instant.
+func stepTime(steps int64) time.Time {
+	step := time.Now().Unix()/30 + steps
+	return time.Unix(step*30+15, 0)
 }

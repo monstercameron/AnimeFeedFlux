@@ -64,6 +64,27 @@ func otherSession(t *testing.T, st *store.Store, hash string) int64 {
 	return id
 }
 
+// codeForStepOffset returns a TOTP code for the step `steps` away from
+// whatever step the wall clock is in RIGHT NOW, anchored mid-step.
+//
+// The trap it avoids: TOTP steps are aligned to absolute unix time
+// (unix/30), not to any instant a test captured earlier. Adding 31s to a
+// captured `now` lands two steps ahead whenever that instant was already
+// 29s into its step, and even a correct +30s offset falls outside the
+// server's ±1 skew window if the wall clock crosses a boundary between the
+// test computing the code and the server validating it — which argon2id at
+// DefaultParams under a parallel suite run can easily take. Both produce an
+// intermittent "authentication failed" that looks like a real auth bug.
+//
+// Reading the clock at call time and anchoring mid-step removes both: the
+// code is always exactly `steps` from the server's own centre, with 15s of
+// slack either side.
+func codeForStepOffset(t *testing.T, secret string, steps int64) string {
+	t.Helper()
+	step := time.Now().Unix()/30 + steps
+	return validCode(t, secret, time.Unix(step*30+15, 0))
+}
+
 func parseSessionID(t *testing.T, id string) int64 {
 	t.Helper()
 	var n int64
@@ -378,7 +399,7 @@ func TestRegenerateRecoveryCodesReplacesTheWholeSet(t *testing.T) {
 
 	resp, err := srv.RegenerateRecoveryCodes(ctx, &affv1.AuthServiceRegenerateRecoveryCodesRequest{
 		CurrentPassword: testPassword,
-		TotpCode:        validCode(t, secret, time.Now().Add(31*time.Second)),
+		TotpCode:        codeForStepOffset(t, secret, 1),
 	})
 	if err != nil {
 		t.Fatalf("RegenerateRecoveryCodes: %v", err)
