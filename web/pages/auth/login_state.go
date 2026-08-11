@@ -144,3 +144,67 @@ func (f LoginForm) SubmitFailed(now time.Time) LoginForm {
 func (f LoginForm) SubmitSucceeded() LoginForm {
 	return NewLoginForm()
 }
+
+// LoginFocusTarget is which control login.go should move focus to after a
+// step transition. A symbolic enum rather than a concrete element ID
+// because ui.UseId()-generated IDs only exist inside a live render —
+// login.go maps this onto "#"+passwordID/"#"+totpID/"#"+errorID, and this
+// package stays host-testable without a DOM.
+type LoginFocusTarget int
+
+const (
+	// LoginFocusNone means "leave focus where it is" — used when a
+	// transition did not happen (an ok=false guard already rejected it).
+	LoginFocusNone LoginFocusTarget = iota
+	LoginFocusPassword
+	LoginFocusTOTP
+	LoginFocusError
+)
+
+// LoginFocusTargetForStep is the focus destination for arriving at step
+// (via ContinueToTOTP or Back): the step's own primary input, so a
+// keyboard or screen-reader user is never stranded on a control that no
+// longer exists once the previous step's markup unmounts. This only fires
+// on the discrete Continue/Back click — never on every keystroke while
+// typing — so it cannot interrupt mid-entry the way a focus move driven by
+// input events would.
+func LoginFocusTargetForStep(step LoginStep) LoginFocusTarget {
+	switch step {
+	case LoginStepPassword:
+		return LoginFocusPassword
+	case LoginStepTOTP:
+		return LoginFocusTOTP
+	default:
+		return LoginFocusNone
+	}
+}
+
+// newLoginFormWithDevPrefill is NewLoginForm plus, in a `-tags devui` build
+// only, a working password and a currently-valid TOTP code.
+//
+// It advances straight to the TOTP step when both are present: stopping on a
+// pre-filled password step would still need two clicks, and one-click is the
+// entire point. In every other build devLoginPrefill returns nothing and this
+// is byte-for-byte NewLoginForm() — the credential is absent from the binary,
+// not merely unused.
+// Called only from login.go, which is js/wasm-tagged, so staticcheck's
+// host-target analysis cannot see the caller — and because its unused
+// analysis is transitive, flagging this also flags devLoginPrefill below it.
+// Deleting either breaks the wasm build while leaving the host build green.
+//
+//lint:ignore U1000 called from the js-tagged login.go
+func newLoginFormWithDevPrefill(now time.Time) LoginForm {
+	f := NewLoginForm()
+	password, code, ok := devLoginPrefill(now)
+	if !ok {
+		return f
+	}
+	f = f.SetPassword(password)
+	if next, advanced := f.ContinueToTOTP(); advanced {
+		f = next
+	}
+	if code != "" {
+		f = f.SetTOTPCode(code)
+	}
+	return f
+}

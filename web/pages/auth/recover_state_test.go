@@ -177,3 +177,21 @@ func TestElevatedCannotReachAuthedRoutes(t *testing.T) {
 		t.Error("guard.Decide(Elevated, /login) = Allow, want redirected — re-entering ordinary login mid-recovery abandons the elevated session's one job")
 	}
 }
+
+func TestRecoverFocusTargetForStep(t *testing.T) {
+	cases := []struct {
+		step RecoverStep
+		want RecoverFocusTarget
+	}{
+		{RecoverStepEnterCode, RecoverFocusCode},
+		{RecoverStepChooseAction, RecoverFocusNone},
+		{RecoverStepResetPassword, RecoverFocusNewPassword},
+		{RecoverStepReenrollTOTP, RecoverFocusReenrollHeading},
+		{RecoverStepDone, RecoverFocusNone},
+	}
+	for _, c := range cases {
+		if got := RecoverFocusTargetForStep(c.step); got != c.want {
+			t.Errorf("RecoverFocusTargetForStep(%v) = %v, want %v", c.step, got, c.want)
+		}
+	}
+}

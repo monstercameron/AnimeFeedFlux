@@ -14,6 +14,7 @@ import (
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/web/guard"
 	afi18n "github.com/monstercameron/AnimeFeedFlux/web/i18n"
+	"github.com/monstercameron/AnimeFeedFlux/web/shell"
 )
 
 // LoginPageProps wires /login to the shell's live control-plane client and
@@ -40,8 +41,24 @@ func LoginPage(props LoginPageProps) ui.Node {
 	announcer := ui.UseAnnouncer()
 	focus := ui.UseFocusManager()
 
-	form := ui.UseState(NewLoginForm())
-	failed := ui.UseState(false)
+	// In a `-tags devui` build this arrives pre-filled with a working
+	// password and a freshly computed TOTP code, so a dev can click straight
+	// through. In every other build devLoginPrefill returns nothing and this
+	// is exactly NewLoginForm() — see devfill_off.go.
+	form := ui.UseState(newLoginFormWithDevPrefill(time.Now()))
+	// errKey holds the i18n key currently rendered by errorNode, "" for no
+	// error. It carries a KEY rather than a bool so a failed submit can
+	// distinguish "reached the server, credentials rejected" (D1-02's one
+	// generic string) from "never reached the server at all"
+	// (backoff_display.go's AuthErrorKey/keyConnectionUnreachable) without
+	// ever distinguishing WHICH credential was wrong — connectivity is not
+	// an oracle risk the way account/password/TOTP causes are.
+	errKey := ui.UseState("")
+	// backoffActive tracks whether THIS form most recently announced a
+	// backoff window starting, so the countdown-cleared announcement
+	// (ShouldAnnounceBackoffCleared) never fires for a backoff that was
+	// never announced as started in the first place (e.g. initial mount).
+	backoffActive := ui.UseState(false)
 	clock := ui.UseState(time.Now())
 
 	passwordID := ui.UseId() + "-password"
@@ -79,25 +96,45 @@ func LoginPage(props LoginPageProps) ui.Node {
 	handleTOTP := ui.UseEvent(func(e ui.InputEvent) {
 		form.Set(form.Get().SetTOTPCode(e.GetValue()))
 	})
+	// loginFocusSelector maps LoginFocusTargetForStep's symbolic result onto
+	// this render's actual (ui.UseId()-generated) element IDs.
+	loginFocusSelector := func(target LoginFocusTarget) string {
+		switch target {
+		case LoginFocusPassword:
+			return "#" + passwordID
+		case LoginFocusTOTP:
+			return "#" + totpID
+		case LoginFocusError:
+			return "#" + errorID
+		default:
+			return ""
+		}
+	}
+
 	handleContinue := ui.UseEvent(func(e ui.FormEvent) {
 		e.PreventDefault()
 		next, ok := form.Get().ContinueToTOTP()
 		if !ok {
 			return
 		}
-		failed.Set(false)
+		errKey.Set("")
 		form.Set(next)
 		announcer.Polite(t.T(afi18n.KeyLoginTOTPStepLabel))
-		focus.FocusSelector("#" + totpID)
+		// Focus moves to the TOTP step's own input ONLY on this explicit
+		// Continue click — never while the admin is still typing the
+		// password — so a keyboard/screen-reader user is never stranded on
+		// a control that just unmounted, and is never interrupted
+		// mid-entry either.
+		focus.FocusSelector(loginFocusSelector(LoginFocusTargetForStep(next.Step)))
 	})
 	handleBack := ui.UseEvent(func() {
 		next, ok := form.Get().Back()
 		if !ok {
 			return
 		}
-		failed.Set(false)
+		errKey.Set("")
 		form.Set(next)
-		focus.FocusSelector("#" + passwordID)
+		focus.FocusSelector(loginFocusSelector(LoginFocusTargetForStep(next.Step)))
 	})
 	handleSubmit := ui.UseEvent(func(e ui.FormEvent) {
 		e.PreventDefault()
@@ -106,10 +143,28 @@ func LoginPage(props LoginPageProps) ui.Node {
 		if !ok {
 			return
 		}
-		failed.Set(false)
+		errKey.Set("")
 		form.Set(next)
 
-		password, code := next.Password, next.TOTPCode
+		// In a `-tags devui` build, refresh an untouched prefilled TOTP code
+		// against the clock at SUBMIT time.
+		//
+		// devfill computes the code once, at mount. A TOTP step is 30
+		// seconds, so a dev-build login page left open for longer than that
+		// — reading the screen, switching windows, or just retrying after a
+		// failure — submits an expired code and is refused with the generic
+		// "That didn't work", which reads as wrong credentials rather than
+		// as a stale prefill. devfill_on.go's own doc comment names this
+		// exact failure ("a prefilled constant would be stale before the
+		// page finished loading... it looks like a working one-click login
+		// that rejects you") and then reintroduces it one layer up by
+		// computing at mount instead of at submit.
+		//
+		// Only an UNEDITED prefilled value is replaced, so anything typed by
+		// hand is submitted exactly as typed. In every other build this is
+		// the identity function and the credential is not in the binary at
+		// all (devfill_off.go).
+		password, code := devRefreshTOTP(next.Password, next.TOTPCode, submitNow)
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
@@ -119,9 +174,21 @@ func LoginPage(props LoginPageProps) ui.Node {
 			})
 			completedAt := time.Now()
 			if err != nil || resp == nil || resp.Session == nil {
-				form.Set(form.Get().SubmitFailed(completedAt))
-				failed.Set(true)
-				announcer.Assertive(tc.T(afi18n.KeyCommonGenericAuthError))
+				failedForm := form.Get().SubmitFailed(completedAt)
+				form.Set(failedForm)
+				// D0-10's classification: a refusal because the socket was
+				// never up is not the same thing as a credential rejection
+				// (D1-02), and must not be hidden behind the same silent
+				// "nothing happened" the wrong-password case gets — see
+				// backoff_display.go's AuthErrorKey doc comment.
+				key := AuthErrorKey(shell.IsDisconnected(err), afi18n.KeyCommonGenericAuthError)
+				errKey.Set(key)
+				announcer.Assertive(tc.T(key))
+				remaining := failedForm.RemainingBackoff(completedAt)
+				if ShouldAnnounceBackoffStarted(remaining) {
+					announcer.Polite(tc.T(afi18n.KeyCommonBackoffNotice, gwci18n.Arguments{"count": BackoffSecondsCeil(remaining)}))
+					backoffActive.Set(true)
+				}
 				focus.FocusSelector("#" + errorID)
 				return
 			}
@@ -138,22 +205,43 @@ func LoginPage(props LoginPageProps) ui.Node {
 	remaining := f.RemainingBackoff(now)
 	blocked := remaining > 0
 
+	// The countdown announcement is deliberately NOT wired through a live
+	// region that re-renders every second (that would speak once per tick,
+	// which is unusable with a screen reader) — this effect only re-runs
+	// when `blocked` actually changes value (ui.UseEffectOf's dependency
+	// comparison), i.e. exactly at completion. The start announcement
+	// happens once, imperatively, in handleSubmit's failure branch above,
+	// where the actual wait estimate is first known.
+	ui.UseEffectOf(func() func() {
+		if ShouldAnnounceBackoffCleared(blocked, backoffActive.Get()) {
+			announcer.Polite(tc.T(keyBackoffCleared))
+			backoffActive.Set(false)
+		}
+		return nil
+	}, blocked)
+
 	var errorNode ui.Node
-	if failed.Get() {
+	if errKey.Get() != "" {
 		errorNode = h.P(
 			h.ID(errorID),
 			h.Aria("live", "assertive"),
 			h.ClassStr("af-form-error"),
-			tc.T(afi18n.KeyCommonGenericAuthError),
+			tc.T(errKey.Get()),
 		)
 	} else {
 		errorNode = h.P(h.ID(errorID), h.ClassStr("af-form-error"))
 	}
 
+	// backoffNode itself carries NO role="status"/aria-live — it re-renders
+	// its visible text every second as `now` ticks (an honest, sighted
+	// countdown, D1-03), and a live region that updates once a second is
+	// exactly the unusable case this task called out. The one-time
+	// start/completion announcements are handled separately above and in
+	// handleSubmit's failure branch, through the announcer's own dedicated
+	// region (announcer.Region(), rendered once below), not this node.
 	var backoffNode ui.Node
 	if blocked {
 		backoffNode = h.P(
-			h.Role("status"),
 			h.ClassStr("af-backoff-notice"),
 			tc.T(afi18n.KeyCommonBackoffNotice, gwci18n.Arguments{"count": BackoffSecondsCeil(remaining)}),
 		)
@@ -195,6 +283,19 @@ func LoginPage(props LoginPageProps) ui.Node {
 				h.ID(totpID),
 				h.Type("text"),
 				h.AutoComplete("one-time-code"),
+				// inputmode="numeric" brings up a numeric keypad on
+				// mobile without narrowing accepted input the way
+				// type="number" would (which also mangles a leading
+				// zero and offers spinner controls that make no sense
+				// for a code). No maxlength: a pasted code must land
+				// intact, never silently truncated. autocorrect/
+				// autocapitalize/spellcheck off: none of the platforms
+				// that honor these should be "correcting" a 6-digit
+				// code.
+				h.Attr("inputmode", "numeric"),
+				h.Attr("autocorrect", "off"),
+				h.Attr("autocapitalize", "off"),
+				h.Attr("spellcheck", "false"),
 				h.Aria("describedby", totpID+"-hint"),
 				h.Value(f.TOTPCode),
 				h.OnInput(handleTOTP),
@@ -217,6 +318,7 @@ func LoginPage(props LoginPageProps) ui.Node {
 	return h.Main(
 		h.ClassStr("af-auth-page"),
 		announcer.Region(),
+		renderAuthBrand(),
 		h.H1(t.T(afi18n.KeyLoginTitle)),
 		h.Form(h.OnSubmit(submitHandler), h.ClassStr("af-auth-form"),
 			stepNode,

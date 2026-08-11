@@ -157,6 +157,21 @@ func TestSubmitFailedGrowsBackoffAndClearsSubmitting(t *testing.T) {
 	}
 }
 
+func TestLoginFocusTargetForStep(t *testing.T) {
+	cases := []struct {
+		step LoginStep
+		want LoginFocusTarget
+	}{
+		{LoginStepPassword, LoginFocusPassword},
+		{LoginStepTOTP, LoginFocusTOTP},
+	}
+	for _, c := range cases {
+		if got := LoginFocusTargetForStep(c.step); got != c.want {
+			t.Errorf("LoginFocusTargetForStep(%v) = %v, want %v", c.step, got, c.want)
+		}
+	}
+}
+
 func TestSubmitSucceededResetsEverything(t *testing.T) {
 	now := time.Now()
 	f := NewLoginForm().SetPassword("pw")

@@ -269,3 +269,39 @@ func (f RecoverForm) ReenrollSucceeded() (RecoverForm, bool) {
 	f.Submitting = false
 	return f, true
 }
+
+// RecoverFocusTarget is which control recover.go should move focus to
+// after a step transition — the RecoverForm analogue of login_state.go's
+// LoginFocusTarget; see that type's doc comment for why this is a
+// symbolic enum rather than a concrete element ID.
+type RecoverFocusTarget int
+
+const (
+	// RecoverFocusNone means "leave focus where it is."
+	RecoverFocusNone RecoverFocusTarget = iota
+	RecoverFocusCode
+	RecoverFocusNewPassword
+	RecoverFocusReenrollHeading
+	RecoverFocusError
+)
+
+// RecoverFocusTargetForStep is the focus destination for arriving at step.
+// RecoverStepChooseAction has no single destination of its own here
+// (recover.go focuses nothing on that step: the choice buttons are the
+// first two interactive elements after the just-submitted code field
+// unmounts, so the browser's own document order already puts them next in
+// tab order without a forced move that would fight the still-focused
+// submit button mid-click). RecoverStepDone likewise has none — the done
+// screen's own confirmation gate (recover.go) drives its own focus.
+func RecoverFocusTargetForStep(step RecoverStep) RecoverFocusTarget {
+	switch step {
+	case RecoverStepEnterCode:
+		return RecoverFocusCode
+	case RecoverStepResetPassword:
+		return RecoverFocusNewPassword
+	case RecoverStepReenrollTOTP:
+		return RecoverFocusReenrollHeading
+	default:
+		return RecoverFocusNone
+	}
+}

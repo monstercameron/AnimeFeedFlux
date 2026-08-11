@@ -66,6 +66,55 @@ func TestRemainingBackoffCountsDownToZero(t *testing.T) {
 	}
 }
 
+func TestAuthErrorKeyPreservesGenericStringUnlessDisconnected(t *testing.T) {
+	const generic = "genericAuthError"
+	if got := AuthErrorKey(false, generic); got != generic {
+		t.Fatalf("AuthErrorKey(false, ...) = %q, want the generic key unchanged (D1-02)", got)
+	}
+	if got := AuthErrorKey(true, generic); got != keyConnectionUnreachable {
+		t.Fatalf("AuthErrorKey(true, ...) = %q, want %q", got, keyConnectionUnreachable)
+	}
+	// The two keys must actually differ, or a disconnected attempt would
+	// be indistinguishable from a credential rejection — the opposite of
+	// what this function exists to fix.
+	if keyConnectionUnreachable == generic {
+		t.Fatal("keyConnectionUnreachable must not equal the generic auth-error key")
+	}
+}
+
+func TestShouldAnnounceBackoffStarted(t *testing.T) {
+	if ShouldAnnounceBackoffStarted(0) {
+		t.Fatal("ShouldAnnounceBackoffStarted(0) = true, want false (nothing to count down)")
+	}
+	if ShouldAnnounceBackoffStarted(-time.Second) {
+		t.Fatal("ShouldAnnounceBackoffStarted(negative) = true, want false")
+	}
+	if !ShouldAnnounceBackoffStarted(2 * time.Second) {
+		t.Fatal("ShouldAnnounceBackoffStarted(2s) = false, want true")
+	}
+}
+
+func TestShouldAnnounceBackoffCleared(t *testing.T) {
+	cases := []struct {
+		name       string
+		blockedNow bool
+		wasActive  bool
+		want       bool
+	}{
+		{"still blocked, was active", true, true, false},
+		{"cleared, was active", false, true, true},
+		{"cleared, was never announced (initial mount)", false, false, false},
+		{"still blocked, was never announced", true, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ShouldAnnounceBackoffCleared(c.blockedNow, c.wasActive); got != c.want {
+				t.Errorf("ShouldAnnounceBackoffCleared(%v, %v) = %v, want %v", c.blockedNow, c.wasActive, got, c.want)
+			}
+		})
+	}
+}
+
 func TestBackoffSecondsCeilRoundsUp(t *testing.T) {
 	cases := []struct {
 		d    time.Duration
