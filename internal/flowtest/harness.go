@@ -202,7 +202,22 @@ func (a storeAdapter) CommitRun(ctx context.Context, run generate.RunRecord, ite
 	case generate.StatusCompleted:
 		return a.s.CommitRun(ctx, runID, items, summary)
 	case generate.StatusSkipped:
-		return a.s.SkipRun(ctx, runID, run.Error)
+		// ErrorKind and the summary, matching cmd/animefeedflux's
+		// genStoreAdapter exactly. This branch used to drop both — passing
+		// the free-form run.Error where the runs table wants a sanitized
+		// reason token (§15), and discarding spend the novelty-retry loop
+		// (§9 step 5) had already incurred before every attempt came back a
+		// duplicate.
+		//
+		// The point is not the two arguments; it is that this harness exists
+		// to exercise production behaviour, and a harness that models a
+		// DIFFERENT system quietly certifies the wrong thing. Production
+		// fixed this branch; the copy here did not move, so every journey
+		// that skips a run has been validating spend accounting that
+		// production stopped doing. Three copies of this adapter exist
+		// (here, cmd/animefeedflux, internal/e2e) with nothing forcing them
+		// to agree — if you change one, change all three.
+		return a.s.SkipRun(ctx, runID, run.ErrorKind, summary)
 	default:
 		return a.s.FailRun(ctx, runID, run.ErrorKind, run.Error, summary)
 	}
