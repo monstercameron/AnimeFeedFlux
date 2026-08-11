@@ -347,6 +347,16 @@ func (sr *statusRecorder) Write(p []byte) (int, error) {
 // tailSampleProcessor (internal/obs/otel.go) checks to keep the span
 // unconditionally, overriding the ratio, satisfying A9-23's "errors always
 // sampled" independent of anything this file decides about sampling itself.
+// start must come from time.Now(), NOT from Deps.Now: it is only ever
+// subtracted from the current instant to get a latency, and that subtraction
+// is meaningful only between two readings of the same clock. Deps.Now exists
+// so rendered CONTENT timestamps are deterministic, and a caller that injects
+// it (every test here, and the e2e harness) hands back a fixed wall-clock
+// date carrying no monotonic reading — so time.Since(start) measured the
+// distance between the real present and that fixed date, and cheerfully
+// logged duration_ms=-5051976. A negative latency is the loud version; a
+// clock injected a few minutes off would have logged plausible nonsense
+// instead, into the one field §15.0's wide event exists to make chartable.
 func (s *server) observe(rec *statusRecorder, r *http.Request, route string, start time.Time, fromCache bool, span oteltrace.Span) {
 	status := rec.status
 	if status == 0 {
@@ -513,7 +523,7 @@ func writeEntry(w http.ResponseWriter, r *http.Request, e Entry) {
 // --- routes -----------------------------------------------------------
 
 func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	start := s.deps.now()
+	start := time.Now()
 	ctx, span := obs.Start(r.Context(), "http.request", obs.KindRequest)
 	r = r.WithContext(ctx)
 	rec := &statusRecorder{ResponseWriter: w}
@@ -589,7 +599,7 @@ func feedFormat(path string) (slug, format, contentType string, ok bool) {
 }
 
 func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
-	start := s.deps.now()
+	start := time.Now()
 	ctx, span := obs.Start(r.Context(), "http.request", obs.KindRequest)
 	r = r.WithContext(ctx)
 	rec := &statusRecorder{ResponseWriter: w}
@@ -721,7 +731,7 @@ func (s *server) renderFeed(ctx context.Context, slug, format, contentType strin
 }
 
 func (s *server) handleItem(w http.ResponseWriter, r *http.Request) {
-	start := s.deps.now()
+	start := time.Now()
 	ctx, span := obs.Start(r.Context(), "http.request", obs.KindRequest)
 	r = r.WithContext(ctx)
 	rec := &statusRecorder{ResponseWriter: w}
@@ -824,7 +834,7 @@ type healthzBody struct {
 }
 
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	start := s.deps.now()
+	start := time.Now()
 	ctx, span := obs.Start(r.Context(), "http.request", obs.KindRequest)
 	r = r.WithContext(ctx)
 	rec := &statusRecorder{ResponseWriter: w}
@@ -864,7 +874,7 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleRobots(w http.ResponseWriter, r *http.Request) {
-	start := s.deps.now()
+	start := time.Now()
 	ctx, span := obs.Start(r.Context(), "http.request", obs.KindRequest)
 	r = r.WithContext(ctx)
 	rec := &statusRecorder{ResponseWriter: w}
@@ -886,7 +896,7 @@ func (s *server) handleRobots(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleFavicon(w http.ResponseWriter, r *http.Request) {
-	start := s.deps.now()
+	start := time.Now()
 	ctx, span := obs.Start(r.Context(), "http.request", obs.KindRequest)
 	r = r.WithContext(ctx)
 	rec := &statusRecorder{ResponseWriter: w}
