@@ -447,3 +447,50 @@ func TestFeedRunNowWhileRunningRefused(t *testing.T) {
 		t.Errorf("executor called %d times, want exactly 1 (single-flight)", calls)
 	}
 }
+
+// TestFeedDeleteReleasesSlugForReuse pins the behaviour that a deleted feed's
+// name goes back into circulation.
+//
+// Deletion is soft and `slug` is UNIQUE across every row, deleted or not, so
+// without the tombstone rename a deleted feed holds its name forever: the
+// operator deletes "trivia-daily", tries to create it again, and is told the
+// slug already exists — about a feed that is not in any list, cannot be
+// restored (there is no feed Restore RPC), and that they just deliberately
+// removed. This test exists because that is a silent, permanent trap and the
+// fix for it lives in one easily-lost line of the delete statement.
+func TestFeedDeleteReleasesSlugForReuse(t *testing.T) {
+	st := feedOpenTestStore(t)
+	s := NewFeedServer(st, nil, nil)
+
+	created := mustCreateFeed(t, s, feedTestFeed("trivia-daily"))
+	if _, err := s.Delete(t.Context(), &affv1.FeedServiceDeleteRequest{
+		FeedId:          created.GetId(),
+		ExpectedVersion: created.GetVersion(),
+	}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	// The same slug must be usable again.
+	again, err := s.Create(t.Context(), &affv1.FeedServiceCreateRequest{Feed: feedTestFeed("trivia-daily")})
+	if err != nil {
+		t.Fatalf("re-creating a deleted feed's slug: %v", err)
+	}
+	if again.GetFeed().GetId() == created.GetId() {
+		t.Error("re-create returned the tombstoned row; it must be a new feed")
+	}
+	if got := again.GetFeed().GetSlug(); got != "trivia-daily" {
+		t.Errorf("slug = %q, want %q", got, "trivia-daily")
+	}
+
+	// And the tombstone must still be there, under a suffixed name, so the
+	// delete stays auditable rather than becoming a hard delete by stealth.
+	var tombstones int
+	if err := st.Reader().QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM feeds WHERE id = ? AND deleted_at IS NOT NULL AND slug LIKE 'trivia-daily-deleted-%'`,
+		created.GetId()).Scan(&tombstones); err != nil {
+		t.Fatalf("counting tombstones: %v", err)
+	}
+	if tombstones != 1 {
+		t.Errorf("tombstoned row count = %d, want 1 (the original row, renamed)", tombstones)
+	}
+}

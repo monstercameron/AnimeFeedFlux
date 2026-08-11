@@ -966,11 +966,27 @@ func (s *FeedServer) Delete(ctx context.Context, req *affv1.FeedServiceDeleteReq
 		return nil, feedVersionConflict(rec.ID, req.GetExpectedVersion(), rec.Version)
 	}
 
-	now := feedFormatTime(time.Now())
+	now := time.Now()
+	nowStr := feedFormatTime(now)
+	// The delete RELEASES the slug.
+	//
+	// Deletion is soft — the row stays for history and audit — but `slug` is
+	// UNIQUE across every row, deleted or not, so a soft delete used to hold
+	// the name hostage forever: delete "daily-anime-trivia", try to recreate
+	// it, and the server answers `feed slug "daily-anime-trivia" already
+	// exists` about a feed that appears nowhere in the UI and cannot be
+	// restored (there is no feed Restore RPC). The operator has no way to
+	// interpret that, and no way out of it.
+	//
+	// So the tombstoned row takes a suffixed slug and the original name goes
+	// back into circulation. The suffix carries the delete time, so two
+	// deletions of the same slug cannot collide, and the audit trail still
+	// reads as what it was.
+	tombstone := fmt.Sprintf("%s-deleted-%d", rec.Slug, now.UnixNano())
 	res, err := s.store.Writer().ExecContext(ctx,
-		`UPDATE feeds SET deleted_at = ?, updated_at = ?, version = version + 1
+		`UPDATE feeds SET slug = ?, deleted_at = ?, updated_at = ?, version = version + 1
 		 WHERE id = ? AND version = ? AND deleted_at IS NULL`,
-		now, now, rec.ID, req.GetExpectedVersion())
+		tombstone, nowStr, nowStr, rec.ID, req.GetExpectedVersion())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "deleting feed %d: %v", rec.ID, err)
 	}

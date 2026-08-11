@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -445,6 +446,62 @@ type ItemServer struct {
 	// "strictly later than the feed's newest item" assertions would
 	// otherwise race the real wall clock on a slow CI runner.
 	now func() time.Time
+
+	// editMu/lastEditAt make the timestamp an EDIT is stamped with strictly
+	// increasing. See editStamp.
+	editMu     sync.Mutex
+	lastEditAt time.Time
+}
+
+// editStamp is the timestamp an edit's item_revisions rows are written
+// under, guaranteed to be strictly later than the previous edit's.
+//
+// The `at` column is the GROUP key: item_revisions holds one row per changed
+// FIELD, and everything that reads history (ListRevisions, RevertRevision,
+// the pagination cursor) treats rows sharing an `at` as one edit. So two
+// edits landing on the same timestamp are not a cosmetic collision — they
+// merge into a single history entry, and reverting one reverts both.
+//
+// time.Now() is not fine-grained enough to prevent that on its own. Windows'
+// default timer resolution is ~15ms, so an edit and an immediate revert
+// (exactly the sequence §12.4's "revert is an ordinary edit" produces) read
+// the same wall clock and land in the same group. That is what made
+// internal/e2e's TestItemRevisions and internal/rpc's own revert test flake:
+// not a test-timing problem, a real one — an operator clicking revert right
+// after an edit loses the audit trail of both.
+//
+// Nudging by a nanosecond is the smallest correct fix: it keeps the existing
+// group-by-`at` model and every query built on it, and RFC3339Nano already
+// stores that precision. The stamp stays within a nanosecond of the true
+// wall clock even under a burst.
+//
+// # Why the last digit is forced non-zero
+//
+// These timestamps are stored as TEXT and ordered with SQL string operators,
+// and time.RFC3339Nano REMOVES TRAILING ZEROS from the fraction. So a whole
+// second formats as "…04:00:00Z" while one nanosecond later formats as
+// "…04:00:00.000000001Z" — and '.' (0x2E) sorts before 'Z' (0x5A), which
+// puts the LATER instant first. Ordering by such a column is only correct
+// when every value has the same fractional width.
+//
+// Forcing the nanosecond component to a non-multiple of ten guarantees
+// RFC3339Nano prints all nine digits, so every value this function produces
+// is fixed-width and string order equals chronological order. It fixes
+// ordering only for the values written HERE; the same trap exists anywhere
+// else a store-written RFC3339Nano column is compared as text, which is
+// worth knowing about but is not this function's to fix.
+func (s *ItemServer) editStamp() time.Time {
+	s.editMu.Lock()
+	defer s.editMu.Unlock()
+	at := s.now().UTC()
+	if !at.After(s.lastEditAt) {
+		at = s.lastEditAt.Add(time.Nanosecond)
+	}
+	if at.Nanosecond()%10 == 0 {
+		at = at.Add(time.Nanosecond)
+	}
+	s.lastEditAt = at
+	return at
 }
 
 var _ affv1.ItemServiceServer = (*ItemServer)(nil)
@@ -880,7 +937,7 @@ func (s *ItemServer) Update(ctx context.Context, req *affv1.ItemServiceUpdateReq
 	updated.PublishedAt = newPublished
 	// updated.ItemKey and updated.FeedID stay old's — see doc comment above.
 
-	out, err := s.itemApplyEdit(ctx, db, old, updated, req.GetExpectedVersion(), s.now())
+	out, err := s.itemApplyEdit(ctx, db, old, updated, req.GetExpectedVersion(), s.editStamp())
 	if err != nil {
 		return nil, err
 	}
@@ -1518,7 +1575,7 @@ func (s *ItemServer) RevertRevision(ctx context.Context, req *affv1.ItemServiceR
 		}
 	}
 
-	out, err := s.itemApplyEdit(ctx, db, old, updated, req.GetExpectedVersion(), s.now())
+	out, err := s.itemApplyEdit(ctx, db, old, updated, req.GetExpectedVersion(), s.editStamp())
 	if err != nil {
 		return nil, err
 	}
