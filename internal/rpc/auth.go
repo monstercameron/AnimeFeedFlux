@@ -1220,6 +1220,7 @@ func (t *backoffTracker) blocked(ip string, now time.Time) bool {
 func (t *backoffTracker) recordFailure(ip string, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.sweepLocked(now)
 	st, ok := t.m[ip]
 	if !ok {
 		st = &backoffState{}
@@ -1227,6 +1228,33 @@ func (t *backoffTracker) recordFailure(ip string, now time.Time) {
 	}
 	st.failures++
 	st.until = now.Add(backoffDelay(st.failures))
+}
+
+// backoffRetention is how long an expired entry is kept after its window
+// closes. Comfortably past the 60s cap, so a genuine attacker pausing between
+// attempts does not get a free reset by waiting — the entry, and therefore
+// the failure count that makes the next delay longer, is still there.
+const backoffRetention = 15 * time.Minute
+
+// sweepLocked drops entries whose window closed longer ago than
+// backoffRetention. The caller holds t.mu.
+//
+// The map was never evicted: one entry per distinct peer address, retained
+// for the life of the process. Inert behind a proxy, where every request
+// arrives from one address, and unbounded on a directly-reachable listener —
+// a slow scan from many sources grows it without limit (A8-38).
+//
+// Swept on failure rather than on a timer: entries are only ever created
+// here, so this is the one path that can grow the map, and it costs a walk
+// of a map that is small precisely because this runs. No goroutine to own,
+// start or stop.
+func (t *backoffTracker) sweepLocked(now time.Time) {
+	cutoff := now.Add(-backoffRetention)
+	for ip, st := range t.m {
+		if st.until.Before(cutoff) {
+			delete(t.m, ip)
+		}
+	}
 }
 
 // recordSuccess clears ip's failure count entirely.

@@ -495,6 +495,76 @@ emitted, what recomputes per render, and what the framework actually charges for
       of not having `A7-07` (report the async-inbox wedge upstream) resolved. Worth raising the
       priority of `A7-07` on those grounds, and worth revisiting the 150ms once it is fixed.
 
+Second pass: an inventory of every performance-oriented API GWC v5.0.1 actually
+ships, against what this app calls. Usage counts are from the tree, not
+estimates. `A8-44`…`A8-48` above are the markup findings; these are the
+framework affordances left on the table.
+
+- [ ] `A8-49` **The wasm bundle is 34 MB raw / 7.0 MB gzipped, and the build passes no
+      `-ldflags "-s -w"`.** `web/build.sh:68` builds with `-trimpath` and an ldflags string that is
+      empty on the release path, so the binary ships its full symbol table and DWARF. Stripping both
+      typically takes 20–30% off a Go/wasm binary — on this one that is on the order of a megabyte
+      of transfer and a chunk of parse/compile time on every cold load.
+      **Do this one first.** Every other item in this section and the section above is worth
+      microseconds per render; this is worth seconds on first paint, which is the only performance
+      number an operator on a slow connection actually experiences. The trade is honest and small:
+      a stripped wasm binary gives worse stack traces, which matters less here than elsewhere
+      because Go/wasm panics already surface poorly and the app's real diagnostics are server-side.
+      Measure before and after rather than assuming the 20–30%.
+- [ ] `A8-50` **`UseEffectOf` is 2.6× cheaper than variadic `UseEffect` in wasm, and 19 call sites
+      still use the variadic form** (6 already use the typed one). This is not a guess: the
+      library's own perf log (`docs/DEVNOTES_PERF_LOOP.md`, iteration 3) measures the untyped hook
+      walk at 1.48 ms/pass in wasm against 0.57 ms with the `*Of` variants, and notes wasm amplifies
+      the closure/deps allocation ~14× over native. Nearly every site in this app passes exactly one
+      dep (`}, blocked)`, `}, props.Ready)`, `}, reloadTick.Get())`, …), so the conversion is
+      mechanical; the three-dep sites take a small comparable struct as the key, which is legal
+      since a struct of comparables is comparable.
+      One rule the library states and this conversion must respect: `UseEffect` and `UseEffectOf`
+      share a slot, so a given call site must never alternate between them across renders.
+- [ ] `A8-51` **`UseLayoutEffect` is used zero times, and the kebab measures its anchor in a passive
+      `UseEffect`.** `web/ui/kebab.go:74` reads the trigger's geometry AFTER commit and paint, then
+      sets state, forcing a second render — so the menu is painted once at stale coordinates before
+      it lands. `UseLayoutEffect` exists for exactly this ("measuring an element
+      (offsetWidth/getBoundingClientRect) … instead of guessing a setTimeout/requestAnimationFrame
+      delay") and runs before paint. This is a correctness win as much as a perf one, and it is
+      plausibly part of the residual flicker the kebab work chased (`A7-11`).
+- [ ] `A8-52` **`ui.PostAsync` is called twice in the whole app.** Its doc: "Calling PostAsync
+      explicitly is still worthwhile when several writes belong together — one post means one render
+      for the whole group." The mutation handlers in `/generate` and `/history` set four or five
+      pieces of state in sequence after an RPC returns; each is its own scheduled render. Grouping
+      them is a smaller change than it looks and cuts renders per save directly — which also reduces
+      what `A8-48`'s pump has to paper over.
+- [ ] `A8-53` **`StartTransition`/`UseTransition` are used zero times.** The hand-rolled 250 ms
+      search debounce (`web/pages/history/asyncdispatch.go`) is a coarser approximation of what the
+      transition lane does properly: mark the filter/search re-render non-urgent so typing stays
+      responsive without an arbitrary delay before results move at all. Worth trying on the two
+      search fields and the filter bar, keeping the debounce only for the RPC itself (which is a
+      network-cost decision, not a render one).
+- [ ] `A8-54` **`gcpacing.Apply` is never called.** The package exists because the v4 baseline
+      measured a 6.60 ms maximum GC pause on the render thread and v5's acceptance target is under
+      3 ms — one dropped frame is exactly the symptom. It is a single call at boot returning a
+      `Previous` you can restore. The package's own caveat has to be respected in how the result is
+      judged: js/wasm is single-threaded and marks without native Go's parallel assist, so a pause
+      measured natively is not the browser's pause — measure in the browser or not at all.
+- [ ] `A8-55` **`ui.Lazy` is used zero times.** Worth evaluating only AFTER `A8-49`: deferring
+      subtrees matters much less once the bundle itself is smaller, and this app's routes all live
+      in one binary anyway. Filed so the decision is recorded rather than re-opened.
+- [ ] `A8-56` **`UseMemoOf` is the form to prefer when acting on `A8-46`**, not `UseMemo` — same
+      memo slot, but a static non-capturing compute keyed by one comparable dep has zero
+      steady-state allocations, where the variadic form allocates a deps slice per render. Same
+      no-alternating rule as `A8-50`.
+
+Deliberately NOT adopted, with the reason, so this is not re-litigated:
+
+- **`delta`, `projection`, `compute`, and the off-thread worker model** are v5's machinery for
+  20,000-row tables and multi-megabyte structured clones per keystroke. This app pages every list at
+  25 rows (`DefaultPageSize`) and does its heavy work server-side. Adopting them here would add a
+  second Go runtime's memory and a publication protocol to save nothing measurable.
+- **`virtualization`** beyond the existing `web/ui/virtualtable.go` for the same reason — see the
+  note under the markup section on why history's paged tables are correct as plain tables.
+- **`prerender`/`servercomponents`** are a different rendering model, not a tuning knob; the admin
+  app is behind authentication and has no first-paint-of-public-content problem to solve.
+
 Verified as already right, recorded so nobody "optimises" them into something worse:
 
 - **Page styles are emitted once**, from `init()` via `css.Global`, which dedupes by content. They
@@ -595,9 +665,15 @@ closing note).
       §4's "the token never touches JavaScript or WASM" is stated as an invariant and this is a path
       where a WASM-supplied value authenticates a call. Either drop the metadata source when a
       bridge session is present, or correct the comment to describe what the code does.
-- [ ] `A8-38` **`backoffTracker`'s map is never evicted.** One entry per distinct peer address,
-      retained for the life of the process, with no sweep of entries whose window has long expired.
-      Inert behind the proxy (one key), unbounded on a directly-reachable listener.
+- [x] `A8-38` **FIXED 2026-08-11.** `backoffTracker`'s map was never evicted: one entry per distinct peer
+      address, retained for the life of the process. Inert behind the proxy (one key), unbounded on a
+      directly-reachable listener.
+      `sweepLocked` drops entries whose window closed more than 15 minutes ago, run on the failure path
+      rather than from a timer — entries are only ever created there, so it is the one path that can grow
+      the map, and there is no goroutine to own, start or stop. Retention is well past the 60s delay cap so
+      an attacker pausing between attempts does not get a free reset: the entry, and the failure count that
+      makes the next delay longer, outlives the window. Tests pin all three properties, including that a
+      sweep never releases an address still inside its window.
 - [ ] `A8-39` Small inaccuracies found while reading, none of them exploitable: `recoveryAlphabet`'s
       comment claims 31 symbols and says vowels are dropped (it holds 30, and `A`/`E` are in it — the
       modulo-bias note is computed off the wrong number, though its conclusion still stands);
