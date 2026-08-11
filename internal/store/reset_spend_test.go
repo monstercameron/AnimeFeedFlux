@@ -2,11 +2,13 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/monstercameron/AnimeFeedFlux/internal/auth"
+	"github.com/monstercameron/AnimeFeedFlux/internal/model"
 )
 
 // --- password reset tokens --------------------------------------------------
@@ -366,4 +368,119 @@ func dayDates(days []DailySpend) []string {
 		out = append(out, d.Date)
 	}
 	return out
+}
+
+// --- last_built_at ----------------------------------------------------------
+
+func feedLastBuiltAt(t *testing.T, s *Store, feedID int64) (string, bool) {
+	t.Helper()
+	var raw sql.NullString
+	if err := s.Reader().QueryRowContext(context.Background(),
+		`SELECT last_built_at FROM feeds WHERE id = ?`, feedID).Scan(&raw); err != nil {
+		t.Fatalf("reading last_built_at: %v", err)
+	}
+	return raw.String, raw.Valid && raw.String != ""
+}
+
+func TestCommitRunStampsTheFeedsLastBuild(t *testing.T) {
+	// The column is read in fifteen places — the Feed proto, the generate
+	// rail's "last build", and SlugEditable, which infers "never published"
+	// from it being unset — and was written by nothing, so the rail said
+	// "never built" forever and the editor offered an editable slug on a feed
+	// the server would refuse to rename.
+	s := newTestStore(t)
+	ctx := t.Context()
+	feedID, err := s.CreateFeed(ctx, makeFeed("trivia"))
+	if err != nil {
+		t.Fatalf("CreateFeed: %v", err)
+	}
+	if _, ok := feedLastBuiltAt(t, s, feedID); ok {
+		t.Fatal("a freshly created feed already claims to have built")
+	}
+
+	runID, err := s.StartRun(ctx, feedID, "cron", "worker-1")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	item := makeItem(feedID, "item-1", time.Now().UTC())
+	if err := s.CommitRun(ctx, runID, []model.Item{item}, RunSummary{}); err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+
+	first, ok := feedLastBuiltAt(t, s, feedID)
+	if !ok {
+		t.Fatal("a committed run did not stamp last_built_at")
+	}
+
+	// A second run moves it forward rather than leaving the first value.
+	time.Sleep(2 * time.Millisecond)
+	runID2, err := s.StartRun(ctx, feedID, "cron", "worker-1")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if err := s.CommitRun(ctx, runID2, nil, RunSummary{}); err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+	second, _ := feedLastBuiltAt(t, s, feedID)
+	if second <= first {
+		t.Errorf("second build stamped %q, not after the first %q", second, first)
+	}
+}
+
+func TestAFailedRunDoesNotClaimABuild(t *testing.T) {
+	// "Last built" must mean a run that actually committed. A failure that
+	// stamped it would tell an operator the feed produced something at a
+	// moment it produced nothing — and would lock the slug against a feed
+	// that never published.
+	s := newTestStore(t)
+	ctx := t.Context()
+	feedID, err := s.CreateFeed(ctx, makeFeed("trivia"))
+	if err != nil {
+		t.Fatalf("CreateFeed: %v", err)
+	}
+	runID, err := s.StartRun(ctx, feedID, "cron", "worker-1")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if err := s.FailRun(ctx, runID, "transient", "provider refused", RunSummary{}); err != nil {
+		t.Fatalf("FailRun: %v", err)
+	}
+	if _, ok := feedLastBuiltAt(t, s, feedID); ok {
+		t.Error("a failed run stamped last_built_at")
+	}
+
+	// Same for a skipped run: the gate refused it, nothing was built.
+	runID2, err := s.StartRun(ctx, feedID, "cron", "worker-1")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if err := s.SkipRun(ctx, runID2, "budget_exhausted"); err != nil {
+		t.Fatalf("SkipRun: %v", err)
+	}
+	if _, ok := feedLastBuiltAt(t, s, feedID); ok {
+		t.Error("a skipped run stamped last_built_at")
+	}
+}
+
+func TestOneFeedsBuildDoesNotStampAnother(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	built, err := s.CreateFeed(ctx, makeFeed("trivia"))
+	if err != nil {
+		t.Fatalf("CreateFeed: %v", err)
+	}
+	other, err := s.CreateFeed(ctx, makeFeed("news"))
+	if err != nil {
+		t.Fatalf("CreateFeed: %v", err)
+	}
+	runID, err := s.StartRun(ctx, built, "cron", "worker-1")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if err := s.CommitRun(ctx, runID, nil, RunSummary{}); err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+	if _, ok := feedLastBuiltAt(t, s, other); ok {
+		t.Error("committing one feed's run stamped another feed")
+	}
 }

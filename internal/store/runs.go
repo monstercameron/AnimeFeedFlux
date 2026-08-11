@@ -331,6 +331,31 @@ func (s *Store) CommitRun(ctx context.Context, runID int64, items []model.Item, 
 		return fmt.Errorf("store: committing run %d: %w", runID, ErrNotFound)
 	}
 
+	// Stamp the feed's last successful build, in the SAME transaction that
+	// closes the run — a feed that "last built" at a moment its run did not
+	// actually commit would be a lie of exactly the kind §9 puts the items
+	// and the run row in one transaction to prevent.
+	//
+	// feeds.last_built_at has existed since migration 0002 and was READ in
+	// fifteen places — feedSelectColumns, the Feed proto, the generate rail's
+	// "last build" (D2-02) — and written by nothing, so the rail said "never
+	// built" forever. It also drives web/pages/generate's SlugEditable, which
+	// infers "this feed has never published" from the field being unset: with
+	// it permanently nil the editor offered an editable slug on every feed
+	// while the server refused the change once items existed (§14.1's
+	// immutability rule, enforced in rpc's feedCheckSlugImmutable). Writing it
+	// closes that mismatch in the safe direction — the UI locks the field no
+	// later than the server starts refusing it.
+	//
+	// Derived from the run rather than taking a feed id parameter, so no
+	// caller can pass one that disagrees with the run being closed.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE feeds SET last_built_at = ? WHERE id = (SELECT feed_id FROM runs WHERE id = ?)`,
+		now, runID,
+	); err != nil {
+		return fmt.Errorf("store: stamping last_built_at for run %d: %w", runID, err)
+	}
+
 	if commitRunPreCommitFailure != nil {
 		if err := commitRunPreCommitFailure(); err != nil {
 			return fmt.Errorf("store: simulated crash before committing run %d: %w", runID, err)
