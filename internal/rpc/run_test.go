@@ -402,6 +402,18 @@ func TestWatchRelaysProgressBeforeTerminal(t *testing.T) {
 	// fans out to whatever is subscribed *at that instant* (see its doc
 	// comment) and keeps no backlog for a late subscriber.
 	waitForHubSubscriber(t, srv.progress, runID, 2*time.Second)
+	// ...and then past the initial poll. A subscriber existing is not the
+	// same as a live watcher: Watch subscribes BEFORE pollAndSend, and
+	// returns immediately if that first read is already terminal. If the
+	// watcher goroutine is descheduled in that window, the CommitRun below
+	// lands first, the initial snapshot comes back terminal, and Watch sends
+	// exactly one message and returns — every tick published here correctly
+	// and invisibly delivered to nobody. That is a flake in the test's
+	// synchronization, not in Watch, and it is the same one already fixed in
+	// TestWatchConcurrentWatchersBothReceiveProgress; waitForSends' own doc
+	// comment describes it. Waiting for the snapshot to land is the real
+	// condition (A0-T04) that the watcher has reached its select loop.
+	waitForSends(t, fake, 1, 2*time.Second)
 
 	srv.ReportCandidate(runID, "calling_model", 2)
 	srv.ReportCommitted(runID, 1)
