@@ -175,6 +175,48 @@ func (s Schedule) dayMatches(t time.Time) bool {
 	}
 }
 
+// gapSkippedAScheduledHour reports whether advancing one real hour from
+// startOfHour to next jumped OVER one or more wall-clock hours that this
+// schedule would have fired in — a spring-forward gap swallowing a scheduled
+// run. When it does, Next returns `next`: the first instant that exists after
+// the gap, which is PLAN.md §7's promise that a daily run is not silently
+// dropped on the transition day.
+//
+// The skipped hours are enumerated as nominal wall-clock tuples in UTC, which
+// has no transitions, so the arithmetic cannot itself land in a gap. Doing it
+// this way rather than comparing t.Hour() against next.Hour() is what makes a
+// MIDNIGHT transition work: zones like America/Santiago and Asia/Beirut move
+// the clock at 24:00, so the swallowed hour belongs to the following calendar
+// day. The previous form required the jump to stay inside one day, which is
+// true in America/New_York (02:00→03:00) and false in exactly the zones where
+// a daily schedule set near midnight is most likely to be pointed. There, the
+// entire transition day was skipped: 00:30 daily fired on the 5th and then
+// the 7th.
+// The enumeration is per MINUTE, not per hour, because not every transition
+// is a whole hour: Australia/Lord_Howe moves the clock 30 minutes (02:00 →
+// 02:30), so "0 2 * * *" is swallowed while 02:30 itself exists. An
+// hour-granular check sees the hour as present and misses it.
+func (s Schedule) gapSkippedAScheduledHour(from, to time.Time) bool {
+	nominal := func(t time.Time) time.Time {
+		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, time.UTC)
+	}
+	nf, nt := nominal(from), nominal(to)
+	// With no transition in between, the wall clock advanced by exactly the
+	// real elapsed time and nothing can have been skipped. This is the
+	// overwhelmingly common case, and short-circuiting it keeps the search
+	// loop from walking 59 nominal minutes on every ordinary hour step.
+	if nt.Sub(nf) == to.Sub(from) {
+		return false
+	}
+	for nom := nf.Add(time.Minute); nom.Before(nt); nom = nom.Add(time.Minute) {
+		if s.minute.set[nom.Minute()] && s.hour.set[nom.Hour()] &&
+			s.month.set[int(nom.Month())] && s.dayMatches(nom) {
+			return true
+		}
+	}
+	return false
+}
+
 // Next returns the next firing strictly after `after`, computed in the
 // schedule's timezone. It advances using real elapsed time (time.Time.Add),
 // never by reconstructing a wall-clock tuple with time.Date and hoping it
@@ -223,12 +265,8 @@ func (s Schedule) Next(after time.Time) time.Time {
 			// loop forever instead of advancing past it.
 			startOfHour := t.Add(-time.Duration(t.Minute()) * time.Minute)
 			next := startOfHour.Add(time.Hour)
-			if next.Day() == t.Day() && next.Hour() > t.Hour()+1 {
-				for h := t.Hour() + 1; h < next.Hour(); h++ {
-					if s.hour.set[h] {
-						return next
-					}
-				}
+			if s.gapSkippedAScheduledHour(startOfHour, next) {
+				return next
 			}
 			t = next
 			continue
