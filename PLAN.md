@@ -952,8 +952,19 @@ what would actually happen.
 
 Conventions: every mutation takes an `expected_version` for optimistic concurrency (two browser tabs
 must not silently clobber a recipe — a lesson already paid for in CashFlux); list RPCs paginate with
-an opaque cursor; errors use gRPC status codes with a machine-readable detail so the UI can render
-against the offending field.
+an opaque cursor **and return `total_count`**; errors use gRPC status codes with a machine-readable
+detail so the UI can render against the offending field.
+
+`total_count` is how many rows match the request's filters, ignoring paging. It exists because a
+cursor cannot answer "how many pages are there" — a `next_page_token` reports only whether one *more*
+page exists — so without it a pager can offer Next and never "page 3 of 9", and has no basis for a
+jump-to-page control at all. It is counted with the same filters as the page and **without** the
+cursor condition: folding the cursor in would count the rows remaining *after* the current page, so
+the total would shrink as the operator pages forward.
+
+Jumping remains bounded by what a cursor can do: a page is reachable in one click only once its
+token has been handed over, so the UI offers numbered jumps for visited pages and shows the rest as
+present-but-not-yet-reachable rather than pretending otherwise (`web/pages/history/pager_ui.go`).
 
 Two invariants hold for **every write path that changes a feed's published representation** — not
 merely those touching `items`. That includes generation, `PromoteSample`, `ItemService.Create`,
@@ -1222,11 +1233,30 @@ The cost of adding it later is what makes it a now decision. Retrofitting means 
 component that was written without it, which is exactly the work that never gets scheduled — and
 `en` is the only locale that has to exist for the discipline to pay off.
 
+**Updated 2026-08-11: a second locale now ships (`es`), and the paragraph above was proved right by
+what the change cost.** The catalogue layer needed nothing structural — `Bundle.Register` already
+took a locale, plural rules and formatters were already locale-parameterised, and the Provider
+already had a `CurrentLocale` prop. The entire English-only-ness of the app lived in ~550 call sites
+that passed the `DefaultLocale` *constant* to a function whose first parameter was the locale to use.
+Making the interface switchable was: one package var holding the active tag (`web/i18n/locale.go`),
+those call sites reading it instead of the constant, and one atom the Provider subscribes to so a
+change re-renders the tree. The translation itself was the work; the plumbing was an afternoon,
+because §12.6 had already been paid for. Selecting a language is Settings → Appearance, stored per
+browser in `localStorage` beside the theme preference — it is a client preference, not account state.
+
 Concretely: one `en` catalogue, keys named for meaning rather than for the English text (so fixing
 wording is not a rename); the provider mounted in the root component, above the router, because a
 provider mounted inside a route cannot serve the shell's own reconnect banner; interpolation and
 plurals through the library rather than string concatenation, which does not survive a second
 locale; dates, times and currency formatted by locale-aware formatters, never `fmt.Sprintf`.
+
+Every one of those five held up under the second locale, and the third — "interpolation and plurals
+through the library ... does not survive a second locale" — turned out to be the load-bearing one.
+Placeholders substitute by NAME, so a translation that localises `{count}` to `{cuenta}` renders the
+literal braces and silently loses the number. That is not caught by the compiler and not caught by a
+missing-key check, so it gets its own test: `TestPlaceholderParityAcrossLocales` compares the set of
+placeholder names per key across every registered locale, alongside a key-parity test in both
+directions and a plural-form check.
 
 Two things stay OUT of the catalogue deliberately. Feed content is authored by the model in the
 feed's own configured language and is data, not interface. And the single generic login-failure
