@@ -413,7 +413,7 @@ func allowMethod(w http.ResponseWriter, r *http.Request) bool {
 // negotiated per request from a cache holding both bodies (§5.4) — nothing
 // is compressed on the fly here.
 func wantsGzip(r *http.Request) bool {
-	for _, enc := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+	for enc := range strings.SplitSeq(r.Header.Get("Accept-Encoding"), ",") {
 		if strings.EqualFold(strings.TrimSpace(enc), "gzip") {
 			return true
 		}
@@ -452,7 +452,7 @@ func notModified(r *http.Request, e Entry) bool {
 // weak "W/" prefix on the client side is stripped defensively, in case a
 // proxy rewrites it, but this server never emits one.
 func etagMatch(header, etag string) bool {
-	for _, tok := range strings.Split(header, ",") {
+	for tok := range strings.SplitSeq(header, ",") {
 		tok = strings.TrimSpace(tok)
 		if tok == "*" {
 			return true
@@ -587,8 +587,8 @@ func feedFormat(path string) (slug, format, contentType string, ok bool) {
 		{".atom", "atom", "application/atom+xml; charset=utf-8"},
 		{".json", "json", "application/feed+json"},
 	} {
-		if strings.HasSuffix(rest, f.ext) {
-			slug = strings.TrimSuffix(rest, f.ext)
+		if cut, ok := strings.CutSuffix(rest, f.ext); ok {
+			slug = cut
 			if slug == "" {
 				return "", "", "", false
 			}
