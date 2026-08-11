@@ -52,6 +52,10 @@ var historyMessages = gwci18n.NamespaceCatalog{
 	// the first was unreachable. See runs_ui.go's "load-ok" reducer case.
 	"history.pager.next":    {Text: "Next"},
 	"history.pager.refresh": {Text: "Refresh"},
+	// Added with the numbered pager. Previous/Next alone never said where you
+	// were or how much was left, and there was no way to reach page 9 except
+	// by pressing Next eight times.
+	"history.pager.status": {Text: "Page {page} of {total}"},
 
 	"history.confirm.confirm":         {Text: "Confirm"},
 	"history.confirm.type_to_confirm": {Text: "Type {word} to confirm."},
@@ -91,18 +95,40 @@ var historyMessages = gwci18n.NamespaceCatalog{
 	"history.runs.reject_reasons":       {Text: "Reject reasons"},
 	"history.runs.no_rejects":           {Text: "Nothing was rejected in this run."},
 	"history.runs.log":                  {Text: "Log"},
-	"history.runs.log_unavailable":      {Text: "Couldn't load this run's log. Refresh to try again."},
-	"history.runs.status.running":       {Text: "Running"},
-	"history.runs.status.succeeded":     {Text: "Succeeded"},
-	"history.runs.status.failed":        {Text: "Failed"},
-	"history.runs.status.skipped":       {Text: "Skipped"},
-	"history.runs.status.unspecified":   {Text: "Unspecified"},
-	"history.runs.trigger.cron":         {Text: "Scheduled"},
-	"history.runs.trigger.manual":       {Text: "Manual"},
-	"history.runs.trigger.unspecified":  {Text: "Unspecified"},
-	"history.runs.error_kind.transient": {Text: "Transient error"},
-	"history.runs.error_kind.invalid":   {Text: "Invalid configuration"},
-	"history.runs.error_kind.fatal":     {Text: "Fatal error"},
+
+	// The expanded run panel. It showed reject reasons and a log and nothing
+	// else, so a failed run's expansion said "Nothing was rejected" and
+	// stopped — while Run.error, the actual provider message, was carried by
+	// the RPC and rendered nowhere in the app. The table's Error column shows
+	// only error_kind, a coarse token ("transient", "fatal"), which says what
+	// class of thing went wrong and never what did.
+	"history.runs.detail.error_kind":    {Text: "Kind"},
+	"history.runs.detail.error_message": {Text: "Message"},
+	"history.runs.detail.started":       {Text: "Started"},
+	"history.runs.detail.finished":      {Text: "Finished"},
+	"history.runs.detail.duration":      {Text: "Duration"},
+	// Shown only while a run has not finished: heartbeat_at is what separates
+	// "still working" from "the process died and left the row open" (§10/§15),
+	// and it was surfaced on the wire for exactly that and never displayed.
+	"history.runs.detail.heartbeat":      {Text: "Last heartbeat"},
+	"history.runs.detail.tokens_in":      {Text: "Tokens in"},
+	"history.runs.detail.tokens_out":     {Text: "Tokens out"},
+	"history.runs.detail.tokens_total":   {Text: "Tokens total"},
+	"history.runs.detail.est_cost":       {Text: "Estimated cost"},
+	"history.runs.detail.cost_estimated": {Text: "Estimated: the provider reports no usage figures, so this is computed from token counts at the prompt/response boundary."},
+	"history.runs.no_log":                {Text: "This run recorded no log."},
+	"history.runs.log_unavailable":       {Text: "Couldn't load this run's log. Refresh to try again."},
+	"history.runs.status.running":        {Text: "Running"},
+	"history.runs.status.succeeded":      {Text: "Succeeded"},
+	"history.runs.status.failed":         {Text: "Failed"},
+	"history.runs.status.skipped":        {Text: "Skipped"},
+	"history.runs.status.unspecified":    {Text: "Unspecified"},
+	"history.runs.trigger.cron":          {Text: "Scheduled"},
+	"history.runs.trigger.manual":        {Text: "Manual"},
+	"history.runs.trigger.unspecified":   {Text: "Unspecified"},
+	"history.runs.error_kind.transient":  {Text: "Transient error"},
+	"history.runs.error_kind.invalid":    {Text: "Invalid configuration"},
+	"history.runs.error_kind.fatal":      {Text: "Fatal error"},
 
 	// history.runs.added_rejected_value/tokens_value replace two "%d / %d"
 	// Textf calls in runs_ui.go's added/rejected and tokens-in/out table
@@ -146,8 +172,17 @@ var historyMessages = gwci18n.NamespaceCatalog{
 	"history.items.origin.correction": {Text: "Correction"},
 
 	// Item edit form (forms_ui.go).
-	"history.items.guid_never_changes":        {Text: "The GUID never changes, even across corrections."},
-	"history.items.filter_query_placeholder":  {Text: "Search titles and text…"},
+	"history.items.guid_never_changes":       {Text: "The GUID never changes, even across corrections."},
+	"history.items.filter_query_placeholder": {Text: "Search titles and text…"},
+	// {arg1} names what the ⋯ acts on, so twenty-five triggers do not all
+	// read "Actions" to a screen reader.
+	"history.kebab.for":          {Text: "Actions for {arg1}"},
+	"history.items.bulk_actions": {Text: "the selected items"},
+	// {title} is the item's own title, so a screen reader hears which row a
+	// checkbox belongs to rather than twenty-five identical "checkbox".
+	"history.items.select_row":                {Text: "Select {title}"},
+	"history.items.select_all":                {Text: "Select every item on this page"},
+	"history.items.title_required":            {Text: "A title is required."},
 	"history.items.field_feed":                {Text: "Feed"},
 	"history.items.field_feed_none":           {Text: "No feeds available — create a feed before adding an item to it."},
 	"history.items.field_title":               {Text: "Title"},

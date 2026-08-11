@@ -3,6 +3,8 @@
 package history
 
 import (
+	affui "github.com/monstercameron/AnimeFeedFlux/web/ui"
+
 	"context"
 	"time"
 
@@ -33,7 +35,10 @@ type itemsLoadState struct {
 	// nextTk is the token for the page AFTER the one displayed, "" on the
 	// last page. Same fix as runs_ui.go's runsLoadState — see the "load-ok"
 	// case there for what loading-advances-the-cursor broke.
-	nextTk  string
+	nextTk string
+	// total is the server's total_count for the current filters — how many
+	// items match, ignoring paging. See runsLoadState.total.
+	total   int64
 	editing int64 // 0 = none, -1 = creating new, >0 = editing that item id
 	viewRev int64 // item id whose revision panel is open, 0 = none
 
@@ -53,6 +58,7 @@ type itemsAction struct {
 	err       error
 	items     []*affv1.Item
 	nextTk    string
+	total     int64
 	itemID    int64
 	item      *affv1.Item
 	revisions []*affv1.ItemRevision
@@ -68,6 +74,7 @@ func itemsReducer(s itemsLoadState, a itemsAction) itemsLoadState {
 		s.items = a.items
 		// Record, do not advance — see runs_ui.go's identical case.
 		s.nextTk = a.nextTk
+		s.total = a.total
 	case "load-err":
 		s.loading = false
 		s.err = a.err
@@ -153,40 +160,77 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 	// state and schedules no render, which is why this tab loaded its items
 	// and kept showing the spinner until some unrelated click repainted it.
 	pump := useRenderPump()
+	// beat keeps renders (and therefore timers) flowing for as long as a load
+	// is outstanding. Without it a wedged request never even reaches
+	// retryRead's own timeout — the timer that would fire it is waiting on
+	// the same stalled render loop. See web/ui/pump.go.
+	beat := affui.UsePump()
+	bulkKebabOpen := ui.UseState(false)
 
-	load := func(pageToken string) {
+	// inFlight is the filter the outstanding request was built from, or nil
+	// when nothing is outstanding.
+	inFlight := ui.UseRef((*ItemFilter)(nil))
+
+	var load func(string)
+	load = func(pageToken string) {
 		store.Dispatch(itemsAction{kind: "load-start"})
 		pump.bump()
-		req := BuildItemListRequest(filter.Get(), pageToken, DefaultPageSize)
-		retryRead(
-			func() (*affv1.ItemServiceListResponse, error) {
-				return props.Client.List(context.Background(), req)
-			},
-			func(resp *affv1.ItemServiceListResponse, err error) {
-				if err != nil {
-					store.Dispatch(itemsAction{kind: "load-err", err: err})
+		used := filter.Get()
+		inFlight.Set(&used)
+		req := BuildItemListRequest(used, pageToken, DefaultPageSize)
+		beat.Run(func(done func()) {
+			retryRead(
+				func() (*affv1.ItemServiceListResponse, error) {
+					return props.Client.List(context.Background(), req)
+				},
+				func(resp *affv1.ItemServiceListResponse, err error) {
+					done()
+					inFlight.Set(nil)
+					if err != nil {
+						store.Dispatch(itemsAction{kind: "load-err", err: err})
+						pump.bump()
+						return
+					}
+					store.Dispatch(itemsAction{kind: "load-ok", items: resp.Items, nextTk: resp.NextPageToken, total: resp.GetTotalCount()})
 					pump.bump()
-					return
-				}
-				store.Dispatch(itemsAction{kind: "load-ok", items: resp.Items, nextTk: resp.NextPageToken})
-				pump.bump()
-			},
-		)
+					// Converge on the LATEST filter.
+					//
+					// A filter changed while a request was in flight used to be
+					// lost: the effect fired, its load was swallowed by the one
+					// already running, and the list kept showing the previous
+					// query's results. In practice that was always the FIRST
+					// search after the page loaded — you typed, and nothing
+					// happened — because the initial load is the request most
+					// likely to still be running when someone starts typing.
+					if cur := filter.Get(); !sameItemFilter(cur, used) {
+						load("")
+					}
+				},
+			)
+		})
 	}
 
 	// The feed list, needed by the create form: an item belongs to a feed,
 	// and the form had no way to say which.
 	feeds := ui.UseState([]*affv1.Feed(nil))
+	// feedsSettled gates the item load. Same reason as the Runs tab: two RPCs
+	// issued together on a cold page load lose one of them (see runs_ui.go's
+	// effect and TODOS A5-44), and here the casualty was the item list — so
+	// landing directly on /history/items showed an empty table until you
+	// typed something.
+	feedsSettled := ui.UseState(false)
 	ui.UseEffect(func() func() {
 		if !props.Ready || props.Feeds == nil {
+			feedsSettled.Set(true)
 			return nil
 		}
 		go func() {
 			resp, err := props.Feeds.List(context.Background(), &affv1.FeedServiceListRequest{PageSize: 200})
-			if err != nil {
-				return
+			if err == nil {
+				feeds.Set(resp.GetFeeds())
 			}
-			feeds.Set(resp.GetFeeds())
+			feedsSettled.Set(true)
+			pump.bump()
 		}()
 		return nil
 	}, props.Ready)
@@ -195,14 +239,14 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 	// the socket can actually carry it — and re-fires if the page was opened
 	// before the session came up. See RootProps.Ready.
 	ui.UseEffect(func() func() {
-		if !props.Ready {
+		if !props.Ready || !feedsSettled.Get() {
 			return nil
 		}
 		store.Get().cursor.Reset()
 		selection.Get().Clear()
 		load("")
 		return nil
-	}, filter.Get(), props.Ready)
+	}, filter.Get(), props.Ready, feedsSettled.Get())
 
 	// The search box is debounced: it used to set the filter on every
 	// keystroke, and the filter is the load effect's dependency, so typing
@@ -228,6 +272,11 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 			}
 			f.Query = v
 			filter.Set(f)
+			// The debounce runs off the event loop, so this write is queued
+			// like any other async state update — and without a nudge the
+			// list repainted one query behind what was in the box (typing
+			// "tr" showed the results for "t"). See asyncdispatch.go.
+			pump.bump()
 		}()
 	}
 
@@ -467,18 +516,28 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 		h.ClassStr("history-items"),
 		h.Div(
 			h.ClassStr("history-filters"),
-			h.Label(h.For("history-items-query"), props.T.T("history.items.filter_query", nil)),
-			h.Input(h.ID("history-items-query"), h.Type("search"),
-				h.Attr("placeholder", props.T.T("history.items.filter_query_placeholder", nil)),
-				h.Value(queryDraft.Get()), h.OnInput(handleQuery)),
+			// Every field is a label-above-control pair, like the Runs tab's.
+			// This row used to mix three treatments — an inline label before
+			// the search box, a stacked one over the feed menu, another inline
+			// one before the deleted filter — so nothing lined up with
+			// anything and the row read as three unrelated controls.
+			filterField("history-items-query", props.T.T("history.items.filter_query", nil),
+				h.Input(h.ID("history-items-query"), h.Type("search"),
+					h.Attr("placeholder", props.T.T("history.items.filter_query_placeholder", nil)),
+					h.Value(queryDraft.Get()), h.OnInput(handleQuery))),
 			renderItemFeedFilter(props.T, feeds.Get(), filter.Get().FeedID, handleFeedFilter),
-			h.Label(h.For("history-items-deleted"), props.T.T("history.items.filter_deleted", nil)),
-			h.Select(h.ID("history-items-deleted"), h.OnChange(handleDeletedFilter),
-				h.Option(h.Value("exclude"), props.T.T("history.items.deleted.exclude", nil)),
-				h.Option(h.Value("only"), props.T.T("history.items.deleted.only", nil)),
-				h.Option(h.Value("all"), props.T.T("history.items.deleted.all", nil)),
-			),
-			h.Button(h.Type("button"), h.OnClick(func() { saveErr.Set(nil); store.Dispatch(itemsAction{kind: "start-create"}) }), props.T.T("history.items.create", nil)),
+			filterField("history-items-deleted", props.T.T("history.items.filter_deleted", nil),
+				h.Select(h.ID("history-items-deleted"), h.OnChange(handleDeletedFilter),
+					h.Option(h.Value("exclude"), props.T.T("history.items.deleted.exclude", nil)),
+					h.Option(h.Value("only"), props.T.T("history.items.deleted.only", nil)),
+					h.Option(h.Value("all"), props.T.T("history.items.deleted.all", nil)),
+				)),
+			// The row's own action, aligned to the controls' baseline rather
+			// than to their labels.
+			h.Div(h.ClassStr("history-filters__action"),
+				h.Button(h.Type("button"), h.ClassStr("history-filters__new"),
+					h.OnClick(func() { saveErr.Set(nil); store.Dispatch(itemsAction{kind: "start-create"}) }),
+					props.T.T("history.items.create", nil))),
 		),
 		h.If(s.editing != 0, ui.CreateElement(ItemForm, ItemFormProps{
 			T:               props.T,
@@ -504,15 +563,11 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 		// costs every selected row at once.
 		h.If(selection.Get().Count() > 0, h.Div(h.ClassStr("history-bulkbar"),
 			h.Textf(props.T.T("history.items.selected_count", nil), selection.Get().Count()),
-			h.Div(h.ClassStr("history-kebab"),
-				kebabTrigger(props.T),
-				h.Div(h.ClassStr("history-kebab-menu"),
-					h.Button(h.Type("button"), h.ClassStr("history-kebab-danger"),
-						h.OnClick(bulkDelete), props.T.T("history.items.bulk_delete", nil)),
-					h.Button(h.Type("button"),
-						h.OnClick(bulkRestore), props.T.T("history.items.bulk_restore", nil)),
-				),
-			),
+			rowKebab(props.T, "history-bulk-kebab", props.T.T("history.items.bulk_actions", nil),
+				bulkKebabOpen.Get(), bulkKebabOpen.Set, []affui.KebabItem{
+					{ID: "history-bulk-restore", LabelKey: "history.items.bulk_restore", OnSelect: bulkRestore},
+					{ID: "history-bulk-delete", LabelKey: "history.items.bulk_delete", Danger: true, OnSelect: bulkDelete},
+				}),
 		)),
 		renderScreenState(props.T, screen, func() ui.Node {
 			return itemsTable(props.T, s, selection.Get(), toggleSelect, toggleSelectAll, visibleIDs,
@@ -521,18 +576,28 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 				toggleRevisions, s.viewRev, renderRevPanel,
 			)
 		}),
-		h.Div(
-			h.ClassStr("history-pager"),
-			h.Button(h.Type("button"), h.Disabled(!s.cursor.HasPrevious()), h.OnClick(func() {
+		renderPager(pagerProps{
+			T:          props.T,
+			Page:       s.cursor.PageNumber(),
+			TotalPages: TotalPages(s.total, DefaultPageSize),
+			VisitedN:   s.cursor.Visited(),
+			HasPrev:    s.cursor.HasPrevious(),
+			HasNext:    s.nextTk != "",
+			OnPrev: func() {
 				s.cursor.Back()
 				load(s.cursor.Current())
-			}), props.T.T("history.pager.previous", nil)),
-			h.Button(h.Type("button"), h.Disabled(s.nextTk == ""), h.OnClick(func() {
+			},
+			OnNext: func() {
 				s.cursor.Advance(s.nextTk)
 				load(s.cursor.Current())
-			}), props.T.T("history.pager.next", nil)),
-			h.Button(h.Type("button"), h.OnClick(func() { load(s.cursor.Current()) }), props.T.T("history.pager.refresh", nil)),
-		),
+			},
+			OnJump: func(page int) {
+				if s.cursor.JumpTo(page) {
+					load(s.cursor.Current())
+				}
+			},
+			OnRefresh: func() { load(s.cursor.Current()) },
+		}),
 	)
 }
 
@@ -547,7 +612,9 @@ func itemsTable(t Catalog, s itemsLoadState, sel *Selection,
 	return h.Table(
 		h.ClassStr("history-table"),
 		h.Thead(h.Tr(
-			h.Th(h.Input(h.Type("checkbox"), h.Checked(allState == SelectAllAll), h.OnChange(func() { toggleSelectAll() }))),
+			h.Th(h.Input(h.Type("checkbox"), h.ClassStr("history-select-row"),
+				h.Aria("label", t.T("history.items.select_all", nil)),
+				h.Checked(allState == SelectAllAll), h.OnChange(func() { toggleSelectAll() }))),
 			h.Th(t.T("history.items.col_title", nil)),
 			h.Th(t.T("history.items.col_origin", nil)),
 			h.Th(t.T("history.items.col_published", nil)),
@@ -569,6 +636,29 @@ func itemsTable(t Catalog, s itemsLoadState, sel *Selection,
 	)
 }
 
+// sameItemFilter reports whether two filters would produce the same request.
+// Times are compared by VALUE: they are pointers, so == would compare
+// addresses and call every filter different from every other.
+func sameItemFilter(a, b ItemFilter) bool {
+	return a.Query == b.Query &&
+		a.FeedID == b.FeedID &&
+		a.Origin == b.Origin &&
+		a.DeletedFilter == b.DeletedFilter &&
+		sameTimePtr(a.PublishedAfter, b.PublishedAfter) &&
+		sameTimePtr(a.PublishedBefore, b.PublishedBefore)
+}
+
+func sameTimePtr(a, b *time.Time) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return a.Equal(*b)
+	}
+}
+
 // itemStatusClass picks the status pill's tone.
 func itemStatusClass(deleted bool) string {
 	if deleted {
@@ -582,6 +672,11 @@ func itemRow(t Catalog, it *affv1.Item, selected bool, toggleSelect func(int64),
 	onCorrection func(*affv1.Item, string, string, string), onToggleRev func(*affv1.Item),
 	showRev bool, renderRevPanel func(*affv1.Item) ui.Node) ui.Node {
 
+	// Per-row state is legal here: MapKeyedComponent gives every row its own
+	// fiber (see its call site's comment).
+	kebabOpen := ui.UseState(false)
+	correctionOpen := ui.UseState(false)
+
 	deleted := it.DeletedAt != nil
 	statusKey := "history.items.status.published"
 	if deleted {
@@ -590,7 +685,12 @@ func itemRow(t Catalog, it *affv1.Item, selected bool, toggleSelect func(int64),
 
 	return h.Fragment(
 		h.Tr(
-			h.Td(h.Input(h.Type("checkbox"), h.Checked(selected), h.OnChange(func() { toggleSelect(it.Id) }))),
+			// Named and sized. Twenty-five 13px checkboxes with no accessible
+			// name are both a screen-reader dead end ("checkbox, checkbox,
+			// checkbox") and a miss waiting to happen with a mouse.
+			h.Td(h.Input(h.Type("checkbox"), h.ClassStr("history-select-row"),
+				h.Aria("label", t.T("history.items.select_row", map[string]any{"title": it.Title})),
+				h.Checked(selected), h.OnChange(func() { toggleSelect(it.Id) }))),
 			h.Td(it.Title),
 			h.Td(originLabel(t, it.Origin)),
 			h.Td(formatTimestamp(it.PublishedAt)),
@@ -600,38 +700,69 @@ func itemRow(t Catalog, it *affv1.Item, selected bool, toggleSelect func(int64),
 			// is status — rendered plain body text. The word stays: colour is
 			// the second encoding, never the only one.
 			h.Td(h.Span(h.ClassStr(itemStatusClass(deleted)), h.Text(t.T(statusKey, nil)))),
-			h.Td(
-				h.Div(h.ClassStr("history-kebab"),
-					kebabTrigger(t),
-					h.Div(h.ClassStr("history-kebab-menu"),
-						h.Unless(deleted, h.Button(h.Type("button"), h.OnClick(func() { onEdit(it) }), t.T("history.items.edit", nil))),
-						h.Unless(deleted, correctionButton(t, it, onCorrection)),
-						h.Button(h.Type("button"), h.OnClick(func() { onToggleRev(it) }), t.T("history.items.revisions", nil)),
-						h.Unless(deleted, h.Button(h.Type("button"), h.ClassStr("history-kebab-danger"), h.OnClick(func() { onDelete(it) }), t.T("history.items.delete", nil))),
-						h.If(deleted, h.Button(h.Type("button"), h.OnClick(func() { onRestore(it) }), t.T("history.items.restore", nil))),
-					),
-				),
-			),
+			h.Td(rowKebab(t, "history-item-kebab-"+intToStr(int(it.Id)), it.Title,
+				kebabOpen.Get(), kebabOpen.Set, itemKebabItems(it, deleted,
+					onEdit, onDelete, onRestore, onToggleRev,
+					func() { correctionOpen.Set(true) }))),
 		),
 		// String, and its own class — same defect and same fix as runs_ui.go's
 		// expanded row; see that call site's comment.
 		h.If(showRev, h.Tr(h.Td(h.ClassStr("history-run-log-cell"), h.Attr("colspan", "6"), renderRevPanel(it)))),
+		// The correction form opens UNDER the row, like the revisions panel
+		// beside it — it used to live inside the kebab menu itself, which
+		// made a dropdown that grew a four-field form when you clicked one of
+		// its items.
+		h.If(correctionOpen.Get(), h.Tr(h.Td(h.ClassStr("history-run-log-cell"), h.Attr("colspan", "6"),
+			correctionPanel(t, it, onCorrection, func() { correctionOpen.Set(false) })))),
 	)
 }
 
-func correctionButton(t Catalog, it *affv1.Item, onCorrection func(*affv1.Item, string, string, string)) ui.Node {
+// itemKebabItems builds one row's menu. Order matters: §12.4 wants "publish
+// a correction" next to delete rather than three menus away, and
+// web/ui.OrderKebabItems moves the destructive entries to the end, so
+// correction lands immediately above delete.
+func itemKebabItems(it *affv1.Item, deleted bool,
+	onEdit func(*affv1.Item), onDelete func(*affv1.Item), onRestore func(*affv1.Item),
+	onToggleRev func(*affv1.Item), onCorrection func(),
+) []affui.KebabItem {
+	id := intToStr(int(it.Id))
+	items := make([]affui.KebabItem, 0, 4)
+	if !deleted {
+		items = append(items,
+			affui.KebabItem{ID: "history-item-edit-" + id, LabelKey: "history.items.edit",
+				OnSelect: func() { onEdit(it) }},
+			affui.KebabItem{ID: "history-item-correct-" + id, LabelKey: "history.items.publish_correction",
+				OnSelect: onCorrection},
+		)
+	}
+	items = append(items, affui.KebabItem{
+		ID: "history-item-revisions-" + id, LabelKey: "history.items.revisions",
+		OnSelect: func() { onToggleRev(it) },
+	})
+	if deleted {
+		items = append(items, affui.KebabItem{
+			ID: "history-item-restore-" + id, LabelKey: "history.items.restore",
+			OnSelect: func() { onRestore(it) },
+		})
+	} else {
+		items = append(items, affui.KebabItem{
+			ID: "history-item-delete-" + id, LabelKey: "history.items.delete",
+			Danger: true, OnSelect: func() { onDelete(it) },
+		})
+	}
+	return items
+}
+
+// correctionPanel is the correction form, now a row-level panel rather than
+// something that unfolded inside a dropdown.
+func correctionPanel(t Catalog, it *affv1.Item, onCorrection func(*affv1.Item, string, string, string), onClose func()) ui.Node {
 	// PLAN.md §12.4: "Publish a correction sits next to Delete, not three
 	// menus away." It lives in the same kebab as delete (one menu, not
 	// three), immediately above it, and the button text plus the panel
 	// it opens both state that RSS has no retraction.
-	open := ui.UseState(false)
 	title := ui.UseState("Correction: " + it.Title)
 	summary := ui.UseState(it.SummaryText)
 	body := ui.UseState(it.BodyHtml)
-
-	if !open.Get() {
-		return h.Button(h.Type("button"), h.OnClick(func() { open.Set(true) }), t.T("history.items.publish_correction", nil))
-	}
 
 	return h.Div(h.ClassStr("history-correction-panel"),
 		h.P(t.T("history.items.no_retraction_notice", nil)),
@@ -643,9 +774,9 @@ func correctionButton(t Catalog, it *affv1.Item, onCorrection func(*affv1.Item, 
 		h.Textarea(h.OnInput(func(ev ui.InputEvent) { body.Set(ev.GetValue()) }), h.Text(body.Get())),
 		h.Button(h.Type("button"), h.OnClick(func() {
 			onCorrection(it, title.Get(), summary.Get(), body.Get())
-			open.Set(false)
+			onClose()
 		}), t.T("history.items.publish_correction_confirm", nil)),
-		h.Button(h.Type("button"), h.OnClick(func() { open.Set(false) }), t.T("history.cancel", nil)),
+		h.Button(h.Type("button"), h.OnClick(onClose), t.T("history.cancel", nil)),
 	)
 }
 

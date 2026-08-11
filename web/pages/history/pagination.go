@@ -81,3 +81,86 @@ func (c *PageCursor) Reset() {
 	c.tokens = []string{""}
 	c.index = 0
 }
+
+// PageNumber is the 1-based page the cursor is on, for display.
+func (c *PageCursor) PageNumber() int { return c.index + 1 }
+
+// Visited is how many pages the cursor holds tokens for, i.e. the highest
+// page reachable without fetching anything new.
+//
+// This is NOT the number of pages that exist — the server's total_count
+// answers that. It is the number that can be jumped to INSTANTLY, which is a
+// different and equally necessary fact: an opaque cursor is only obtainable
+// by having received it, so page 9 is unreachable until pages 4 through 8
+// have each been fetched for their tokens. A jump control that offered 9 and
+// then silently did nothing would be worse than one that shows what it can
+// actually do.
+func (c *PageCursor) Visited() int { return len(c.tokens) }
+
+// CanJumpTo reports whether page (1-based) is one this cursor already holds a
+// token for.
+func (c *PageCursor) CanJumpTo(page int) bool {
+	return page >= 1 && page <= len(c.tokens)
+}
+
+// JumpTo moves to a already-visited page (1-based), reporting whether it
+// moved. A page the cursor has no token for is refused rather than
+// approximated: requesting the wrong token returns a valid-looking page of
+// the wrong rows, which is the one failure mode a pager must not have.
+func (c *PageCursor) JumpTo(page int) bool {
+	if !c.CanJumpTo(page) {
+		return false
+	}
+	c.index = page - 1
+	return true
+}
+
+// TotalPages converts a server total_count into a page count.
+//
+// Zero rows is one page, not zero: the table still renders, with its empty
+// state, and "page 1 of 0" is a self-contradiction an operator has to stop
+// and parse. A non-positive pageSize would divide by zero, so it falls back
+// to the same default the request itself would have been clamped to.
+func TotalPages(totalCount int64, pageSize int32) int {
+	if pageSize <= 0 {
+		pageSize = DefaultPageSize
+	}
+	if totalCount <= 0 {
+		return 1
+	}
+	pages := totalCount / int64(pageSize)
+	if totalCount%int64(pageSize) != 0 {
+		pages++
+	}
+	return int(pages)
+}
+
+// jumpWindow picks which page numbers to draw, centred on the current page and
+// clamped to the ends so the control never renders fewer buttons than it could
+// (a window centred on page 1 would otherwise waste half its slots on pages
+// that do not exist).
+func jumpWindow(page, total, size int) (first, last int) {
+	if total < 1 {
+		total = 1
+	}
+	if size < 1 {
+		size = 1
+	}
+	if total <= size {
+		return 1, total
+	}
+	half := size / 2
+	first = page - half
+	if first < 1 {
+		first = 1
+	}
+	last = first + size - 1
+	if last > total {
+		last = total
+		first = last - size + 1
+		if first < 1 {
+			first = 1
+		}
+	}
+	return first, last
+}

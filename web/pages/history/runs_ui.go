@@ -3,8 +3,14 @@
 package history
 
 import (
+	"github.com/monstercameron/GoWebComponents/v5/router"
+
+	affui "github.com/monstercameron/AnimeFeedFlux/web/ui"
+
 	"context"
 	"strconv"
+	"strings"
+	"time"
 
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
 	"github.com/monstercameron/GoWebComponents/v5/i18n"
@@ -33,6 +39,10 @@ type runsLoadState struct {
 	// not a cursor move: see the "load-ok" case below for why loading a
 	// page must not itself advance the cursor.
 	nextTk string
+	// total is the server's total_count for the CURRENT filters: how many
+	// runs match, ignoring paging. It is what turns Previous/Next into
+	// "page 3 of 9" — a cursor alone cannot know how many pages exist.
+	total  int64
 	logs   map[int64]string // populated by expand-row fetch
 	expand map[int64]bool
 }
@@ -42,6 +52,7 @@ type runsAction struct {
 	err    error
 	runs   []*affv1.Run
 	nextTk string
+	total  int64
 	runID  int64
 	log    string
 }
@@ -66,6 +77,7 @@ func runsReducer(s runsLoadState, a runsAction) runsLoadState {
 		// first unreachable. Found 2026-08-10 by looking at the rendered
 		// pager: "Previous" and "Refresh", no "Next".
 		s.nextTk = a.nextTk
+		s.total = a.total
 	case "next-page":
 		s.cursor.Advance(a.nextTk)
 	case "load-err":
@@ -99,7 +111,27 @@ func runsReducer(s runsLoadState, a runsAction) runsLoadState {
 
 // RunsTab renders the Runs tab (PLAN.md §12.4, TODOS.md D3-02..D3-07).
 func RunsTab(props RunsTabProps) ui.Node {
-	filter := ui.UseState(RunFilter{})
+	// The feed filter can arrive in the URL: /history/runs?feed=3.
+	//
+	// That is what makes "show me this feed's runs" a link rather than an
+	// instruction — the feed rows on /generate point here, and the address is
+	// shareable and survives a reload. Without it, per-feed run history was
+	// reachable only by navigating to History and re-choosing the feed from a
+	// menu, which is exactly the step nobody takes when they want to know
+	// whether the run they just started worked.
+	query := router.UseQuery()
+	queryFeedID := parseInt64(query.Get("feed"))
+	filter := ui.UseState(RunFilter{FeedID: queryFeedID})
+	// Applied on change as well as at mount, so navigating here from another
+	// feed's row while the tab is already open re-filters instead of showing
+	// the previous feed's runs.
+	ui.UseEffect(func() func() {
+		if f := filter.Get(); f.FeedID != queryFeedID {
+			f.FeedID = queryFeedID
+			filter.Set(f)
+		}
+		return nil
+	}, queryFeedID)
 	store := ui.UseReducer(runsReducer, runsLoadState{cursor: NewPageCursor(), expand: map[int64]bool{}, logs: map[int64]string{}})
 	pendingDelete := ui.UseState(int64(0))
 	// actionErr is Delete's own mutation error (TODOS.md D0-10) — distinct
@@ -111,24 +143,35 @@ func RunsTab(props RunsTabProps) ui.Node {
 	// See asyncdispatch.go: reducer dispatches made from a goroutine update
 	// the state but schedule no render.
 	pump := useRenderPump()
+	// beat keeps renders (and therefore timers) flowing for as long as a load
+	// is outstanding. Without it a wedged request never even reaches
+	// retryRead's own timeout — the timer that would fire it is waiting on
+	// the same stalled render loop. See web/ui/pump.go.
+	beat := affui.UsePump()
+	// Which row's ⋯ menu is open, 0 for none — held here so opening one
+	// closes the last.
+	kebabOpen := ui.UseState(int64(0))
 
 	load := func(pageToken string) {
 		store.Dispatch(runsAction{kind: "load-start"})
 		req := BuildRunHistoryRequest(filter.Get(), pageToken, DefaultPageSize)
-		retryRead(
-			func() (*affv1.RunServiceHistoryResponse, error) {
-				return props.Client.History(context.Background(), req)
-			},
-			func(resp *affv1.RunServiceHistoryResponse, err error) {
-				if err != nil {
-					store.Dispatch(runsAction{kind: "load-err", err: err})
+		beat.Run(func(done func()) {
+			retryRead(
+				func() (*affv1.RunServiceHistoryResponse, error) {
+					return props.Client.History(context.Background(), req)
+				},
+				func(resp *affv1.RunServiceHistoryResponse, err error) {
+					done()
+					if err != nil {
+						store.Dispatch(runsAction{kind: "load-err", err: err})
+						pump.bump()
+						return
+					}
+					store.Dispatch(runsAction{kind: "load-ok", runs: resp.Runs, nextTk: resp.NextPageToken, total: resp.GetTotalCount()})
 					pump.bump()
-					return
-				}
-				store.Dispatch(runsAction{kind: "load-ok", runs: resp.Runs, nextTk: resp.NextPageToken})
-				pump.bump()
-			},
-		)
+				},
+			)
+		})
 	}
 
 	// The feed list behind the filter menu. Loaded once the session is up,
@@ -239,24 +282,41 @@ func RunsTab(props RunsTabProps) ui.Node {
 			mutationErrorText(props.T, actionErr.Get()),
 		)),
 		renderScreenState(props.T, screen, func() ui.Node {
-			return runsTable(props.T, s, toggleExpand, requestDelete)
+			return runsTable(props.T, s, toggleExpand, requestDelete, kebabOpen.Get(),
+				func(id int64, open bool) {
+					if open {
+						kebabOpen.Set(id)
+						return
+					}
+					if kebabOpen.Get() == id {
+						kebabOpen.Set(0)
+					}
+				})
 		}),
-		h.Div(
-			h.ClassStr("history-pager"),
-			h.Button(h.Type("button"), h.Disabled(!s.cursor.HasPrevious()), h.OnClick(func() {
+		renderPager(pagerProps{
+			T:          props.T,
+			Page:       s.cursor.PageNumber(),
+			TotalPages: TotalPages(s.total, DefaultPageSize),
+			VisitedN:   s.cursor.Visited(),
+			HasPrev:    s.cursor.HasPrevious(),
+			// Next is disabled on the last page, which is exactly when the
+			// server stops returning a next_page_token.
+			HasNext: s.nextTk != "",
+			OnPrev: func() {
 				s.cursor.Back()
 				load(s.cursor.Current())
-			}), props.T.T("history.pager.previous", nil)),
-			// Next: disabled on the last page, which is exactly when the
-			// server stops returning a next_page_token.
-			h.Button(h.Type("button"), h.Disabled(s.nextTk == ""), h.OnClick(func() {
+			},
+			OnNext: func() {
 				s.cursor.Advance(s.nextTk)
 				load(s.cursor.Current())
-			}), props.T.T("history.pager.next", nil)),
-			h.Button(h.Type("button"), h.OnClick(func() {
-				load(s.cursor.Current())
-			}), props.T.T("history.pager.refresh", nil)),
-		),
+			},
+			OnJump: func(page int) {
+				if s.cursor.JumpTo(page) {
+					load(s.cursor.Current())
+				}
+			},
+			OnRefresh: func() { load(s.cursor.Current()) },
+		}),
 		ui.CreateElement(TypedConfirm, TypedConfirmProps{
 			T:          props.T,
 			Open:       pendingDelete.Get() != 0,
@@ -273,7 +333,7 @@ func RunsTab(props RunsTabProps) ui.Node {
 	)
 }
 
-func runsTable(t Catalog, s runsLoadState, toggleExpand func(int64), deleteRun func(int64)) ui.Node {
+func runsTable(t Catalog, s runsLoadState, toggleExpand func(int64), deleteRun func(int64), kebabOpen int64, onKebabOpen func(int64, bool)) ui.Node {
 	return h.Table(
 		h.ClassStr("history-table history-runs-table"),
 		h.Thead(h.Tr(
@@ -299,23 +359,24 @@ func runsTable(t Catalog, s runsLoadState, toggleExpand func(int64), deleteRun f
 			// computed here (page position, 1-based) rather than plumbed
 			// through as a fifth reducer field — it is purely a display
 			// convenience over s.runs' already-fixed order, not state.
-			runRowsWithNumbers(t, s, toggleExpand, deleteRun),
+			runRowsWithNumbers(t, s, toggleExpand, deleteRun, kebabOpen, onKebabOpen),
 		),
 	)
 }
 
-func runRowsWithNumbers(t Catalog, s runsLoadState, toggleExpand func(int64), deleteRun func(int64)) []ui.Node {
+func runRowsWithNumbers(t Catalog, s runsLoadState, toggleExpand func(int64), deleteRun func(int64), kebabOpen int64, onKebabOpen func(int64, bool)) []ui.Node {
 	nodes := make([]ui.Node, 0, len(s.runs))
 	for i, r := range s.runs {
-		nodes = append(nodes, runRow(t, r, i+1, s.expand[r.Id], s.logs[r.Id], toggleExpand, deleteRun))
+		nodes = append(nodes, runRow(t, r, i+1, s.expand[r.Id], s.logs[r.Id], toggleExpand, deleteRun,
+			kebabOpen == r.Id, onKebabOpen))
 	}
 	return nodes
 }
 
-func runRow(t Catalog, r *affv1.Run, rowNumber int, expanded bool, log string, toggleExpand func(int64), deleteRun func(int64)) ui.Node {
+func runRow(t Catalog, r *affv1.Run, rowNumber int, expanded bool, log string, toggleExpand func(int64), deleteRun func(int64), kebabOpen bool, onKebabOpen func(int64, bool)) ui.Node {
 	duration := ""
 	if r.StartedAt != nil && r.FinishedAt != nil {
-		duration = r.FinishedAt.AsTime().Sub(r.StartedAt.AsTime()).String()
+		duration = formatRunDuration(r.FinishedAt.AsTime().Sub(r.StartedAt.AsTime()))
 	}
 	runID := r.Id
 	// A failed run must be "findable by scanning, not by reading" (J5) —
@@ -353,12 +414,14 @@ func runRow(t Catalog, r *affv1.Run, rowNumber int, expanded bool, log string, t
 					h.Aria("expanded", boolAttr(expanded)),
 					h.OnClick(func() { toggleExpand(runID) }),
 					t.T(expandLabelKey(expanded), nil)),
-				h.Div(h.ClassStr("history-kebab"),
-					kebabTrigger(t),
-					h.Div(h.ClassStr("history-kebab-menu"),
-						h.Button(h.Type("button"), h.ClassStr("history-kebab-danger"), h.OnClick(func() { deleteRun(runID) }), t.T("history.runs.delete", nil)),
-					),
-				),
+				rowKebab(t, "history-run-kebab-"+intToStr(int(runID)), intToStr(rowNumber),
+					kebabOpen, func(open bool) { onKebabOpen(runID, open) },
+					[]affui.KebabItem{{
+						ID:       "history-run-delete-" + intToStr(int(runID)),
+						LabelKey: "history.runs.delete",
+						Danger:   true,
+						OnSelect: func() { deleteRun(runID) },
+					}}),
 			),
 		),
 		// colspan as a STRING, and a class of its own.
@@ -375,6 +438,7 @@ func runRow(t Catalog, r *affv1.Run, rowNumber int, expanded bool, log string, t
 		// exclude this cell.
 		h.If(expanded, h.Tr(h.Td(h.ClassStr("history-run-log-cell"), h.Attr("colspan", "9"),
 			h.Div(h.ClassStr("history-run-log"),
+				runDetailFacts(t, r, duration),
 				h.H3(t.T("history.runs.reject_reasons", nil)),
 				h.IfElse(len(r.RejectReasons) == 0,
 					h.P(t.T("history.runs.no_rejects", nil)),
@@ -386,7 +450,12 @@ func runRow(t Catalog, r *affv1.Run, rowNumber int, expanded bool, log string, t
 					})),
 				),
 				h.H3(t.T("history.runs.log", nil)),
-				h.Pre(log),
+				// An empty <pre> is an unexplained blank space where the most
+				// important part of this panel should be. Runs that recorded
+				// no log say so.
+				h.IfElse(strings.TrimSpace(log) == "",
+					h.P(t.T("history.runs.no_log", nil)),
+					h.Pre(log)),
 			),
 		))),
 	)
@@ -434,6 +503,111 @@ func runTriggerLabel(t Catalog, tr affv1.RunTrigger) string {
 		return t.T("history.runs.trigger.manual", nil)
 	}
 	return t.T("history.runs.trigger.unspecified", nil)
+}
+
+// runStamp renders an absolute instant for the diagnostics panel.
+//
+// UTC with seconds, deliberately. web/i18n's FormatDateTime is minute-
+// precision and locale-styled, which is right for "last built 3 minutes ago"
+// and wrong here: a run can take under a second, the database stores UTC, and
+// the log lines beside this are UTC too. A panel for working out what happened
+// should agree with the other timestamps someone will hold it against, without
+// a mental timezone conversion in the middle.
+func runStamp(ts time.Time) string {
+	return ts.UTC().Format("2006-01-02 15:04:05") + " UTC"
+}
+
+// runDetailFacts is the header of an expanded run: what it was, when it ran,
+// what it cost, and — when there is one — the error verbatim.
+//
+// It exists because the expanded panel opened straight onto a reject-reason
+// list and a log dump, so the row you had just expanded no longer told you
+// what it was — the columns were scrolled out of sight above it, and the log
+// alone does not say whether the run succeeded, what it cost, or which class
+// of error it hit (§8's taxonomy, which is the difference between "retry" and
+// "fix the recipe"). A failed run expanded to "Nothing was rejected in this
+// run.", which is true and the least useful true thing available.
+//
+// Three things here are not repeats of the table row above:
+//
+//   - The error MESSAGE. Run.error carries the provider's own text and was
+//     rendered nowhere in the app; the Error column shows error_kind, a
+//     classification, never the diagnosis.
+//   - Absolute start/finish stamps. The row's "3.2s" says how long, never
+//     when, and "when" is what a run is correlated against a provider
+//     incident or a log by.
+//   - heartbeat_at, shown only while unfinished. It is on the wire precisely
+//     to separate "still working" from "the process died and left this row
+//     open" (§10/§15), and nothing displayed it.
+func runDetailFacts(t Catalog, r *affv1.Run, duration string) ui.Node {
+	num := func(v float64, dp int) string {
+		return i18n.FormatNumber("en", v, i18n.NumberOptions{MaximumFractionDigits: dp})
+	}
+
+	facts := []struct{ labelKey, value string }{
+		{"history.runs.col_status", runStatusLabel(t, r.GetStatus())},
+		{"history.runs.col_trigger", runTriggerLabel(t, r.GetTrigger())},
+	}
+	if r.GetStartedAt() != nil {
+		facts = append(facts, struct{ labelKey, value string }{
+			"history.runs.detail.started", runStamp(r.GetStartedAt().AsTime())})
+	}
+	if r.GetFinishedAt() != nil {
+		facts = append(facts, struct{ labelKey, value string }{
+			"history.runs.detail.finished", runStamp(r.GetFinishedAt().AsTime())})
+	} else if r.GetHeartbeatAt() != nil {
+		facts = append(facts, struct{ labelKey, value string }{
+			"history.runs.detail.heartbeat", runStamp(r.GetHeartbeatAt().AsTime())})
+	}
+	facts = append(facts,
+		struct{ labelKey, value string }{"history.runs.detail.duration", duration},
+		struct{ labelKey, value string }{"history.runs.col_added_rejected",
+			intToStr(int(r.GetItemsAdded())) + " / " + intToStr(int(r.GetItemsRejected()))},
+		struct{ labelKey, value string }{"history.runs.detail.tokens_in", num(float64(r.GetTokensIn()), 0)},
+		struct{ labelKey, value string }{"history.runs.detail.tokens_out", num(float64(r.GetTokensOut()), 0)},
+		struct{ labelKey, value string }{"history.runs.detail.tokens_total",
+			num(float64(r.GetTokensIn())+float64(r.GetTokensOut()), 0)},
+		// Six places, not the table's four: a run of this app can cost a small
+		// fraction of a cent, and rounding that to $0.0000 is how a per-run
+		// cost stops being auditable at exactly the scale it matters.
+		struct{ labelKey, value string }{"history.runs.detail.est_cost",
+			"$" + num(r.GetEstCostUsd(), 6)},
+	)
+
+	nodes := make([]any, 0, len(facts)+6)
+	nodes = append(nodes, h.ClassStr("history-run-facts"))
+	for _, f := range facts {
+		if f.value == "" {
+			continue
+		}
+		nodes = append(nodes,
+			h.Div(h.ClassStr("history-run-fact"),
+				h.Span(h.ClassStr("history-run-fact__label"), t.T(f.labelKey, nil)),
+				h.Span(h.ClassStr("history-run-fact__value"), h.Text(f.value)),
+			))
+	}
+	// The error, when there is one: kind first (it decides what to do about
+	// it), then the message.
+	if r.GetErrorKind() != affv1.ErrorKind_ERROR_KIND_UNSPECIFIED || r.GetError() != "" {
+		nodes = append(nodes,
+			h.Div(h.ClassStr("history-run-fact"),
+				h.Span(h.ClassStr("history-run-fact__label"), t.T("history.runs.detail.error_kind", nil)),
+				h.Span(h.ClassStr("history-run-fact__value"), h.Text(errorKindLabel(t, r.GetErrorKind()))),
+			))
+		// <pre>, not a span: provider errors carry their own line breaks and
+		// quoting, and reflowing them is how the detail that mattered gets
+		// lost.
+		if msg := r.GetError(); msg != "" {
+			nodes = append(nodes,
+				h.Div(h.ClassStr("history-run-fact history-run-fact--wide"),
+					h.Span(h.ClassStr("history-run-fact__label"), t.T("history.runs.detail.error_message", nil)),
+					h.Pre(msg),
+				))
+		}
+	}
+	nodes = append(nodes,
+		h.P(h.ClassStr("history-run-facts__note"), t.T("history.runs.detail.cost_estimated", nil)))
+	return h.Div(nodes...)
 }
 
 func errorKindLabel(t Catalog, ek affv1.ErrorKind) string {
@@ -486,5 +660,27 @@ func renderScreenState(t Catalog, s ScreenState, renderPopulated func() ui.Node)
 		return h.P(h.ClassStr("history-state history-state--disconnected"), t.T("history.state.disconnected", nil))
 	default:
 		return renderPopulated()
+	}
+}
+
+// formatRunDuration renders how long a run took, for people.
+//
+// time.Duration.String() produced "13.261957s", "908.649ms" and "508.6µs" in
+// the same column — six significant figures of precision nobody asked for, in
+// three different units, on a screen used to scan two dozen rows. This keeps
+// the unit but not the noise: sub-second runs read in milliseconds, the rest
+// to one decimal place, and anything over a minute in minutes and seconds.
+func formatRunDuration(d time.Duration) string {
+	switch {
+	case d <= 0:
+		return ""
+	case d < time.Second:
+		return strconv.Itoa(int(d.Round(time.Millisecond).Milliseconds())) + "ms"
+	case d < time.Minute:
+		return strconv.FormatFloat(d.Round(100*time.Millisecond).Seconds(), 'f', 1, 64) + "s"
+	default:
+		m := int(d / time.Minute)
+		sec := int((d % time.Minute).Round(time.Second).Seconds())
+		return strconv.Itoa(m) + "m " + strconv.Itoa(sec) + "s"
 	}
 }

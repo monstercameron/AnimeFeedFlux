@@ -586,13 +586,25 @@ func (s *ItemServer) List(ctx context.Context, req *affv1.ItemServiceListRequest
 	default: // UNSPECIFIED and EXCLUDE_DELETED both default to hiding tombstones.
 		where = append(where, "deleted_at IS NULL")
 	}
-	if q := strings.TrimSpace(req.GetQuery()); q != "" {
+	if match := itemFTSQuery(req.GetQuery()); match != "" {
 		// items_fts is external-content FTS5 keyed by rowid == items.id
 		// (migrations/0003_fts.sql), kept in sync by triggers — a plain join
 		// on rowid is enough, no denormalized copy to go stale.
+		//
+		// The query is BUILT from what was typed, not passed through: see
+		// itemFTSQuery for why (prefix matching, and keeping FTS5's operator
+		// syntax out of a plain text box). A search that reduces to nothing
+		// searchable applies no filter at all.
 		where = append(where, "id IN (SELECT rowid FROM items_fts WHERE items_fts MATCH ?)")
-		args = append(args, q)
+		args = append(args, match)
 	}
+	// Snapshotted BEFORE the cursor condition is added: total_count answers
+	// "how many match these filters", and folding the cursor in would count
+	// only what is left after the current page, so the total would shrink as
+	// the operator pages forward and "page 3 of 9" would become "page 3 of 6".
+	filterWhere := append([]string(nil), where...)
+	filterArgs := append([]any(nil), args...)
+
 	if tok := req.GetPageToken(); tok != "" {
 		afterPub, afterID, err := itemDecodePageToken(tok)
 		if err != nil {
@@ -600,6 +612,11 @@ func (s *ItemServer) List(ctx context.Context, req *affv1.ItemServiceListRequest
 		}
 		where = append(where, "(published_at < ? OR (published_at = ? AND id < ?))")
 		args = append(args, itemFormatTime(afterPub), itemFormatTime(afterPub), afterID)
+	}
+
+	total, err := itemCountMatching(ctx, s.st.Reader(), filterWhere, filterArgs)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "rpc: counting items: %v", err)
 	}
 
 	query := `SELECT ` + itemSelectColumns + ` FROM items`
@@ -627,7 +644,7 @@ func (s *ItemServer) List(ctx context.Context, req *affv1.ItemServiceListRequest
 		return nil, status.Errorf(codes.Internal, "rpc: iterating items: %v", err)
 	}
 
-	resp := &affv1.ItemServiceListResponse{}
+	resp := &affv1.ItemServiceListResponse{TotalCount: total}
 	if len(items) > pageSize {
 		last := items[pageSize-1]
 		resp.NextPageToken = itemEncodePageToken(last.PublishedAt, last.ID)
@@ -1615,4 +1632,23 @@ func (s *ItemServer) RevertRevision(ctx context.Context, req *affv1.ItemServiceR
 	}
 
 	return &affv1.ItemServiceRevertRevisionResponse{Item: itemToProto(out)}, nil
+}
+
+// itemCountMatching counts every item matching the FILTERS, ignoring paging.
+//
+// Cursor paging cannot say how many pages exist — next_page_token reports
+// only whether one more does — so without this the pager can offer Next and
+// never "page 3 of 9". The cursor condition is deliberately excluded: counting
+// with it folded in would return how many rows remain after the current page,
+// so the total would shrink as the operator paged forward.
+func itemCountMatching(ctx context.Context, r store.Reader, where []string, args []any) (int64, error) {
+	query := `SELECT COUNT(*) FROM items`
+	if len(where) > 0 {
+		query += ` WHERE ` + strings.Join(where, " AND ")
+	}
+	var n int64
+	if err := r.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
