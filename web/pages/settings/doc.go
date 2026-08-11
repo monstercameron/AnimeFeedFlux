@@ -107,14 +107,20 @@
 //     saving Settings after this one silently wins, which is the
 //     documented behavior of the RPC this page calls, not a gap in this
 //     page.
-//  4. "Vacuum" (D4-10) has no backing RPC anywhere in proto/aff/v1 —
-//     SystemService has Stats/SetGenerationEnabled/GetSettings/
-//     UpdateSettings/Version/Backup and nothing else. The Data section
-//     therefore renders the vacuum control as present-but-unavailable
-//     (settings.data.vacuum.unavailable) rather than wiring it to
-//     nothing or omitting the section D4-10 explicitly asks for.
-//     Whichever wave adds a SystemService.Vacuum RPC should also update
-//     render_data.go's renderData to call it — proto/aff/v1 is outside
-//     this change's allowed paths (create/edit ONLY web/pages/settings/),
-//     so this package cannot add the RPC itself.
+//  4. "Vacuum" (D4-10) is now wired: SystemService.Vacuum exists
+//     (internal/rpc/system.go) and blocks for a real, size-dependent
+//     duration while holding SQLite's exclusive lock, refusing outright
+//     (codes.FailedPrecondition) while a generation run is in flight
+//     rather than contending for the single writer connection. Data's
+//     vacuum control (render_data.go's renderVacuumSection) sits behind
+//     the kebab with typed confirmation like this page's other
+//     destructive actions (confirm.go's ActionVacuum), warns how long the
+//     lock will likely block given the CURRENT database size before the
+//     admin confirms (format.go's EstimateVacuumDuration, a coarse bucket
+//     rather than a false-precision ETA), and reports before/after sizes
+//     plus the actual elapsed duration on return — "did that accomplish
+//     anything" is the only reason to ever run it. A rejected call renders
+//     the server's own message (e.g. the in-flight-run refusal) rather
+//     than a generic failure, the same settings.common.state.errorDetail
+//     convention screenWrapper already uses for section-level errors.
 package settings

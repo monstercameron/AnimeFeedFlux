@@ -9,16 +9,23 @@ import (
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	affui "github.com/monstercameron/AnimeFeedFlux/web/ui"
 )
 
 // renderSecurity is the Security section (D4-01..04): change password,
 // re-enroll TOTP, regenerate recovery codes, active sessions.
 func renderSecurity() ui.Node {
+	// D0-10/D-FLOW: mutations must be refused (never fail silently) while
+	// the shell is DISCONNECTED — this section has five (change password,
+	// re-enroll TOTP, regenerate recovery codes, revoke one, revoke all).
+	disconnected := isDisconnected()
+
 	// --- sessions list state ---
 	sessions := ui.UseState([]SessionRow(nil))
 	sessionsLoading := ui.UseState(true)
 	sessionsErr := ui.UseState(error(nil))
 	revokeAllVisible := ui.UseState(false)
+	revokeAllSubmitting := ui.UseState(false)
 
 	ui.UseEffect(func() func() {
 		loadSessions(sessions, sessionsLoading, sessionsErr)
@@ -41,12 +48,33 @@ func renderSecurity() ui.Node {
 
 	// --- recovery codes state ---
 	regenVisible := ui.UseState(false)
+	regenSubmitting := ui.UseState(false)
 	newCodes := ui.UseState([]string(nil))
-	remainingHint := ui.UseState(-1) // -1 = unknown until regenerated once this session
+	// -1 means "not yet known". It is filled from AuthService.Session on
+	// mount and updated after a regenerate, so the panel states the count
+	// the moment it loads rather than only after the operator has already
+	// used the button — which was the previous behaviour and left the card
+	// showing nothing but its own kebab.
+	remainingHint := ui.UseState(-1)
 	regenErr := ui.UseState(error(nil))
 
+	ui.UseEffect(func() func() {
+		go func() {
+			resp, err := deps.Auth.Session(bgContext(), &affv1.AuthServiceSessionRequest{})
+			if err != nil {
+				// Leave it unknown rather than claiming zero: "0 codes left"
+				// is an alarming, actionable statement (break-glass is the
+				// only way back in) and must never be produced by a failed
+				// read.
+				return
+			}
+			remainingHint.Set(int(resp.GetRemainingRecoveryCodes()))
+		}()
+		return nil
+	}, "security-recovery-count")
+
 	doChangePassword := func() {
-		if pwSubmitting.Get() {
+		if pwSubmitting.Get() || disconnected {
 			return
 		}
 		if err := ValidatePasswordLength(newPassword.Get()); err != nil {
@@ -55,6 +83,11 @@ func renderSecurity() ui.Node {
 		}
 		pwSubmitting.Set(true)
 		pwErr.Set(nil)
+		// Cleared on every ATTEMPT, not only on success. It was only ever
+		// set, never reset, so a failed attempt after a successful one
+		// rendered "Password changed" and the failure banner side by side —
+		// and the reassuring one is the one people read.
+		pwSuccess.Set(false)
 		go func() {
 			_, err := deps.Auth.ChangePassword(bgContext(), &affv1.AuthServiceChangePasswordRequest{
 				CurrentPassword: currentPassword.Get(),
@@ -78,7 +111,7 @@ func renderSecurity() ui.Node {
 	}
 
 	doReenrollTOTP := func() {
-		if reenrollSubmitting.Get() {
+		if reenrollSubmitting.Get() || disconnected {
 			return
 		}
 		reenrollSubmitting.Set(true)
@@ -98,12 +131,17 @@ func renderSecurity() ui.Node {
 	}
 
 	doRegenerateCodes := func() {
+		if regenSubmitting.Get() || disconnected {
+			return
+		}
+		regenSubmitting.Set(true)
 		regenErr.Set(nil)
 		go func() {
 			resp, err := deps.Auth.RegenerateRecoveryCodes(bgContext(), &affv1.AuthServiceRegenerateRecoveryCodesRequest{
 				CurrentPassword: currentPassword.Get(),
 				TotpCode:        totpCode.Get(),
 			})
+			regenSubmitting.Set(false)
 			if err != nil {
 				regenErr.Set(err)
 				return
@@ -115,6 +153,9 @@ func renderSecurity() ui.Node {
 	}
 
 	doRevokeOne := func(sessionID string) {
+		if disconnected {
+			return
+		}
 		go func() {
 			if _, err := deps.Auth.RevokeSession(bgContext(), &affv1.AuthServiceRevokeSessionRequest{SessionId: sessionID}); err == nil {
 				loadSessions(sessions, sessionsLoading, sessionsErr)
@@ -123,35 +164,68 @@ func renderSecurity() ui.Node {
 	}
 
 	doRevokeAll := func() {
+		if revokeAllSubmitting.Get() || disconnected {
+			return
+		}
+		revokeAllSubmitting.Set(true)
 		go func() {
-			if _, err := deps.Auth.RevokeAllSessions(bgContext(), &affv1.AuthServiceRevokeAllSessionsRequest{}); err == nil {
+			_, err := deps.Auth.RevokeAllSessions(bgContext(), &affv1.AuthServiceRevokeAllSessionsRequest{})
+			revokeAllSubmitting.Set(false)
+			if err == nil {
 				loadSessions(sessions, sessionsLoading, sessionsErr)
 			}
 		}()
 	}
 
-	rows := SortSessionsForDisplay(sessions.Get())
+	rows, hiddenRevoked := TrimRevoked(SortSessionsForDisplay(sessions.Get()))
 	sessionState := ComputeScreenState(ScreenInputs{
-		Loading:   sessionsLoading.Get(),
-		Err:       sessionsErr.Get(),
-		ItemCount: len(rows),
+		Loading:      sessionsLoading.Get(),
+		Err:          sessionsErr.Get(),
+		Disconnected: disconnected,
+		ItemCount:    len(rows),
 	})
 
-	sessionRows := make([]ui.Node, 0, len(rows))
+	sessionRows := make([]map[string]affui.Node, 0, len(rows))
+	sessionRowKeys := make([]string, 0, len(rows))
 	for _, row := range rows {
 		row := row
-		sessionRows = append(sessionRows, h.Tr(
-			h.Td(h.Text(row.UserAgent)),
-			h.Td(h.Text(row.IP)),
-			h.Td(h.Text(fmts().RelativeTime(row.LastSeenAt, time.Now()))),
-			h.Td(h.Text(t("settings.security.sessions.current", boolYesNo(row.IsCurrent)))),
-			h.Td(h.Show(!row.IsCurrent && !row.Revoked(), h.Button(
-				h.Type("button"),
-				h.OnClick(func() { doRevokeOne(row.ID) }),
-				h.Text(t("settings.security.sessions.revoke")),
-			))),
-		))
+		revokeCell := h.Fragment()
+		if !row.IsCurrent && !row.Revoked() {
+			revokeCell = affui.Button(affui.ButtonProps{
+				T: t, LabelKey: "settings.security.sessions.revoke", Variant: affui.ButtonSecondary,
+				Disabled: disconnected, OnClick: func() { doRevokeOne(row.ID) },
+			})
+		}
+		// A revoked row previously rendered identically to a live one — "No"
+		// in Current, nothing in Actions — so the only difference between
+		// "still logged in, cannot revoke from here" and "already ended" was
+		// invisible. The Actions cell now says which it is.
+		if row.Revoked() {
+			revokeCell = h.Span(h.ClassStr("af-session-revoked"),
+				h.Text(t("settings.security.sessions.revoked")))
+		}
+		sessionRows = append(sessionRows, map[string]affui.Node{
+			"device":   h.Text(row.UserAgent),
+			"ip":       h.Text(row.IP),
+			"lastSeen": h.Text(fmts().RelativeTime(row.LastSeenAt, time.Now())),
+			"current":  h.Text(t("settings.security.sessions.current", boolYesNo(row.IsCurrent))),
+			"actions":  revokeCell,
+		})
+		sessionRowKeys = append(sessionRowKeys, row.ID)
 	}
+
+	disconnectedNote := func() ui.Node {
+		return h.Show(disconnected, h.P(h.Role("status"), h.ClassStr("af-warning"), h.Text(t("settings.common.disconnectedReason"))))
+	}
+
+	revokeAllItem := disconnectedKebabItem(affui.KebabItem{
+		ID: "settings-sessions-revoke-all", LabelKey: "settings.security.sessions.revokeAll.action",
+		Danger: true, OnSelect: func() { revokeAllVisible.Set(true) },
+	}, disconnected)
+	regenItem := disconnectedKebabItem(affui.KebabItem{
+		ID: "settings-recovery-regenerate", LabelKey: "settings.security.recoveryCodes.regenerate.action",
+		Danger: true, OnSelect: func() { regenVisible.Set(true) },
+	}, disconnected)
 
 	return h.Div(
 		h.ClassStr("af-settings-section"),
@@ -161,22 +235,32 @@ func renderSecurity() ui.Node {
 		h.Section(
 			h.ClassStr("af-settings-card"),
 			h.H3(h.Text(t("settings.security.changePassword.title"))),
-			h.P(h.ClassStr("af-warning"), h.Text(t(RevokeAllWarningKey(ActionChangePassword)))),
+			h.P(h.Role("status"), h.ClassStr("af-warning"), h.Text(t(RevokeAllWarningKey(ActionChangePassword)))),
 			h.P(h.Text(t("settings.security.passwordPolicy.hint", PasswordGuidanceArgs()["min"], PasswordGuidanceArgs()["max"]))),
+			disconnectedNote(),
 			h.Form(
 				h.OnSubmit(func(e ui.FormEvent) { e.PreventDefault(); doChangePassword() }),
-				h.Label(h.Text(t("settings.security.changePassword.current")),
-					h.Input(h.Type("password"), h.Value(currentPassword.Get()),
-						h.OnInput(func(e ui.InputEvent) { currentPassword.Set(e.GetValue()) }))),
-				h.Label(h.Text(t("settings.security.changePassword.totp")),
-					h.Input(h.Type("text"), h.Value(totpCode.Get()),
-						h.OnInput(func(e ui.InputEvent) { totpCode.Set(e.GetValue()) }))),
-				h.Label(h.Text(t("settings.security.changePassword.new")),
-					h.Input(h.Type("password"), h.Value(newPassword.Get()),
-						h.OnInput(func(e ui.InputEvent) { newPassword.Set(e.GetValue()) }))),
-				h.Show(pwErr.Get() != nil, h.P(h.ClassStr("af-error"), h.Text(t("settings.security.changePassword.error")))),
-				h.Show(pwSuccess.Get(), h.P(h.ClassStr("af-success"), h.Text(t("settings.security.changePassword.success")))),
-				h.Button(h.Type("submit"), h.DisabledIf(pwSubmitting.Get()), h.Text(t("settings.security.changePassword.submit"))),
+				affui.Input(affui.InputProps{
+					T: t, ID: "settings-pw-current", LabelKey: "settings.security.changePassword.current",
+					Type: "password", Value: currentPassword.Get(), Disabled: pwSubmitting.Get(),
+					AutoComplete: "current-password", OnChange: func(v string) { currentPassword.Set(v) },
+				}),
+				affui.Input(affui.InputProps{
+					T: t, ID: "settings-pw-totp", LabelKey: "settings.security.changePassword.totp",
+					Value: totpCode.Get(), Disabled: pwSubmitting.Get(), Mono: true,
+					OnChange: func(v string) { totpCode.Set(v) },
+				}),
+				affui.Input(affui.InputProps{
+					T: t, ID: "settings-pw-new", LabelKey: "settings.security.changePassword.new",
+					Type: "password", Value: newPassword.Get(), Disabled: pwSubmitting.Get(),
+					AutoComplete: "new-password", OnChange: func(v string) { newPassword.Set(v) },
+				}),
+				h.Show(pwErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.security.changePassword.error")))),
+				h.Show(pwSuccess.Get(), h.P(h.Role("status"), h.Aria("live", "polite"), h.ClassStr("af-success"), h.Text(t("settings.security.changePassword.success")))),
+				affui.Button(affui.ButtonProps{
+					T: t, LabelKey: "settings.security.changePassword.submit", Variant: affui.ButtonPrimary,
+					Type: "submit", Disabled: disconnected, Busy: pwSubmitting.Get(),
+				}),
 			),
 		),
 
@@ -184,13 +268,19 @@ func renderSecurity() ui.Node {
 		h.Section(
 			h.ClassStr("af-settings-card"),
 			h.H3(h.Text(t("settings.security.reenrollTotp.title"))),
+			disconnectedNote(),
 			h.Form(
 				h.OnSubmit(func(e ui.FormEvent) { e.PreventDefault(); doReenrollTOTP() }),
-				h.Label(h.Text(t("settings.security.reenrollTotp.currentPassword")),
-					h.Input(h.Type("password"), h.Value(reenrollPassword.Get()),
-						h.OnInput(func(e ui.InputEvent) { reenrollPassword.Set(e.GetValue()) }))),
-				h.Show(reenrollErr.Get() != nil, h.P(h.ClassStr("af-error"), h.Text(t("settings.security.reenrollTotp.error")))),
-				h.Button(h.Type("submit"), h.DisabledIf(reenrollSubmitting.Get()), h.Text(t("settings.security.reenrollTotp.submit"))),
+				affui.Input(affui.InputProps{
+					T: t, ID: "settings-reenroll-pw", LabelKey: "settings.security.reenrollTotp.currentPassword",
+					Type: "password", Value: reenrollPassword.Get(), Disabled: reenrollSubmitting.Get(),
+					AutoComplete: "current-password", OnChange: func(v string) { reenrollPassword.Set(v) },
+				}),
+				h.Show(reenrollErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.security.reenrollTotp.error")))),
+				affui.Button(affui.ButtonProps{
+					T: t, LabelKey: "settings.security.reenrollTotp.submit", Variant: affui.ButtonPrimary,
+					Type: "submit", Disabled: disconnected, Busy: reenrollSubmitting.Get(),
+				}),
 			),
 			h.Show(provisioningURI.Get() != "", h.Div(
 				h.P(h.Text(t("settings.security.reenrollTotp.shownOnce"))),
@@ -201,22 +291,32 @@ func renderSecurity() ui.Node {
 		// Recovery codes
 		h.Section(
 			h.ClassStr("af-settings-card"),
-			h.H3(h.Text(t("settings.security.recoveryCodes.title"))),
+			// Heading and kebab on one row, matching Active sessions below.
+			// They were inconsistent: this card put its ⋯ AFTER the body
+			// text, so the one destructive action here floated under the
+			// content while the identical control one card down sat beside
+			// its heading. §12.6 puts destructive actions behind a kebab; it
+			// should be the same kebab, in the same place, both times.
+			h.Div(h.ClassStr("af-settings-card-header"),
+				h.H3(h.Text(t("settings.security.recoveryCodes.title"))),
+				kebabUI(kebabUIProps{
+					ID: "settings-recovery-kebab", LabelKey: "kebab.actionsFor",
+					LabelArgs: []any{t("settings.security.recoveryCodes.title")},
+					Items:     []affui.KebabItem{regenItem},
+				}),
+			),
 			h.Show(remainingHint.Get() >= 0, h.P(h.Text(t("settings.security.recoveryCodes.remaining", remainingHint.Get())))),
-			h.Show(RecoveryCodesLow(remainingHint.Get()) && remainingHint.Get() >= 0, h.P(h.ClassStr("af-warning"), h.Text(t("settings.security.recoveryCodes.lowNag")))),
-			kebabMenu([]kebabItem{{
-				label:   t("settings.security.recoveryCodes.regenerate.action"),
-				danger:  true,
-				onClick: func() { regenVisible.Set(true) },
-			}}),
-			confirmModal(confirmModalProps{
-				Visible:   regenVisible.Get(),
-				PromptKey: "settings.security.recoveryCodes.regenerate.prompt",
-				Word:      t(ConfirmationWordKey(ActionRegenerateRecoveryCodes)),
+			h.Show(RecoveryCodesLow(remainingHint.Get()) && remainingHint.Get() >= 0, h.P(h.Role("status"), h.ClassStr("af-warning"), h.Text(t("settings.security.recoveryCodes.lowNag")))),
+			disconnectedNote(),
+			confirmUI(confirmUIProps{
+				ID: "settings-recovery-confirm", TitleKey: "settings.security.recoveryCodes.regenerate.confirmTitle",
+				MessageKey:     "settings.security.recoveryCodes.regenerate.prompt",
+				RequiredPhrase: t(ConfirmationWordKey(ActionRegenerateRecoveryCodes)),
+				Open:           regenVisible.Get(), Busy: regenSubmitting.Get(),
 				OnConfirm: func() { regenVisible.Set(false); doRegenerateCodes() },
 				OnCancel:  func() { regenVisible.Set(false) },
 			}),
-			h.Show(regenErr.Get() != nil, h.P(h.ClassStr("af-error"), h.Text(t("settings.security.recoveryCodes.error")))),
+			h.Show(regenErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.security.recoveryCodes.error")))),
 			h.Show(len(newCodes.Get()) > 0, renderRecoveryCodeList(newCodes.Get())),
 		),
 
@@ -226,30 +326,50 @@ func renderSecurity() ui.Node {
 			h.Div(
 				h.ClassStr("af-settings-card-header"),
 				h.H3(h.Text(t("settings.security.sessions.title"))),
-				h.Show(RevocableSessionCount(rows) > 1, kebabMenu([]kebabItem{{
-					label:   t("settings.security.sessions.revokeAll.action"),
-					danger:  true,
-					onClick: func() { revokeAllVisible.Set(true) },
-				}})),
+				h.Show(RevocableSessionCount(rows) > 1, kebabUI(kebabUIProps{
+					ID: "settings-sessions-kebab", LabelKey: "kebab.actionsFor",
+					LabelArgs: []any{t("settings.security.sessions.title")},
+					Items:     []affui.KebabItem{revokeAllItem},
+				})),
 			),
-			h.P(h.ClassStr("af-warning"), h.Text(t(RevokeAllWarningKey(ActionRevokeAllSessions)))),
-			confirmModal(confirmModalProps{
-				Visible:   revokeAllVisible.Get(),
-				PromptKey: "settings.security.sessions.revokeAll.prompt",
-				Word:      t(ConfirmationWordKey(ActionRevokeAllSessions)),
+			h.P(h.Role("status"), h.ClassStr("af-warning"), h.Text(t(RevokeAllWarningKey(ActionRevokeAllSessions)))),
+			disconnectedNote(),
+			confirmUI(confirmUIProps{
+				ID: "settings-sessions-confirm", TitleKey: "settings.security.sessions.revokeAll.confirmTitle",
+				MessageKey:     "settings.security.sessions.revokeAll.prompt",
+				RequiredPhrase: t(ConfirmationWordKey(ActionRevokeAllSessions)),
+				Open:           revokeAllVisible.Get(), Busy: revokeAllSubmitting.Get(),
 				OnConfirm: func() { revokeAllVisible.Set(false); doRevokeAll() },
 				OnCancel:  func() { revokeAllVisible.Set(false) },
 			}),
-			screenWrapper(sessionState, sessionsErr.Get(), h.Table(
-				h.Thead(h.Tr(
-					h.Th(h.Text(t("settings.security.sessions.col.device"))),
-					h.Th(h.Text(t("settings.security.sessions.col.ip"))),
-					h.Th(h.Text(t("settings.security.sessions.col.lastSeen"))),
-					h.Th(h.Text(t("settings.security.sessions.col.current"))),
-					h.Th(h.Text(t("settings.security.sessions.col.actions"))),
-				)),
-				h.Tbody(sessionRows),
-			)),
+			// VirtualTable, not Table: this list gains a row on every sign-in
+			// and never loses one (revoked sessions stay, they just show no
+			// revoke action), so it is the one list on this page whose length
+			// is set by usage rather than by design — ~90 rows after a single
+			// afternoon on a dev box. Table would build, reconcile and lay out
+			// all of them for the ten a person can see.
+			screenWrapperRetry(sessionState, sessionsErr.Get(),
+				func() { loadSessions(sessions, sessionsLoading, sessionsErr) },
+				affui.VirtualTable(affui.VirtualTableProps{
+					T: t, ID: "settings-sessions-table", CaptionKey: "settings.security.sessions.caption",
+					Columns: []affui.TableColumn{
+						{ID: "device", LabelKey: "settings.security.sessions.col.device"},
+						{ID: "ip", LabelKey: "settings.security.sessions.col.ip", Mono: true},
+						{ID: "lastSeen", LabelKey: "settings.security.sessions.col.lastSeen"},
+						{ID: "current", LabelKey: "settings.security.sessions.col.current"},
+						{ID: "actions", LabelKey: "settings.security.sessions.col.actions"},
+					},
+					Rows: sessionRows, RowKeys: sessionRowKeys,
+					// The revoke button is taller than a line of text, so the row
+					// height is stated rather than defaulted — VirtualList sizes
+					// its spacers from this number, and a row that renders taller
+					// than it claims makes the scrollbar drift.
+					RowHeight: 44,
+				})),
+			// Say what was left out. A list that truncates silently is how
+			// someone concludes a session is gone when it is only off-list.
+			h.Show(hiddenRevoked > 0, h.P(h.ClassStr("af-field-help"),
+				h.Text(t("settings.security.sessions.hiddenRevoked", hiddenRevoked)))),
 		),
 	)
 }
@@ -267,9 +387,9 @@ func renderRecoveryCodeList(codes []string) ui.Node {
 
 func boolYesNo(b bool) string {
 	if b {
-		return t("common.yes")
+		return t("settings.common.yes")
 	}
-	return t("common.no")
+	return t("settings.common.no")
 }
 
 func loadSessions(sessions ui.State[[]SessionRow], loading ui.State[bool], errState ui.State[error]) {
@@ -291,8 +411,21 @@ func loadSessions(sessions ui.State[[]SessionRow], loading ui.State[bool], errSt
 				ExpiresAt:  s.GetExpiresAt().AsTime(),
 				IP:         s.GetIp(),
 				UserAgent:  s.GetUserAgent(),
-				RevokedAt:  s.GetRevokedAt().AsTime(),
-				IsCurrent:  s.GetIsCurrent(),
+				// protoTime, not .AsTime() directly.
+				//
+				// timestamppb's AsTime() on a NIL message returns
+				// time.Unix(0,0) — 1970-01-01 — and time.Time.IsZero() is
+				// only true for the year-1 zero value, so an unset
+				// revoked_at read as "revoked in 1970". Every session
+				// therefore reported itself revoked, including the caller's
+				// own live one: the Actions column was empty on every row
+				// and individual session revoke (§12.5, D4-04) was
+				// unreachable from the UI entirely. It looked like correct
+				// behaviour — "these are all revoked, so no revoke button" —
+				// which is why it survived until a row that was obviously
+				// live (current, last seen 0 seconds ago) still said so.
+				RevokedAt: protoTime(s.GetRevokedAt()),
+				IsCurrent: s.GetIsCurrent(),
 			})
 		}
 		sessions.Set(out)

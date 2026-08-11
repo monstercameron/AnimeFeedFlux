@@ -61,6 +61,50 @@ func TestBreakDuration(t *testing.T) {
 	}
 }
 
+func TestEstimateVacuumDuration(t *testing.T) {
+	cases := []struct {
+		name string
+		n    int64
+		want VacuumDurationEstimate
+	}{
+		{"negative clamps to zero, brief", -5, VacuumEstimateBrief},
+		{"zero is brief", 0, VacuumEstimateBrief},
+		{"just under 100MB is brief", 100*1024*1024 - 1, VacuumEstimateBrief},
+		{"exactly 100MB is moderate", 100 * 1024 * 1024, VacuumEstimateModerate},
+		{"just under 1GB is moderate", 1024*1024*1024 - 1, VacuumEstimateModerate},
+		{"exactly 1GB is long", 1024 * 1024 * 1024, VacuumEstimateLong},
+		{"multi-GB is long", 5 * 1024 * 1024 * 1024, VacuumEstimateLong},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := EstimateVacuumDuration(c.n); got != c.want {
+				t.Errorf("EstimateVacuumDuration(%d) = %v, want %v", c.n, got, c.want)
+			}
+		})
+	}
+}
+
+func TestBreakVacuumDuration(t *testing.T) {
+	cases := []struct {
+		name string
+		d    time.Duration
+		want VacuumDurationParts
+	}{
+		{"zero", 0, VacuumDurationParts{}},
+		{"negative clamps to zero", -time.Second, VacuumDurationParts{}},
+		{"seconds only", 45 * time.Second, VacuumDurationParts{Seconds: 45}},
+		{"minutes and seconds", 2*time.Minute + 5*time.Second, VacuumDurationParts{Minutes: 2, Seconds: 5}},
+		{"sub-second precision discarded", 1500 * time.Millisecond, VacuumDurationParts{Seconds: 1}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := BreakVacuumDuration(c.d); got != c.want {
+				t.Errorf("BreakVacuumDuration(%v) = %+v, want %+v", c.d, got, c.want)
+			}
+		})
+	}
+}
+
 func TestUptime_ClampsFutureStart(t *testing.T) {
 	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	future := now.Add(time.Hour)

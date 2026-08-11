@@ -9,6 +9,7 @@ import (
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	affui "github.com/monstercameron/AnimeFeedFlux/web/ui"
 )
 
 // renderPublishing is the Publishing section (D4-09): base URL, author,
@@ -16,6 +17,8 @@ import (
 // URL, correct scheme) because these land in every channel element of
 // every feed (PLAN.md §12.5).
 func renderPublishing() ui.Node {
+	disconnected := isDisconnected()
+
 	loading := ui.UseState(true)
 	errState := ui.UseState(error(nil))
 	saving := ui.UseState(false)
@@ -30,6 +33,10 @@ func renderPublishing() ui.Node {
 	cacheControl := ui.UseState("")
 	ogImage := ui.UseState("")
 
+	// reloadTick drives the error view's Retry control: the load effect is
+	// keyed on it rather than on a constant, so bumping it re-runs the load.
+	// §12.6 — an error with no way out is a dead end.
+	reloadTick := ui.UseState(0)
 	ui.UseEffect(func() func() {
 		go func() {
 			loading.Set(true)
@@ -49,7 +56,7 @@ func renderPublishing() ui.Node {
 			ogImage.Set(p.GetDefaultOgImage())
 		}()
 		return nil
-	}, "publishing-mount")
+	}, reloadTick.Get())
 
 	validate := func() map[string]error {
 		errs := map[string]error{}
@@ -65,6 +72,9 @@ func renderPublishing() ui.Node {
 	}
 
 	doSave := func() {
+		if disconnected {
+			return
+		}
 		errs := validate()
 		fieldErr.Set(errs)
 		if len(errs) > 0 {
@@ -96,36 +106,62 @@ func renderPublishing() ui.Node {
 		}()
 	}
 
-	state := ComputeScreenState(ScreenInputs{Loading: loading.Get(), Err: errState.Get(), ItemCount: 1})
+	state := ComputeScreenState(ScreenInputs{Loading: loading.Get(), Err: errState.Get(), Disconnected: disconnected, ItemCount: 1})
 	errs := fieldErr.Get()
+
+	baseURLErrKey, baseURLArgs := "", []any(nil)
+	if errs["baseURL"] != nil {
+		baseURLErrKey = "settings.publishing.baseUrl.invalid"
+	}
+	ogImageErrKey := ""
+	if errs["ogImage"] != nil {
+		ogImageErrKey = "settings.publishing.ogImage.invalid"
+	}
 
 	body := h.Div(
 		h.ClassStr("af-settings-section"),
 		h.H2(h.Text(t("settings.publishing.title"))),
+		h.Show(disconnected, h.P(h.Role("status"), h.ClassStr("af-warning"), h.Text(t("settings.common.disconnectedReason")))),
 
-		h.Label(h.Text(t("settings.publishing.baseUrl")),
-			h.Input(h.Value(baseURL.Get()), h.OnInput(func(e ui.InputEvent) { baseURL.Set(e.GetValue()) }))),
-		h.Show(errs["baseURL"] != nil, h.P(h.ClassStr("af-error"), h.Text(t("settings.publishing.baseUrl.invalid")))),
+		affui.Input(affui.InputProps{
+			T: t, ID: "settings-pub-baseurl", LabelKey: "settings.publishing.baseUrl",
+			Value: baseURL.Get(), ErrorKey: baseURLErrKey, ErrorArgs: baseURLArgs,
+			OnChange: func(v string) { baseURL.Set(v) },
+		}),
+		affui.Input(affui.InputProps{
+			T: t, ID: "settings-pub-author", LabelKey: "settings.publishing.author",
+			Value: author.Get(), OnChange: func(v string) { author.Set(v) },
+		}),
+		affui.Input(affui.InputProps{
+			T: t, ID: "settings-pub-contact", LabelKey: "settings.publishing.contact",
+			Value: contact.Get(), OnChange: func(v string) { contact.Set(v) },
+		}),
+		affui.Input(affui.InputProps{
+			T: t, ID: "settings-pub-copyright", LabelKey: "settings.publishing.copyright",
+			Value: copyright.Get(), OnChange: func(v string) { copyright.Set(v) },
+		}),
+		affui.Input(affui.InputProps{
+			T: t, ID: "settings-pub-ttl", LabelKey: "settings.publishing.ttlMinutes",
+			Type: "number", Mono: true, Value: strconv.Itoa(int(ttlMinutes.Get())),
+			OnChange: func(v string) { ttlMinutes.Set(int32(parseInt64(v))) },
+		}),
+		affui.Input(affui.InputProps{
+			T: t, ID: "settings-pub-cache", LabelKey: "settings.publishing.cacheControl",
+			Mono: true, Value: cacheControl.Get(), OnChange: func(v string) { cacheControl.Set(v) },
+		}),
+		affui.Input(affui.InputProps{
+			T: t, ID: "settings-pub-ogimage", LabelKey: "settings.publishing.ogImage",
+			Value: ogImage.Get(), ErrorKey: ogImageErrKey,
+			OnChange: func(v string) { ogImage.Set(v) },
+		}),
 
-		h.Label(h.Text(t("settings.publishing.author")),
-			h.Input(h.Value(author.Get()), h.OnInput(func(e ui.InputEvent) { author.Set(e.GetValue()) }))),
-		h.Label(h.Text(t("settings.publishing.contact")),
-			h.Input(h.Value(contact.Get()), h.OnInput(func(e ui.InputEvent) { contact.Set(e.GetValue()) }))),
-		h.Label(h.Text(t("settings.publishing.copyright")),
-			h.Input(h.Value(copyright.Get()), h.OnInput(func(e ui.InputEvent) { copyright.Set(e.GetValue()) }))),
-		h.Label(h.Text(t("settings.publishing.ttlMinutes")),
-			h.Input(h.Type("number"), h.Value(strconv.Itoa(int(ttlMinutes.Get()))),
-				h.OnInput(func(e ui.InputEvent) { ttlMinutes.Set(int32(parseInt64(e.GetValue()))) }))),
-		h.Label(h.Text(t("settings.publishing.cacheControl")),
-			h.Input(h.Value(cacheControl.Get()), h.OnInput(func(e ui.InputEvent) { cacheControl.Set(e.GetValue()) }))),
-		h.Label(h.Text(t("settings.publishing.ogImage")),
-			h.Input(h.Value(ogImage.Get()), h.OnInput(func(e ui.InputEvent) { ogImage.Set(e.GetValue()) }))),
-		h.Show(errs["ogImage"] != nil, h.P(h.ClassStr("af-error"), h.Text(t("settings.publishing.ogImage.invalid")))),
-
-		h.Show(errState.Get() != nil, h.P(h.ClassStr("af-error"), h.Text(t("settings.publishing.saveError")))),
-		h.Show(saved.Get(), h.P(h.ClassStr("af-success"), h.Text(t("settings.publishing.saved")))),
-		h.Button(h.Type("button"), h.DisabledIf(saving.Get()), h.OnClick(doSave), h.Text(t("settings.publishing.save"))),
+		h.Show(errState.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.publishing.saveError")))),
+		h.Show(saved.Get(), h.P(h.Role("status"), h.Aria("live", "polite"), h.ClassStr("af-success"), h.Text(t("settings.publishing.saved")))),
+		affui.Button(affui.ButtonProps{
+			T: t, LabelKey: "settings.publishing.save", Variant: affui.ButtonPrimary,
+			Disabled: disconnected, Busy: saving.Get(), OnClick: doSave,
+		}),
 	)
 
-	return screenWrapper(state, errState.Get(), body)
+	return screenWrapperRetry(state, errState.Get(), func() { reloadTick.Update(func(n int) int { return n + 1 }) }, body)
 }

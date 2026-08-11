@@ -109,3 +109,63 @@ func Uptime(startedAt, now time.Time) time.Duration {
 	}
 	return d
 }
+
+// VacuumDurationEstimate is a coarse bucket for how long Vacuum's exclusive
+// lock will likely be held, derived from the database's size BEFORE the
+// call (D4-10: "tell the user it will block, and roughly for how long").
+// There is no cheap way to predict it precisely — internal/store.Vacuum's
+// own doc comment gives the same rough budget this buckets against ("a few
+// seconds per 100 MB... a multi-GB database can mean a stall measured in
+// tens of seconds to low minutes") — so this is a warning label, not an
+// ETA countdown.
+type VacuumDurationEstimate int
+
+const (
+	// VacuumEstimateBrief: under 100MB, a few seconds.
+	VacuumEstimateBrief VacuumDurationEstimate = iota
+	// VacuumEstimateModerate: 100MB up to 1GB, tens of seconds.
+	VacuumEstimateModerate
+	// VacuumEstimateLong: 1GB or more, minutes.
+	VacuumEstimateLong
+)
+
+// EstimateVacuumDuration buckets sizeBytes (the database size reported
+// BEFORE vacuuming, e.g. SystemServiceStatsResponse.DbSizeBytes) into a
+// VacuumDurationEstimate per store.Vacuum's documented rough budget.
+// Negative sizes clamp to zero, same convention as ScaleBytes/BreakDuration.
+func EstimateVacuumDuration(sizeBytes int64) VacuumDurationEstimate {
+	if sizeBytes < 0 {
+		sizeBytes = 0
+	}
+	const mb = 1024 * 1024
+	switch {
+	case sizeBytes < 100*mb:
+		return VacuumEstimateBrief
+	case sizeBytes < 1024*mb:
+		return VacuumEstimateModerate
+	default:
+		return VacuumEstimateLong
+	}
+}
+
+// VacuumDurationParts breaks a completed Vacuum call's ACTUAL measured
+// duration (SystemServiceVacuumResponse.DurationMs — the real elapsed
+// time, not a prediction, per store.Vacuum's doc comment) into whole
+// minutes and remaining seconds. Separate from DurationParts/BreakDuration
+// above: uptime's day/hour/minute breakdown discards sub-minute precision
+// on purpose, but a vacuum run is typically itself sub-minute to
+// low-minutes, so seconds are the unit that matters here.
+type VacuumDurationParts struct {
+	Minutes int
+	Seconds int
+}
+
+// BreakVacuumDuration decomposes d (clamped to zero if negative) into whole
+// minutes and remaining seconds.
+func BreakVacuumDuration(d time.Duration) VacuumDurationParts {
+	if d < 0 {
+		d = 0
+	}
+	totalSeconds := int64(d / time.Second)
+	return VacuumDurationParts{Minutes: int(totalSeconds / 60), Seconds: int(totalSeconds % 60)}
+}

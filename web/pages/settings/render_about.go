@@ -9,6 +9,7 @@ import (
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	affui "github.com/monstercameron/AnimeFeedFlux/web/ui"
 )
 
 // renderAbout is the About section (D4-11): version, build, uptime, last
@@ -17,6 +18,8 @@ import (
 // as "last success") since no RPC returns a per-feed last-SUCCEEDED-run
 // timestamp distinct from that.
 func renderAbout() ui.Node {
+	disconnected := isDisconnected()
+
 	loading := ui.UseState(true)
 	errState := ui.UseState(error(nil))
 	version := ui.UseState((*affv1.SystemServiceVersionResponse)(nil))
@@ -24,6 +27,10 @@ func renderAbout() ui.Node {
 	feedsLoading := ui.UseState(true)
 	feeds := ui.UseState([]*affv1.Feed(nil))
 
+	// reloadTick drives the error view's Retry control: the load effect is
+	// keyed on it rather than on a constant, so bumping it re-runs the load.
+	// §12.6 — an error with no way out is a dead end.
+	reloadTick := ui.UseState(0)
 	ui.UseEffect(func() func() {
 		go func() {
 			loading.Set(true)
@@ -44,12 +51,13 @@ func renderAbout() ui.Node {
 			}
 		}()
 		return nil
-	}, "about-mount")
+	}, reloadTick.Get())
 
 	state := ComputeScreenState(ScreenInputs{
-		Loading:   loading.Get() || feedsLoading.Get(),
-		Err:       errState.Get(),
-		ItemCount: 1,
+		Loading:      loading.Get() || feedsLoading.Get(),
+		Err:          errState.Get(),
+		Disconnected: disconnected,
+		ItemCount:    1,
 	})
 
 	var versionBody ui.Node
@@ -63,16 +71,18 @@ func renderAbout() ui.Node {
 		versionBody = h.Fragment()
 	}
 
-	feedRows := make([]ui.Node, 0, len(feeds.Get()))
+	feedRows := make([]map[string]affui.Node, 0, len(feeds.Get()))
+	feedRowKeys := make([]string, 0, len(feeds.Get()))
 	for _, f := range feeds.Get() {
 		lastBuild := t("settings.about.feed.neverBuilt")
 		if ts := f.GetLastBuiltAt(); ts != nil {
 			lastBuild = fmts().RelativeTime(ts.AsTime(), time.Now())
 		}
-		feedRows = append(feedRows, h.Tr(
-			h.Td(h.Text(f.GetSlug())),
-			h.Td(h.Text(lastBuild)),
-		))
+		feedRows = append(feedRows, map[string]affui.Node{
+			"slug":      h.Text(f.GetSlug()),
+			"lastBuild": h.Text(lastBuild),
+		})
+		feedRowKeys = append(feedRowKeys, int64ToStr(f.GetId()))
 	}
 
 	body := h.Div(
@@ -80,16 +90,17 @@ func renderAbout() ui.Node {
 		h.H2(h.Text(t("settings.about.title"))),
 		versionBody,
 		h.H3(h.Text(t("settings.about.feed.lastBuildTitle"))),
-		h.Table(
-			h.Thead(h.Tr(
-				h.Th(h.Text(t("settings.about.feed.col.slug"))),
-				h.Th(h.Text(t("settings.about.feed.col.lastBuild"))),
-			)),
-			h.Tbody(feedRows),
-		),
+		affui.Table(affui.TableProps{
+			T: t, ID: "settings-about-feeds", CaptionKey: "settings.about.feed.caption",
+			Columns: []affui.TableColumn{
+				{ID: "slug", LabelKey: "settings.about.feed.col.slug", Mono: true},
+				{ID: "lastBuild", LabelKey: "settings.about.feed.col.lastBuild"},
+			},
+			Rows: feedRows, RowKeys: feedRowKeys,
+		}),
 	)
 
-	return screenWrapper(state, errState.Get(), body)
+	return screenWrapperRetry(state, errState.Get(), func() { reloadTick.Update(func(n int) int { return n + 1 }) }, body)
 }
 
 func formatUptime(startedAt time.Time) string {

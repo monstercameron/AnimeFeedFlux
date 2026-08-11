@@ -32,7 +32,7 @@ func TestRequiresTypedConfirmation(t *testing.T) {
 		ActionRegenerateRecoveryCodes: true,
 		ActionReenrollTOTP:            false,
 		ActionChangePassword:          false,
-		ActionVacuum:                  false,
+		ActionVacuum:                  true,
 		ActionImportTOML:              true,
 	}
 	for action, want := range irreversible {

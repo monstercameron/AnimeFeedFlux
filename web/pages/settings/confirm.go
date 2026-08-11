@@ -40,10 +40,14 @@ const (
 // sense that the admin can simply log back in on that device — it is
 // destructive but not irreversible the way regenerating recovery codes
 // (invalidates the old set permanently) or a TOML import (overwrites a
-// feed's recipe) is.
+// feed's recipe) is. Vacuum is not data-destructive, but it takes an
+// exclusive lock and blocks the live database for a real, size-dependent
+// duration (internal/rpc/system.go's Vacuum, TODOS.md D4-10) — that
+// "irreversible-feeling" cost while it runs earns it the same typed gate
+// as the others, not a plain confirm/cancel an admin could fat-finger.
 func RequiresTypedConfirmation(action DestructiveAction) bool {
 	switch action {
-	case ActionRevokeAllSessions, ActionRegenerateRecoveryCodes, ActionImportTOML:
+	case ActionRevokeAllSessions, ActionRegenerateRecoveryCodes, ActionImportTOML, ActionVacuum:
 		return true
 	default:
 		return false
@@ -67,6 +71,8 @@ func ConfirmationWordKey(action DestructiveAction) string {
 		return "settings.security.recoveryCodes.regenerate.confirmWord"
 	case ActionImportTOML:
 		return "settings.data.importToml.confirmWord"
+	case ActionVacuum:
+		return "settings.data.vacuum.confirmWord"
 	default:
 		return ""
 	}

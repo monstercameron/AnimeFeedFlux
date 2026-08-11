@@ -9,11 +9,14 @@ import (
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	affui "github.com/monstercameron/AnimeFeedFlux/web/ui"
 )
 
 // renderGeneration is the Generation section (D4-08): kill switch, global
 // ceiling, default budgets, staleness threshold.
 func renderGeneration() ui.Node {
+	disconnected := isDisconnected()
+
 	loading := ui.UseState(true)
 	errState := ui.UseState(error(nil))
 	saving := ui.UseState(false)
@@ -27,6 +30,10 @@ func renderGeneration() ui.Node {
 	defaultFeedWindow := ui.UseState(int32(0))
 	stalenessMinutes := ui.UseState(int32(0))
 
+	// reloadTick drives the error view's Retry control: the load effect is
+	// keyed on it rather than on a constant, so bumping it re-runs the load.
+	// §12.6 — an error with no way out is a dead end.
+	reloadTick := ui.UseState(0)
 	ui.UseEffect(func() func() {
 		go func() {
 			loading.Set(true)
@@ -46,14 +53,16 @@ func renderGeneration() ui.Node {
 			stalenessMinutes.Set(g.GetStalenessThresholdMinutes())
 		}()
 		return nil
-	}, "generation-mount")
+	}, reloadTick.Get())
 
 	// The kill switch has its own dedicated RPC (SetGenerationEnabled) so
 	// flipping it does not require (and does not wait on) the rest of the
 	// form's Save round trip — PLAN.md §13: existing feeds keep serving,
 	// nothing generates, and that needs to take effect immediately.
-	toggleKillSwitch := func() {
-		next := !enabled.Get()
+	toggleKillSwitchTo := func(next bool) {
+		if disconnected {
+			return
+		}
 		enabled.Set(next)
 		go func() {
 			if _, err := deps.System.SetGenerationEnabled(bgContext(), &affv1.SystemServiceSetGenerationEnabledRequest{Enabled: next}); err != nil {
@@ -64,6 +73,9 @@ func renderGeneration() ui.Node {
 	}
 
 	doSave := func() {
+		if disconnected {
+			return
+		}
 		saving.Set(true)
 		saved.Set(false)
 		errState.Set(nil)
@@ -90,42 +102,76 @@ func renderGeneration() ui.Node {
 		}()
 	}
 
-	state := ComputeScreenState(ScreenInputs{Loading: loading.Get(), Err: errState.Get(), ItemCount: 1})
+	state := ComputeScreenState(ScreenInputs{Loading: loading.Get(), Err: errState.Get(), Disconnected: disconnected, ItemCount: 1})
 
 	body := h.Div(
 		h.ClassStr("af-settings-section"),
 		h.H2(h.Text(t("settings.generation.title"))),
-		h.Label(
-			h.Input(h.Type("checkbox"), h.Checked(enabled.Get()), h.OnChange(func(e ui.ChangeEvent) { toggleKillSwitch() })),
-			h.Text(t("settings.generation.killSwitch")),
+		affui.Toggle(affui.ToggleProps{
+			T: t, ID: "settings-kill-switch", LabelKey: "settings.generation.killSwitch",
+			Checked: enabled.Get(), Disabled: disconnected,
+			DisabledReasonKey: "settings.common.disconnectedReason",
+			OnChange:          toggleKillSwitchTo,
+		}),
+		h.Show(!enabled.Get(), h.P(h.Role("status"), h.ClassStr("af-warning"), h.Text(t("settings.generation.killSwitch.reason")))),
+		h.Show(disconnected, h.P(h.Role("status"), h.ClassStr("af-warning"), h.Text(t("settings.common.disconnectedReason")))),
+
+		// Three groups, not one stack of six identical rows. Global ceilings
+		// and per-feed defaults are different KINDS of number — one is the
+		// backstop for the whole deployment, the other is what a newly
+		// created feed starts with — and rendered as one undifferentiated
+		// column of bare zeros there was nothing to tell them apart.
+		h.Div(h.ClassStr("af-settings-card"),
+			h.H3(h.Text(t("settings.generation.group.ceilings"))),
+			h.P(h.ClassStr("af-field-help"), h.Text(t("settings.generation.group.ceilings.help"))),
+			affui.Input(affui.InputProps{
+				T: t, ID: "settings-gen-token-ceiling", LabelKey: "settings.generation.globalTokenCeiling",
+				Type: "number", Mono: true, Value: strconv.FormatInt(globalTokenCeiling.Get(), 10),
+				OnChange: func(v string) { globalTokenCeiling.Set(parseInt64(v)) },
+			}),
+			affui.Input(affui.InputProps{
+				T: t, ID: "settings-gen-spend-ceiling", LabelKey: "settings.generation.globalSpendCeiling",
+				Type: "number", Mono: true, Value: floatToStr(globalSpendCeiling.Get()),
+				OnChange: func(v string) { globalSpendCeiling.Set(parseFloat(v)) },
+			}),
 		),
-		h.Show(!enabled.Get(), h.P(h.ClassStr("af-warning"), h.Text(t("settings.generation.killSwitch.reason")))),
+		h.Div(h.ClassStr("af-settings-card"),
+			h.H3(h.Text(t("settings.generation.group.feedDefaults"))),
+			h.P(h.ClassStr("af-field-help"), h.Text(t("settings.generation.group.feedDefaults.help"))),
+			affui.Input(affui.InputProps{
+				T: t, ID: "settings-gen-token-budget", LabelKey: "settings.generation.defaultTokenBudget",
+				Type: "number", Mono: true, Value: strconv.FormatInt(defaultTokenBudget.Get(), 10),
+				OnChange: func(v string) { defaultTokenBudget.Set(parseInt64(v)) },
+			}),
+			affui.Input(affui.InputProps{
+				T: t, ID: "settings-gen-run-budget", LabelKey: "settings.generation.defaultRunBudget",
+				Type: "number", Mono: true, Value: strconv.Itoa(int(defaultRunBudget.Get())),
+				OnChange: func(v string) { defaultRunBudget.Set(int32(parseInt64(v))) },
+			}),
+			affui.Input(affui.InputProps{
+				T: t, ID: "settings-gen-feed-window", LabelKey: "settings.generation.defaultFeedWindow",
+				Type: "number", Mono: true, Value: strconv.Itoa(int(defaultFeedWindow.Get())),
+				OnChange: func(v string) { defaultFeedWindow.Set(int32(parseInt64(v))) },
+			}),
+		),
+		h.Div(h.ClassStr("af-settings-card"),
+			h.H3(h.Text(t("settings.generation.group.staleness"))),
+			affui.Input(affui.InputProps{
+				T: t, ID: "settings-gen-staleness", LabelKey: "settings.generation.stalenessThreshold",
+				Type: "number", Mono: true, Value: strconv.Itoa(int(stalenessMinutes.Get())),
+				OnChange: func(v string) { stalenessMinutes.Set(int32(parseInt64(v))) },
+			}),
+		),
 
-		h.Label(h.Text(t("settings.generation.globalTokenCeiling")),
-			h.Input(h.Type("number"), h.Value(strconv.FormatInt(globalTokenCeiling.Get(), 10)),
-				h.OnInput(func(e ui.InputEvent) { globalTokenCeiling.Set(parseInt64(e.GetValue())) }))),
-		h.Label(h.Text(t("settings.generation.globalSpendCeiling")),
-			h.Input(h.Type("number"), h.Step("0.01"), h.Value(floatToStr(globalSpendCeiling.Get())),
-				h.OnInput(func(e ui.InputEvent) { globalSpendCeiling.Set(parseFloat(e.GetValue())) }))),
-		h.Label(h.Text(t("settings.generation.defaultTokenBudget")),
-			h.Input(h.Type("number"), h.Value(strconv.FormatInt(defaultTokenBudget.Get(), 10)),
-				h.OnInput(func(e ui.InputEvent) { defaultTokenBudget.Set(parseInt64(e.GetValue())) }))),
-		h.Label(h.Text(t("settings.generation.defaultRunBudget")),
-			h.Input(h.Type("number"), h.Value(strconv.Itoa(int(defaultRunBudget.Get()))),
-				h.OnInput(func(e ui.InputEvent) { defaultRunBudget.Set(int32(parseInt64(e.GetValue()))) }))),
-		h.Label(h.Text(t("settings.generation.defaultFeedWindow")),
-			h.Input(h.Type("number"), h.Value(strconv.Itoa(int(defaultFeedWindow.Get()))),
-				h.OnInput(func(e ui.InputEvent) { defaultFeedWindow.Set(int32(parseInt64(e.GetValue()))) }))),
-		h.Label(h.Text(t("settings.generation.stalenessThreshold")),
-			h.Input(h.Type("number"), h.Value(strconv.Itoa(int(stalenessMinutes.Get()))),
-				h.OnInput(func(e ui.InputEvent) { stalenessMinutes.Set(int32(parseInt64(e.GetValue()))) }))),
-
-		h.Show(errState.Get() != nil, h.P(h.ClassStr("af-error"), h.Text(t("settings.generation.saveError")))),
-		h.Show(saved.Get(), h.P(h.ClassStr("af-success"), h.Text(t("settings.generation.saved")))),
-		h.Button(h.Type("button"), h.DisabledIf(saving.Get()), h.OnClick(doSave), h.Text(t("settings.generation.save"))),
+		h.Show(errState.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.generation.saveError")))),
+		h.Show(saved.Get(), h.P(h.Role("status"), h.Aria("live", "polite"), h.ClassStr("af-success"), h.Text(t("settings.generation.saved")))),
+		affui.Button(affui.ButtonProps{
+			T: t, LabelKey: "settings.generation.save", Variant: affui.ButtonPrimary,
+			Disabled: disconnected, Busy: saving.Get(), OnClick: doSave,
+		}),
 	)
 
-	return screenWrapper(state, errState.Get(), body)
+	return screenWrapperRetry(state, errState.Get(), func() { reloadTick.Update(func(n int) int { return n + 1 }) }, body)
 }
 
 func parseInt64(s string) int64 {

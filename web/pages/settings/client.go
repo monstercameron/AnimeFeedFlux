@@ -27,9 +27,20 @@ type SystemClient interface {
 	Stats(ctx context.Context, in *affv1.SystemServiceStatsRequest, opts ...grpc.CallOption) (*affv1.SystemServiceStatsResponse, error)
 	SetGenerationEnabled(ctx context.Context, in *affv1.SystemServiceSetGenerationEnabledRequest, opts ...grpc.CallOption) (*affv1.SystemServiceSetGenerationEnabledResponse, error)
 	GetSettings(ctx context.Context, in *affv1.SystemServiceGetSettingsRequest, opts ...grpc.CallOption) (*affv1.SystemServiceGetSettingsResponse, error)
+	// ListModels hydrates the two model fields from the provider itself —
+	// see modelselect.go for why a typed model id is a per-feed outage
+	// waiting to happen, and for what happens when this call cannot be made.
+	ListModels(ctx context.Context, in *affv1.SystemServiceListModelsRequest, opts ...grpc.CallOption) (*affv1.SystemServiceListModelsResponse, error)
+	// CostHistory backs the spend chart (costchart.go).
+	CostHistory(ctx context.Context, in *affv1.SystemServiceCostHistoryRequest, opts ...grpc.CallOption) (*affv1.SystemServiceCostHistoryResponse, error)
 	UpdateSettings(ctx context.Context, in *affv1.SystemServiceUpdateSettingsRequest, opts ...grpc.CallOption) (*affv1.SystemServiceUpdateSettingsResponse, error)
 	Version(ctx context.Context, in *affv1.SystemServiceVersionRequest, opts ...grpc.CallOption) (*affv1.SystemServiceVersionResponse, error)
 	Backup(ctx context.Context, in *affv1.SystemServiceBackupRequest, opts ...grpc.CallOption) (*affv1.SystemServiceBackupResponse, error)
+	// Vacuum runs SQLite's VACUUM against the live database (D4-10). It
+	// BLOCKS for a real, size-dependent duration and refuses outright
+	// (codes.FailedPrecondition) while a generation run is in flight — see
+	// internal/rpc/system.go's Vacuum doc comment.
+	Vacuum(ctx context.Context, in *affv1.SystemServiceVacuumRequest, opts ...grpc.CallOption) (*affv1.SystemServiceVacuumResponse, error)
 }
 
 // AuthClient backs the Security section (PLAN.md §12.5): change
@@ -38,6 +49,11 @@ type SystemClient interface {
 // pages, not here.
 type AuthClient interface {
 	ChangePassword(ctx context.Context, in *affv1.AuthServiceChangePasswordRequest, opts ...grpc.CallOption) (*affv1.AuthServiceChangePasswordResponse, error)
+	// Session is called here for exactly one field: RemainingRecoveryCodes.
+	// §12.5 requires the Security panel to show the remaining count, and
+	// this is the only read path for it — see auth.proto's field comment for
+	// why it rides on the session lookup rather than getting its own RPC.
+	Session(ctx context.Context, in *affv1.AuthServiceSessionRequest, opts ...grpc.CallOption) (*affv1.AuthServiceSessionResponse, error)
 	ListSessions(ctx context.Context, in *affv1.AuthServiceListSessionsRequest, opts ...grpc.CallOption) (*affv1.AuthServiceListSessionsResponse, error)
 	RevokeSession(ctx context.Context, in *affv1.AuthServiceRevokeSessionRequest, opts ...grpc.CallOption) (*affv1.AuthServiceRevokeSessionResponse, error)
 	RevokeAllSessions(ctx context.Context, in *affv1.AuthServiceRevokeAllSessionsRequest, opts ...grpc.CallOption) (*affv1.AuthServiceRevokeAllSessionsResponse, error)

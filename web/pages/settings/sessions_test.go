@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"testing"
 	"time"
 )
@@ -62,5 +63,36 @@ func TestRecoveryCodesLow(t *testing.T) {
 		if got := RecoveryCodesLow(remaining); got != want {
 			t.Errorf("RecoveryCodesLow(%d) = %v, want %v", remaining, got, want)
 		}
+	}
+}
+
+// TestProtoTimeAbsentIsZero locks in the distinction that made every session
+// report itself revoked: timestamppb's own AsTime() maps a nil message to
+// 1970, and IsZero() is false for 1970.
+func TestProtoTimeAbsentIsZero(t *testing.T) {
+	if got := protoTime(nil); !got.IsZero() {
+		t.Fatalf("protoTime(nil) = %v, want the zero time (IsZero) — a nil timestamp must not read as 1970", got)
+	}
+	// The trap itself, asserted directly so this test explains why the
+	// helper exists rather than merely exercising it.
+	if (&timestamppb.Timestamp{}).AsTime().IsZero() {
+		t.Fatal("timestamppb zero AsTime() is now IsZero(); protoTime may be unnecessary — re-check before deleting it")
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if got := protoTime(timestamppb.New(now)); !got.Equal(now) {
+		t.Fatalf("protoTime(now) = %v, want %v", got, now)
+	}
+}
+
+// TestRevokedRequiresARealTimestamp is the end of the same bug: a row built
+// from a session the server never revoked must not report itself revoked.
+func TestRevokedRequiresARealTimestamp(t *testing.T) {
+	live := SessionRow{RevokedAt: protoTime(nil)}
+	if live.Revoked() {
+		t.Fatal("a session with no revoked_at reports Revoked() — the Actions column would offer no revoke on any row")
+	}
+	dead := SessionRow{RevokedAt: protoTime(timestamppb.New(time.Now()))}
+	if !dead.Revoked() {
+		t.Fatal("a session with a real revoked_at does not report Revoked()")
 	}
 }

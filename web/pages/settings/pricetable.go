@@ -4,6 +4,7 @@ package settings
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
@@ -33,6 +34,77 @@ func updatePriceIn(priceTable ui.State[[]*affv1.PriceEntry], index int, raw stri
 
 func updatePriceOut(priceTable ui.State[[]*affv1.PriceEntry], index int, raw string) {
 	updatePriceCell(priceTable, index, raw, false)
+}
+
+// priceProblemText turns a validation problem into the sentence shown above
+// the table, naming the row so the operator does not have to hunt for it.
+func priceProblemText(t func(string, ...any) string, p PriceTableProblem) string {
+	row := strconv.Itoa(p.Index + 1)
+	switch p.Reason {
+	case PriceProblemEmptyModel:
+		return t("settings.provider.priceTable.err.emptyModel", row)
+	case PriceProblemDuplicate:
+		return t("settings.provider.priceTable.err.duplicate", row)
+	default:
+		return t("settings.provider.priceTable.err.negative", row)
+	}
+}
+
+// updatePriceModel renames the model a rate applies to.
+func updatePriceModel(priceTable ui.State[[]*affv1.PriceEntry], index int, raw string) {
+	current := priceTable.Get()
+	if index < 0 || index >= len(current) {
+		return
+	}
+	next := make([]*affv1.PriceEntry, len(current))
+	copy(next, current)
+	old := next[index]
+	next[index] = &affv1.PriceEntry{
+		Model:              raw,
+		UsdPer_1KTokensIn:  old.GetUsdPer_1KTokensIn(),
+		UsdPer_1KTokensOut: old.GetUsdPer_1KTokensOut(),
+	}
+	priceTable.Set(next)
+}
+
+// PriceTableProblem reports why a price table cannot be saved.
+//
+// Validated client-side because the server accepted anything: a negative
+// rate, two rows for the same model, or a rate attached to no model at all.
+// The first two produce a cost model that is quietly wrong; the third
+// produces a row that can never match anything.
+type PriceTableProblem struct {
+	Index  int
+	Reason string // one of the priceProblem* constants
+}
+
+const (
+	PriceProblemEmptyModel = "empty_model"
+	PriceProblemDuplicate  = "duplicate_model"
+	PriceProblemNegative   = "negative_rate"
+)
+
+// ValidatePriceTable returns every problem in the table, in row order.
+func ValidatePriceTable(entries []*affv1.PriceEntry) []PriceTableProblem {
+	var problems []PriceTableProblem
+	seen := make(map[string]int, len(entries))
+	for i, e := range entries {
+		model := strings.TrimSpace(e.GetModel())
+		switch {
+		case model == "":
+			problems = append(problems, PriceTableProblem{Index: i, Reason: PriceProblemEmptyModel})
+		default:
+			if _, dup := seen[model]; dup {
+				problems = append(problems, PriceTableProblem{Index: i, Reason: PriceProblemDuplicate})
+			} else {
+				seen[model] = i
+			}
+		}
+		if e.GetUsdPer_1KTokensIn() < 0 || e.GetUsdPer_1KTokensOut() < 0 {
+			problems = append(problems, PriceTableProblem{Index: i, Reason: PriceProblemNegative})
+		}
+	}
+	return problems
 }
 
 func updatePriceCell(priceTable ui.State[[]*affv1.PriceEntry], index int, raw string, isIn bool) {

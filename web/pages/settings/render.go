@@ -6,8 +6,28 @@ import (
 	"context"
 
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
+	"github.com/monstercameron/GoWebComponents/v5/router"
+	"github.com/monstercameron/GoWebComponents/v5/state"
 	"github.com/monstercameron/GoWebComponents/v5/ui"
+
+	"github.com/monstercameron/AnimeFeedFlux/web/appstate"
+	"github.com/monstercameron/AnimeFeedFlux/web/shell"
+	affui "github.com/monstercameron/AnimeFeedFlux/web/ui"
 )
+
+// isDisconnected reports the shell's DISCONNECTED application state
+// (TODOS.md D-FLOW), read via the same shell.SessionAtom every other page
+// subscribes to (web/pages/generate/render.go's identical
+// `state.UseAtomKey(shell.SessionAtom)` call is the precedent this
+// mirrors) rather than threading a Disconnected prop through a wiring.go
+// this package does not have this round. Each section component below
+// calls this once, as its own unconditional/positional hook call within
+// its own fiber — safe to call from multiple independent components since
+// the atom is a shared global, not per-caller state.
+func isDisconnected() bool {
+	sess := state.UseAtomKey(shell.SessionAtom)
+	return sess.Get() == appstate.Disconnected
+}
 
 // Section is one of the six PLAN.md §12.5 sections. No nested navigation
 // (D-FLOW: "three pages do not need wayfinding") — within /settings these
@@ -42,10 +62,82 @@ func (s Section) titleKey() string {
 	}
 }
 
+// tabID is this section's stable id for web/ui.Tabs' Tab.ID/ActiveID (and
+// hence its roving-tabindex arrow-key model) — a separate string from
+// titleKey() because a tab's identity and its display label are different
+// concerns even though today they happen to correspond 1:1.
+func (s Section) tabID() string {
+	switch s {
+	case SectionSecurity:
+		return "settings-tab-security"
+	case SectionProvider:
+		return "settings-tab-provider"
+	case SectionGeneration:
+		return "settings-tab-generation"
+	case SectionPublishing:
+		return "settings-tab-publishing"
+	case SectionData:
+		return "settings-tab-data"
+	case SectionAbout:
+		return "settings-tab-about"
+	default:
+		return "settings-tab-unknown"
+	}
+}
+
 var allSections = []Section{
 	SectionSecurity, SectionProvider, SectionGeneration,
 	SectionPublishing, SectionData, SectionAbout,
 }
+
+// slug is the section's URL segment: /settings/provider, /settings/data.
+//
+// Deliberately its own short string rather than reusing tabID(): a tab id is
+// a DOM id whose shape (settings-tab-provider) exists to be unique in a
+// document, and putting it in the address bar would make every URL an
+// implementation detail that could not be changed without breaking links.
+func (s Section) slug() string {
+	switch s {
+	case SectionSecurity:
+		return "security"
+	case SectionProvider:
+		return "provider"
+	case SectionGeneration:
+		return "generation"
+	case SectionPublishing:
+		return "publishing"
+	case SectionData:
+		return "data"
+	case SectionAbout:
+		return "about"
+	}
+	return ""
+}
+
+// sectionFromSlug resolves a URL segment. An unknown slug falls back to the
+// first section rather than erroring: a typo'd or stale bookmark should land
+// somewhere useful, and /settings itself (no segment at all) takes this same
+// path.
+func sectionFromSlug(slug string) Section {
+	for _, sec := range allSections {
+		if sec.slug() == slug {
+			return sec
+		}
+	}
+	return SectionSecurity
+}
+
+// SectionPath is the address of one settings section. Exported so a runbook,
+// a test, or another page can link at a panel by name instead of by
+// reconstructing the string.
+func SectionPath(s Section) string { return "/settings/" + s.slug() }
+
+// settingsPanelID is the single shared tabpanel id every section mounts
+// into — only one section is ever mounted at a time (Render swaps the
+// panel's child, it does not keep all six mounted and hide the rest), so
+// one id is enough for the aria-controls/aria-labelledby wiring
+// web/ui.Tabs expects.
+const settingsPanelID = "settings-panel"
 
 // Render is /settings' page body, registered with web/shell via
 // shell.RegisterPage in deps.go's init(). It owns exactly one piece of
@@ -56,34 +148,77 @@ var allSections = []Section{
 // calls — see doc.go / GWC discipline: hooks must stay unconditional and
 // positional WITHIN one component's fiber).
 func Render() ui.Node {
-	active := ui.UseState(SectionSecurity)
+	// The active section is READ FROM THE URL, not held as state.
+	//
+	// It used to be ui.UseState(SectionSecurity), which meant the section
+	// existed only inside this component: a reload dropped you back on
+	// Security no matter what you were looking at, and there was no way to
+	// link anyone at a panel. Now /settings/provider IS the provider panel,
+	// and /settings (no segment) resolves to the first section.
+	loc := router.UseRoute()
+	nav := router.UseNavigate()
+	active := sectionFromSlug(loc.Param("section"))
 
 	if !wired {
 		return renderNotWired()
 	}
 
-	// Plain closures, not ui.UseEvent, inside this loop — see renderKebab's
-	// doc comment for why a fiber hook per loop iteration is avoided here.
-	tabs := make([]ui.Node, 0, len(allSections))
+	tabs := make([]affui.Tab, 0, len(allSections))
+	tabIDToSection := make(map[string]Section, len(allSections))
 	for _, s := range allSections {
-		s := s
-		tabs = append(tabs, h.Button(
-			h.Type("button"),
-			h.ClassStr(h.ClassMap(map[string]bool{
-				"af-settings-tab":         true,
-				"af-settings-tab--active": active.Get() == s,
-			})),
-			h.OnClick(func() { active.Set(s) }),
-			h.Text(t(s.titleKey())),
-		))
+		id := s.tabID()
+		tabIDToSection[id] = s
+		tabs = append(tabs, affui.Tab{ID: id, LabelKey: s.titleKey(), PanelID: settingsPanelID})
 	}
+
+	tabsNode := ui.CreateElement(renderSectionTabs, sectionTabsProps{
+		ActiveID: active.tabID(),
+		Tabs:     tabs,
+		OnChange: func(id string) {
+			if s, ok := tabIDToSection[id]; ok {
+				// Navigate rather than set state: the URL is the source of
+				// truth, so changing tabs has to change the address or the
+				// two immediately disagree. Push, not replace — Back through
+				// the sections you visited is the behaviour a tabbed page in
+				// the address bar implies.
+				nav.Navigate(SectionPath(s))
+			}
+		},
+	})
 
 	return h.Div(
 		h.ClassStr("af-settings"),
 		h.H1(h.Text(t("settings.title"))),
-		h.Nav(h.ClassStr("af-settings-nav"), tabs),
-		h.Div(h.ClassStr("af-settings-panel"), renderActiveSection(active.Get())),
+		tabsNode,
+		h.Div(h.ID(settingsPanelID), h.Role("tabpanel"), renderActiveSection(active)),
 	)
+}
+
+// sectionTabsProps/renderSectionTabs isolates web/ui.Tabs' own hook
+// (gwcui.UseCompositeNavigation, called internally by affui.Tabs) into its
+// own fiber via ui.CreateElement — the same reason renderKebabUI and
+// renderConfirmUI below do this rather than calling the affui primitive
+// directly inline: a hook-calling function embedded directly in a parent
+// whose own hook count/order can change across renders (Render's early
+// `if !wired` return, here) is exactly the hazard doc.go's GWC-discipline
+// note warns about, and giving it its own always-mounted-the-same-way
+// component sidesteps that regardless of how Render's own control flow
+// changes later.
+type sectionTabsProps struct {
+	ActiveID string
+	Tabs     []affui.Tab
+	OnChange func(string)
+}
+
+func renderSectionTabs(props sectionTabsProps) ui.Node {
+	return affui.Tabs(affui.TabsProps{
+		T:        t,
+		ID:       "settings-tabs",
+		LabelKey: "settings.nav.label",
+		Tabs:     props.Tabs,
+		ActiveID: props.ActiveID,
+		OnChange: props.OnChange,
+	})
 }
 
 func renderActiveSection(active Section) ui.Node {
@@ -107,148 +242,189 @@ func renderActiveSection(active Section) ui.Node {
 
 // --- Shared building blocks used by every section ---------------------
 
-// screenWrapper renders body when state is Populated, and the matching
-// loading/empty/error/disabled/disconnected placeholder otherwise
-// (TODOS.md D-FLOW's six-state matrix, applied uniformly per PLAN.md
-// §12.6: "loading, empty, and error states are designed for every list").
-func screenWrapper(state ScreenState, err error, body ui.Node) ui.Node {
-	switch state {
+// toListState maps this package's own ScreenState (screenstate.go's
+// pure, host-tested six-state precedence) onto web/ui's ListState enum —
+// the two are the same six states by design (D-FLOW's matrix), just owned
+// by two different packages for the reason doc.go/web/ui's own doc
+// comment both give: this package cannot import web/ui's *type*
+// definitions into its host-testable, no-build-tag files (screenstate.go
+// has no `js && wasm` tag, so it cannot depend on anything that pulls in
+// GWC), so the enum is duplicated and only reconciled here, in the
+// browser-only rendering layer.
+func toListState(s ScreenState) affui.ListState {
+	switch s {
 	case ScreenLoading:
-		return h.Div(h.ClassStr("af-state af-state--loading"), h.Text(t("common.state.loading")))
+		return affui.StateLoading
 	case ScreenEmpty:
-		return h.Div(h.ClassStr("af-state af-state--empty"), h.Text(t("common.state.empty")))
+		return affui.StateEmpty
 	case ScreenError:
-		msg := t("common.state.error")
-		if err != nil {
-			msg = t("common.state.errorDetail", err.Error())
-		}
-		return h.Div(h.ClassStr("af-state af-state--error"), h.Text(msg))
+		return affui.StateError
 	case ScreenDisabledWithReason:
-		return h.Div(h.ClassStr("af-state af-state--disabled"), h.Text(t("common.state.disabled")))
+		return affui.StateDisabledWithReason
 	case ScreenDisconnected:
-		return h.Div(h.ClassStr("af-state af-state--disconnected"), h.Text(t("common.state.disconnected")))
+		return affui.StateDisconnected
 	default:
-		return body
+		return affui.StatePopulated
 	}
 }
 
-// kebabItem/kebabProps back the "destructive actions behind a ⋯, never a
-// primary button" affordance (PLAN.md §12.6). renderKebab is a real GWC
-// component (mounted via ui.CreateElement at each call site, never
-// called as a plain helper) precisely so its own UseState call stays
-// unconditional and positional within ITS OWN fiber regardless of how
-// its parent chooses to mount/unmount it — see doc.go's GWC-discipline
-// note. Item click handlers are plain closures (not wrapped in
-// ui.UseEvent) inside the render loop below: html.OnClick/toHandler
-// accept a plain func directly (confirmed against the pinned v5.0.1
-// source, html/sugar.go's toHandler), and ui.UseEvent per loop iteration
-// would itself be a hooks-in-a-loop hazard this file is specifically
-// trying to avoid.
-type kebabItem struct {
-	label   string
-	onClick func()
-	danger  bool
+// screenWrapper renders body when state is Populated, and web/ui.StatePanel's
+// matching loading/empty/error/disabled/disconnected view otherwise
+// (TODOS.md D-FLOW's six-state matrix, applied uniformly per PLAN.md
+// §12.6: "loading, empty, and error states are designed for every list") —
+// this is the ONE consumer of every section's ComputeScreenState result, so
+// adopting the shared StatePanel primitive here means every section's
+// non-populated views come from the same tested implementation instead of
+// six hand-rolled `<div class="af-state...">`s.
+//
+// No call site currently sets ScreenInputs.DisabledReason to anything but a
+// presence check (see screenstate.go's own doc comment: it decides which
+// STATE applies, but the raw reason text was never threaded through to
+// render.go before this change either) — DisabledReasonKey below is
+// therefore a generic settings.common.state.disabledGeneric message, not a
+// per-panel one, an honest continuation of the previous behavior rather
+// than a regression this change introduces.
+// screenWrapperRetry is screenWrapper with a recovery path.
+//
+// PLAN.md §12.6 is explicit that a failure must be renderable and
+// recoverable, and web/ui.StatePanel has carried an OnRetry field the whole
+// time — set by nobody, anywhere in the app. Every error view in Settings and
+// on /generate offered a message and no way out except reloading the page.
+func screenWrapperRetry(scr ScreenState, err error, onRetry func(), body ui.Node) ui.Node {
+	errorKey := ""
+	var errorArgs []any
+	if err != nil {
+		errorKey = "settings.common.state.errorDetail"
+		errorArgs = []any{err.Error()}
+	}
+	return affui.StatePanel(affui.StatePanelProps{
+		T:                 t,
+		State:             toListState(scr),
+		ErrorKey:          errorKey,
+		ErrorArgs:         errorArgs,
+		DisabledReasonKey: "settings.common.state.disabledGeneric",
+		OnRetry:           onRetry,
+		Populated:         func() []ui.Node { return []ui.Node{body} },
+	})
 }
 
-type kebabProps struct {
-	Items []kebabItem
+func screenWrapper(scr ScreenState, err error, body ui.Node) ui.Node {
+	errorKey := ""
+	var errorArgs []any
+	if err != nil {
+		errorKey = "settings.common.state.errorDetail"
+		errorArgs = []any{err.Error()}
+	}
+	return affui.StatePanel(affui.StatePanelProps{
+		T:                 t,
+		State:             toListState(scr),
+		ErrorKey:          errorKey,
+		ErrorArgs:         errorArgs,
+		DisabledReasonKey: "settings.common.state.disabledGeneric",
+		Populated:         func() []ui.Node { return []ui.Node{body} },
+	})
 }
 
-func renderKebab(props kebabProps) ui.Node {
+// renderKebabUI/kebabUI is the web/ui.Kebab adoption of this file's former
+// hand-rolled renderKebab/kebabMenu (PLAN.md §12.6/D0-15: destructive
+// actions live behind a ⋯, never a primary button). Isolated into its own
+// component via ui.CreateElement for the same hook-safety reason
+// sectionTabsProps/renderSectionTabs above documents: affui.Kebab's
+// trigger/menu wiring is stateless from THIS file's point of view, but the
+// Open/OnOpenChange state it needs still has to live in some fiber, and
+// giving it its own means the call site (a section's render function) does
+// not itself need an extra ui.UseState just to drive one kebab.
+type kebabUIProps struct {
+	ID        string
+	LabelKey  string
+	LabelArgs []any
+	Items     []affui.KebabItem
+}
+
+func renderKebabUI(props kebabUIProps) ui.Node {
 	open := ui.UseState(false)
-
-	menuItems := make([]ui.Node, 0, len(props.Items))
-	for _, it := range props.Items {
-		it := it
-		menuItems = append(menuItems, h.Li(
-			h.Button(
-				h.Type("button"),
-				h.ClassStr(h.ClassMap(map[string]bool{
-					"af-kebab-item":         true,
-					"af-kebab-item--danger": it.danger,
-				})),
-				h.OnClick(func() {
-					open.Set(false)
-					it.onClick()
-				}),
-				h.Text(it.label),
-			),
-		))
-	}
-
-	return h.Div(
-		h.ClassStr("af-kebab"),
-		h.Button(
-			h.Type("button"),
-			h.ClassStr("af-kebab-trigger"),
-			h.OnClick(func() { open.Set(!open.Get()) }),
-			h.Text(t("common.actions.more")),
-		),
-		h.Show(open.Get(), h.Ul(h.ClassStr("af-kebab-menu"), menuItems)),
-	)
+	return affui.Kebab(affui.KebabProps{
+		T:            t,
+		ID:           props.ID,
+		LabelKey:     props.LabelKey,
+		LabelArgs:    props.LabelArgs,
+		Items:        props.Items,
+		Open:         open.Get(),
+		OnOpenChange: func(o bool) { open.Set(o) },
+	})
 }
 
-func kebabMenu(items []kebabItem) ui.Node {
-	return ui.CreateElement(renderKebab, kebabProps{Items: items})
+func kebabUI(props kebabUIProps) ui.Node {
+	return ui.CreateElement(renderKebabUI, props)
 }
 
-// confirmModalProps/renderConfirmModal is the typed-confirmation gate for
-// irreversible actions (PLAN.md §12.6). Always mounted by its caller
-// (never conditionally included in the tree) with Visible toggling
-// display via h.Show — mirrors web/shell/expiry.go's renderExpiryModal
-// exactly, for the same reason: a component's own hooks (typed's
-// UseState here) must run every time IT renders, so the mount/unmount
-// decision belongs to the parent choosing whether to call CreateElement
-// at all (never done here) rather than to a condition inside this
-// component's own body.
-type confirmModalProps struct {
-	Visible   bool
-	PromptKey string
-	Word      string
-	OnConfirm func()
-	OnCancel  func()
+// disconnectedKebabItem marks a destructive KebabItem as disabled (with the
+// panel's own disconnectedNote() carrying the reason text alongside it,
+// same as every section already renders) while DISCONNECTED — D0-10:
+// refuse mutations while disconnected, never fail silently, never a
+// keyboard-unreachable dead control (KebabItem.Disabled still renders the
+// item, just non-interactive and visually dimmed — see web/ui/kebab.go).
+func disconnectedKebabItem(item affui.KebabItem, disconnected bool) affui.KebabItem {
+	item.Disabled = disconnected
+	return item
 }
 
-func renderConfirmModal(props confirmModalProps) ui.Node {
+// confirmUIProps/renderConfirmUI/confirmUI is the web/ui.Confirm adoption
+// of this file's former hand-rolled confirmModalProps/renderConfirmModal —
+// PLAN.md §12.6's typed-confirmation gate for irreversible actions
+// (revoke-all-sessions, regenerate-recovery-codes, TOML import). Always
+// mounted by its caller (never conditionally included in the tree) with
+// Open toggling AccessibleOverlay's own visibility — mirrors this file's
+// previous convention exactly, and web/shell/expiry.go's renderExpiryModal,
+// for the same reason: a component's own hooks (the typed-input UseState
+// here) must run every time IT renders, so the mount/unmount decision
+// belongs to the parent choosing whether to call CreateElement at all
+// (never done here) rather than to a condition inside this component's own
+// body.
+type confirmUIProps struct {
+	ID             string
+	TitleKey       string
+	MessageKey     string
+	MessageArgs    []any
+	RequiredPhrase string
+	Open           bool
+	Busy           bool
+	OnConfirm      func()
+	OnCancel       func()
+}
+
+func renderConfirmUI(props confirmUIProps) ui.Node {
 	typed := ui.UseState("")
-	matches := ConfirmationMatches(typed.Get(), props.Word)
-
-	return h.Show(props.Visible, h.Div(
-		h.ClassStr("af-modal af-modal--visible"),
-		h.Div(
-			h.ClassStr("af-modal-body"),
-			h.P(h.Text(t(props.PromptKey))),
-			h.P(h.Text(t("common.confirm.typeToConfirm", props.Word))),
-			h.Input(
-				h.Type("text"),
-				h.Value(typed.Get()),
-				h.OnInput(func(e ui.InputEvent) { typed.Set(e.GetValue()) }),
-			),
-			h.Div(
-				h.ClassStr("af-modal-actions"),
-				h.Button(h.Type("button"), h.OnClick(func() {
-					typed.Set("")
-					props.OnCancel()
-				}), h.Text(t("common.actions.cancel"))),
-				h.Button(
-					h.Type("button"),
-					h.DisabledIf(!matches),
-					h.OnClick(func() {
-						if !matches {
-							return
-						}
-						typed.Set("")
-						props.OnConfirm()
-					}),
-					h.Text(t("common.actions.confirm")),
-				),
-			),
-		),
-	))
+	onConfirm := props.OnConfirm
+	onCancel := props.OnCancel
+	return affui.Confirm(affui.ConfirmProps{
+		T:              t,
+		ID:             props.ID,
+		TitleKey:       props.TitleKey,
+		MessageKey:     props.MessageKey,
+		MessageArgs:    props.MessageArgs,
+		RequiredPhrase: props.RequiredPhrase,
+		Typed:          typed.Get(),
+		OnTypedChange:  func(v string) { typed.Set(v) },
+		OnConfirm: func() {
+			typed.Set("")
+			if onConfirm != nil {
+				onConfirm()
+			}
+		},
+		OnCancel: func() {
+			typed.Set("")
+			if onCancel != nil {
+				onCancel()
+			}
+		},
+		Open: props.Open,
+		Busy: props.Busy,
+	})
 }
 
-func confirmModal(props confirmModalProps) ui.Node {
-	return ui.CreateElement(renderConfirmModal, props)
+func confirmUI(props confirmUIProps) ui.Node {
+	return ui.CreateElement(renderConfirmUI, props)
 }
 
 // bgContext returns a fresh, unbounded context for a one-shot RPC fired
