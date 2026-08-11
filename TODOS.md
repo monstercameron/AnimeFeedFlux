@@ -734,7 +734,7 @@ reach and what untrusted input can reach:
       Second-order, worth deciding separately: the response travels the bridge into the WASM client,
       so the whole hash database lands in browser memory. §4 works hard to keep the session token
       out of WASM while the file every hash lives in goes straight through it.
-- [ ] `A8-41` **`sources.Fetcher` has no scheme allowlist, no private/link-local address block, and
+- [x] `A8-41` **FIXED 2026-08-11.** — original report: **`sources.Fetcher` has no scheme allowlist, no private/link-local address block, and
       follows redirects — server-side request forgery.** `fetchOnce` builds a request straight from
       the target string and calls `f.Client.Do`, so nothing stops the fetch reaching
       `http://169.254.169.254/` (the droplet metadata service) or `http://127.0.0.1:9311/` (the
@@ -747,6 +747,16 @@ reach and what untrusted input can reach:
       (`wire.go:1192`, `:1404`, `:1426`), so nothing fetches anything today. This is a
       fix-before-grounded-feeds-ship item — the cost of adding a resolve-then-check dialer is far
       lower now than after the feature is running.
+      `internal/sources/guard.go` adds all three. The scheme allowlist and any IP LITERAL are checked
+      before the request; the resolved address is checked in the DIALER, which is the resolve-then-check
+      shape this ticket asked for and is deliberately not a DNS lookup in `checkTarget` — that would put
+      a network call in the default `go test ./...` (RULE-1) and would leave a
+      time-of-check/time-of-use gap a rebinding record walks straight through. The dialer sees the
+      address the connection actually goes to. `CheckRedirect` re-runs the URL check on every hop and
+      restates the ten-hop limit that replacing Go's default policy would otherwise remove, and
+      `GuardedClient` carries a 30s timeout so one slow upstream cannot stall a run.
+      Blocked: loopback (the admin bridge), link-local (169.254.169.254, where every major cloud serves
+      instance credentials), private, unique-local, unspecified and multicast.
 - [ ] `A8-42` **Fetched upstream text will reach the model context unfiltered — prompt injection.**
       Same gate as `A8-41`: the moment grounded feeds are wired, an article body an attacker
       controls sits in the same context window as the recipe's instructions, and the model's output
@@ -1924,6 +1934,34 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [x] `C0-05` **Pre-create the data directory owned by the non-root user** — named-volume ownership. §15.1
 - [x] `C0-06` `.dockerignore` excluding `.git`, local databases, and backups. §15.1
 - [x] `C0-07` Build cache mounts so rebuilds are cheap. §15.1
+- [ ] `C0-24` **The hardened configuration is the one thing never tested.** `check-container.sh`
+      starts the container with a plain `docker run` — no `--read-only`, no `--cap-drop ALL`, no
+      `--tmpfs /tmp`, no `--security-opt no-new-privileges`, no `--pids-limit`. `deploy/compose.yaml`
+      sets all of them in production. So the configuration that actually ships is the configuration
+      nothing has ever exercised, and `read_only: true` against SQLite is exactly where that bites:
+      the WAL and SHM sidecars live beside the database on the writable volume and are fine, but
+      anything the process writes OUTSIDE that volume — a temp file, a scratch path, the Go
+      runtime's own needs — hits a read-only filesystem, and it fails at first write rather than at
+      boot, which is after the healthcheck has already reported green.
+      Fix: test `deploy/compose.yaml` itself rather than a hand-written `docker run`. A
+      `deploy/compose.test.yaml` overriding only the image (built locally) and the `env_file`
+      (throwaway values) keeps every hardening line under test, and `docker compose config` catches
+      a malformed file before anything starts.
+- [ ] `C0-25` **Nothing proves the PRODUCT works in the container — only that the process boots.**
+      `/healthz` answering means a listener is up. It does not mean migrations ran, a feed renders,
+      conditional GET works, or the admin bundle is served — and that last one is not hypothetical:
+      the Dockerfile's own comment records that `/web/dist` "was never wired into the image, so a
+      container built from this Dockerfile alone would fail NewStaticHandler's ReadDir at boot",
+      and there is still no assertion that it is served.
+      The functional check already exists and is already parameterised for this:
+      `scripts/deploy-verify.sh` takes `AFF_VERIFY_BASE_URL` and does the real work — HTTP 200, the
+      exact Content-Type per format, a second request with the returned validators requiring 304,
+      and `affvalidate` against the LIVE bytes. Point it at the container's published loopback port
+      instead of the public hostname and the whole publish plane is covered with no new test code.
+      Add three assertions it cannot cover: the admin bundle is served (`GET /` on the admin port
+      returns the WASM shell), a fresh volume produces a migrated database, and `docker compose
+      exec`-equivalent CLI paths work in an image with no shell (`--entrypoint`).
+
 - [ ] `C0-20` **`.dockerignore`'s `*.db` does not match `.devrun/aff.db`, and `.devrun/` is not
       excluded at all.** Docker's ignore patterns are `filepath.Match`-style: `*` does not cross a
       `/`, and a pattern is NOT implicitly applied to subdirectories the way `.gitignore` applies

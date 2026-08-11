@@ -2,6 +2,7 @@ package sources
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -86,6 +87,19 @@ func (f *Fetcher) Fetch(ctx context.Context, target string, prevETag, prevModifi
 // happens in the same unit of work before the span should end.
 func (f *Fetcher) fetchOnce(ctx context.Context, target string, prevETag, prevModified string) (result Result, statusCode int, outcome obs.Outcome, err error) {
 	outcome = obs.OutcomeFailed
+
+	// Checked BEFORE the request, and again on every redirect hop by the
+	// client's CheckRedirect (see guard.go). Checking only here would leave
+	// the interesting half open: a trusted upstream can 302 the fetcher at the
+	// metadata service or the admin bridge, and by then the URL under test is
+	// not the one the operator configured (A8-41).
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return Result{}, 0, outcome, fmt.Errorf("sources: parsing %q: %w", target, err)
+	}
+	if err := checkTarget(parsed); err != nil {
+		return Result{}, 0, outcome, errors.New(blockedTargetMessage(target, err))
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
