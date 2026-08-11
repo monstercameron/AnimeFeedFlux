@@ -46,6 +46,24 @@ var staticContentTypes = map[string]string{
 	".js":   "text/javascript; charset=utf-8",
 	".html": "text/html; charset=utf-8",
 	".json": "application/json; charset=utf-8",
+	// .png/.ico: web/build.sh stages the brand icons (docs/
+	// design-direction.md's brand assets) alongside the wasm bundle.
+	// Without an entry here, loadStaticAsset's fallback below serves them
+	// as application/octet-stream — browsers refuse to render an
+	// octet-stream response as the tab favicon (and would offer it as a
+	// download instead of inlining it), so the icon would silently never
+	// appear even though the file itself was served successfully.
+	".png": "image/png",
+	// image/x-icon rather than the IANA-registered image/vnd.microsoft.icon:
+	// the registered form is correct on paper and the de facto one is what
+	// every browser actually keys its icon handling off, the same
+	// spec-versus-practice split PLAN.md §5.4 already records for
+	// application/rss+xml.
+	".ico": "image/x-icon",
+	// .svg is kept even though no SVG ships today: an unknown extension
+	// fails silently (octet-stream, browser refuses to render), so the
+	// entry costs nothing and removes a trap for whoever adds one back.
+	".svg": "image/svg+xml",
 }
 
 // staticRepr is one representation (plain or gzip) of a static asset: the
@@ -174,6 +192,19 @@ func loadStaticAsset(dir, name string, modTime time.Time) (staticAsset, error) {
 // representations are different documents from an HTTP-caching point of
 // view (Vary: Accept-Encoding, RFC 9110 §13.1.1) even though they render to
 // the same bytes in the browser.
+// Has reports whether an asset is served at this exact URL path.
+//
+// It exists so the admin listener's mux can decide between "this is a real
+// asset" and "this is a client-side route that needs the SPA shell" WITHOUT
+// speculatively serving and then intercepting a 404 — the bundle is ~31 MB,
+// and buffering a response to discover its status is not a reasonable price
+// for a routing decision. Routing belongs to the mux; this type stays a pure
+// asset server that knows nothing about the router's paths.
+func (h *StaticHandler) Has(urlPath string) bool {
+	_, ok := h.assets[urlPath]
+	return ok
+}
+
 func (h *StaticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !allowMethod(w, r) {
 		return

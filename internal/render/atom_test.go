@@ -70,7 +70,7 @@ const wantAtomDoc = `<?xml version="1.0" encoding="utf-8"?>
     <updated>2026-01-02T10:00:00Z</updated>
     <link rel="alternate" href="https://example.com/b"/>
     <summary type="text">Summary B</summary>
-    <content type="html">&#x3C;p&#x3E;Body B&#x3C;/p&#x3E;&#x3C;p&#x3E;&#x3C;strong&#x3E;Answer:&#x3C;/strong&#x3E; 42&#x3C;/p&#x3E;</content>
+    <content type="html">&#x3C;p&#x3E;Body B&#x3C;/p&#x3E;&#x3C;hr class=&#x22;spoiler-break&#x22;/&#x3E;&#x3C;p&#x3E;&#x3C;strong&#x3E;Answer:&#x3C;/strong&#x3E; 42&#x3C;/p&#x3E;</content>
   </entry>
   <entry>
     <id>tag:example.com,2026:testfeed/01HXAAAAAAAAAAAAAAAAAAAAAA</id>

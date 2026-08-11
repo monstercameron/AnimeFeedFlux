@@ -16,7 +16,7 @@
       "id": "tag:feeds.example.com,2026:trivia-daily/00000000000000000000000033",
       "url": "https://feeds.example.com/trivia-daily/items/trivia",
       "title": "Which studio animated Cowboy Bebop?",
-      "content_html": "<p>Which studio animated Cowboy Bebop? Tap through to reveal the answer.</p>",
+      "content_html": "<p>Which studio animated Cowboy Bebop? Tap through to reveal the answer.</p><hr class=\"spoiler-break\"/><p><strong>Answer:</strong> <p>ANSWER-COWBOY-BEBOP</p></p>",
       "summary": "Which studio animated Cowboy Bebop? Tap through to reveal the answer.",
       "date_published": "2026-08-09T12:01:39Z",
       "tags": [

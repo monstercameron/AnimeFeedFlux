@@ -1,3 +1,16 @@
+// Package render serializes an internal/model.Channel into the formats
+// subscribers and Slack actually consume: RSS 2.0, Atom 1.0, JSON Feed 1.1,
+// the "/" index page, and a per-item permalink page (PLAN.md §5, §6, §14).
+//
+// It deliberately does NOT sanitize. Item and feed text is assumed already
+// safe HTML/plain-text by the time it reaches this package — that is
+// internal/sanitize's job, run once at the LLM/upstream boundary before
+// storage. Re-sanitizing here would mean every serializer re-implements (and
+// can independently drift from) the allowlist, and it would hide a
+// sanitizer bug behind a second layer instead of surfacing it. What this
+// package does own is XML/JSON *escaping* — turning already-safe text into
+// well-formed output — which is a distinct, narrower job from stripping
+// unsafe markup.
 package render
 
 import (
@@ -105,7 +118,7 @@ func writeItem(b *bytes.Buffer, c model.Channel, it model.Item) {
 	writeElem(b, "      ", "description", it.SummaryText)
 
 	b.WriteString("      <content:encoded>")
-	b.WriteString(CDATA(contentEncodedBody(it)))
+	b.WriteString(CDATA(itemBodyWithAnswer(it)))
 	b.WriteString("</content:encoded>\n")
 
 	guid := TagURI(c.Host, c.TagYear, c.Feed.Slug, it.ItemKey)
@@ -118,13 +131,21 @@ func writeItem(b *bytes.Buffer, c model.Channel, it model.Item) {
 	b.WriteString("    </item>\n")
 }
 
-// contentEncodedBody is the full item HTML for content:encoded: the body,
-// plus — for trivia items — the answer appended after a spoiler break.
-// Appending it here, inside the one field that already carries raw HTML
-// (rather than as a second sibling element), is what keeps the answer out
-// of description/og:description by construction: there is no code path
-// that copies content:encoded's contents back into a plain-text field.
-func contentEncodedBody(it model.Item) string {
+// itemBodyWithAnswer is the full item HTML body: the item's BodyHTML, plus —
+// for trivia items — the answer appended after a spoiler-break marker.
+//
+// This is the ONE place that decides what "the item's HTML content" is. RSS
+// (content:encoded), Atom (content) and JSON Feed (content_html) all render
+// the same underlying document for the same item; a subscriber who happens
+// to pick one format's URL over another's must never see different content
+// for it. Each renderer differs only in *how* it serializes this same
+// string (CDATA vs escaped character data vs a JSON string, per §5.1/§5.2/
+// §5.3) — never in what the string says. Appending the answer here, inside
+// the one field that already carries raw HTML (rather than as a second
+// sibling element), is also what keeps the answer out of
+// description/summary/og:description by construction: there is no code path
+// that copies this field's contents back into a plain-text field.
+func itemBodyWithAnswer(it model.Item) string {
 	if !it.HasAnswer() {
 		return it.BodyHTML
 	}

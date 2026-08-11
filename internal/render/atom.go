@@ -118,14 +118,14 @@ func writeAtomEntry(b *bytes.Buffer, c model.Channel, it model.Item) {
 	// happens to be HTML markup, not raw XML — so this is EscapeText, the
 	// same plain-text escaper as everywhere else, not CDATA (that's the RSS
 	// content:encoded convention, a different spec with different rules).
-	// The trivia answer is folded in here and nowhere else: SummaryText is
-	// what Slack and every plain-text consumer shows, and leaking the answer
-	// there would spoil the question before a reader clicks through (§5.5).
-	content := it.BodyHTML
-	if it.HasAnswer() {
-		content += "<p><strong>Answer:</strong> " + it.AnswerHTML + "</p>"
-	}
-	b.WriteString(`    <content type="html">` + EscapeText(content) + "</content>\n")
+	// The underlying HTML string itself — including, for trivia items, the
+	// answer after its spoiler-break marker — comes from itemBodyWithAnswer,
+	// the same helper RSS's content:encoded and JSON Feed's content_html use,
+	// so the three formats never disagree about what an item's body says.
+	// SummaryText is what Slack and every plain-text consumer shows, and
+	// leaking the answer there would spoil the question before a reader
+	// clicks through (§5.5) — that stays untouched here.
+	b.WriteString(`    <content type="html">` + EscapeText(itemBodyWithAnswer(it)) + "</content>\n")
 
 	b.WriteString("  </entry>\n")
 }

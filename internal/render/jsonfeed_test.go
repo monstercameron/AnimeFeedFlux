@@ -27,7 +27,7 @@ func jsonFeedTestChannel() model.Channel {
 		ItemKey:     "01K2XA1TRIVIAKEYB000000002",
 		Title:       "Item B Trivia",
 		SummaryText: "What is the answer?",
-		BodyHTML:    "<p>What is the answer?</p><p>Answer: 42</p>",
+		BodyHTML:    "<p>What is the answer?</p>",
 		AnswerHTML:  "Answer: 42",
 		Link:        "https://anime.earlcameron.com/i/b",
 		PublishedAt: time.Date(2026, 8, 9, 9, 30, 0, 0, time.UTC),
@@ -81,7 +81,7 @@ const expectedJSONFeed = `{
       "id": "tag:anime.earlcameron.com,2026:trivia/01K2XA1TRIVIAKEYB000000002",
       "url": "https://anime.earlcameron.com/i/b",
       "title": "Item B Trivia",
-      "content_html": "<p>What is the answer?</p><p>Answer: 42</p>",
+      "content_html": "<p>What is the answer?</p><hr class=\"spoiler-break\"/><p><strong>Answer:</strong> Answer: 42</p>",
       "summary": "What is the answer?",
       "date_published": "2026-08-09T09:30:00Z",
       "tags": [

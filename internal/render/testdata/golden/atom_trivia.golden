@@ -17,7 +17,7 @@
     <updated>2026-08-09T12:01:39Z</updated>
     <link rel="alternate" href="https://feeds.example.com/trivia-daily/items/trivia"/>
     <summary type="text">Which studio animated Cowboy Bebop? Tap through to reveal the answer.</summary>
-    <content type="html">&#x3C;p&#x3E;Which studio animated Cowboy Bebop? Tap through to reveal the answer.&#x3C;/p&#x3E;&#x3C;p&#x3E;&#x3C;strong&#x3E;Answer:&#x3C;/strong&#x3E; &#x3C;p&#x3E;ANSWER-COWBOY-BEBOP&#x3C;/p&#x3E;&#x3C;/p&#x3E;</content>
+    <content type="html">&#x3C;p&#x3E;Which studio animated Cowboy Bebop? Tap through to reveal the answer.&#x3C;/p&#x3E;&#x3C;hr class=&#x22;spoiler-break&#x22;/&#x3E;&#x3C;p&#x3E;&#x3C;strong&#x3E;Answer:&#x3C;/strong&#x3E; &#x3C;p&#x3E;ANSWER-COWBOY-BEBOP&#x3C;/p&#x3E;&#x3C;/p&#x3E;</content>
   </entry>
   <entry>
     <id>tag:feeds.example.com,2026:trivia-daily/00000000000000000000000001</id>

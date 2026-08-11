@@ -9,7 +9,10 @@ package feedvalidate
 // URI scheme, the required elements) is re-derived from PLAN.md, not copied
 // from render's source.
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func hasRule(findings []Finding, rule string) bool {
 	for _, f := range findings {
@@ -116,6 +119,33 @@ func TestRSS_PubDateRFC822(t *testing.T) {
 	findings := RSS([]byte(broken))
 	if !hasRule(findings, "§5.1 pubdate-rfc822") {
 		t.Fatalf("expected §5.1 pubdate-rfc822 finding, got %+v", findings)
+	}
+}
+
+// TestRSS_PubDateNotZero proves a pubDate that parses fine but is the zero
+// time.Time (0001-01-01T00:00:00Z) is flagged as an ERROR distinct from a
+// parse failure — a zero Go time.Time reaching a renderer is far more
+// likely than a genuinely intended year-1 date, and it would otherwise
+// render as a plausible-looking, silently wrong pubDate.
+func TestRSS_PubDateNotZero(t *testing.T) {
+	broken := `<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel>
+    <title>Test</title><link>https://x.example/</link><description>d</description>
+    <atom:link rel="self" type="application/rss+xml" href="https://x.example/feed.xml"/>
+    <item>
+      <title>Item</title>
+      <link>https://x.example/items/1</link>
+      <guid isPermaLink="false">tag:x.example,2026:1</guid>
+      <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    </item>
+  </channel></rss>`
+	findings := RSS([]byte(broken))
+	if !hasRule(findings, "§5.1 pubdate-not-zero") {
+		t.Fatalf("expected §5.1 pubdate-not-zero finding, got %+v", findings)
+	}
+	for _, f := range findings {
+		if f.Rule == "§5.1 pubdate-not-zero" && f.Level != Error {
+			t.Fatalf("§5.1 pubdate-not-zero must be an Error, not %v — the document is unreadable/silently wrong, not merely suboptimal", f.Level)
+		}
 	}
 }
 
@@ -298,6 +328,26 @@ func TestAtom_UpdatedRFC3339(t *testing.T) {
 	}
 }
 
+// TestAtom_UpdatedNotZero mirrors TestRSS_PubDateNotZero for Atom's
+// <updated>, at both feed and entry scope.
+func TestAtom_UpdatedNotZero(t *testing.T) {
+	broken := `<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>tag:x.example,2026:test</id>
+  <title>Test</title>
+  <updated>0001-01-01T00:00:00Z</updated>
+  <entry>
+    <id>tag:x.example,2026:test/1</id>
+    <title>Entry</title>
+    <updated>2026-08-10T12:00:00Z</updated>
+    <content type="html">Hello</content>
+  </entry>
+</feed>`
+	findings := Atom([]byte(broken))
+	if !hasRule(findings, "§5.2 updated-not-zero") {
+		t.Fatalf("expected §5.2 updated-not-zero finding, got %+v", findings)
+	}
+}
+
 func TestAtom_EntryContentOrAlternateLink(t *testing.T) {
 	broken := `<feed xmlns="http://www.w3.org/2005/Atom">
   <id>tag:x.example,2026:test</id>
@@ -399,6 +449,18 @@ func TestJSONFeed_ItemContentPresent(t *testing.T) {
 	}
 }
 
+// TestJSONFeed_DatePublishedNotZero mirrors TestRSS_PubDateNotZero for JSON
+// Feed's date_published.
+func TestJSONFeed_DatePublishedNotZero(t *testing.T) {
+	broken := `{"version": "https://jsonfeed.org/version/1.1", "title": "Test", "items": [
+    {"id": "1", "content_html": "hi", "date_published": "0001-01-01T00:00:00Z"}
+  ]}`
+	findings := JSONFeed([]byte(broken))
+	if !hasRule(findings, "§5.3 date-published-not-zero") {
+		t.Fatalf("expected §5.3 date-published-not-zero finding, got %+v", findings)
+	}
+}
+
 func TestJSONFeed_NoDeprecatedAuthor(t *testing.T) {
 	broken := `{"version": "https://jsonfeed.org/version/1.1", "title": "Test", "author": {"name": "Cam"}, "items": [
     {"id": "1", "content_html": "hi", "date_published": "2026-08-10T12:00:00Z"}
@@ -406,6 +468,84 @@ func TestJSONFeed_NoDeprecatedAuthor(t *testing.T) {
 	findings := JSONFeed([]byte(broken))
 	if !hasRule(findings, "§5.3 no-deprecated-author") {
 		t.Fatalf("expected §5.3 no-deprecated-author finding, got %+v", findings)
+	}
+}
+
+// ---- Permalink ----
+
+const goodPermalink = `<!DOCTYPE html>
+<html lang="en-us">
+<head>
+<meta charset="utf-8">
+<title>Which studio animated Cowboy Bebop?</title>
+<meta name="description" content="Which studio animated Cowboy Bebop? Tap through to reveal the answer.">
+<meta property="og:title" content="Which studio animated Cowboy Bebop?">
+<meta property="og:description" content="Which studio animated Cowboy Bebop? Tap through to reveal the answer.">
+<meta property="og:image" content="https://feeds.example.com/trivia-daily/og.png">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://feeds.example.com/trivia-daily/items/trivia">
+<meta property="article:published_time" content="2026-08-09T12:01:39Z">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+<article>
+<h1>Which studio animated Cowboy Bebop?</h1>
+<details>
+<summary>Reveal the answer</summary>
+<p>ANSWER-COWBOY-BEBOP</p>
+</details>
+</article>
+</body>
+</html>`
+
+func TestPermalink_KnownGood(t *testing.T) {
+	findings := Permalink([]byte(goodPermalink))
+	if len(findings) != 0 {
+		t.Fatalf("expected zero findings, got %+v", findings)
+	}
+}
+
+func TestPermalink_MissingOGTags(t *testing.T) {
+	broken := `<!doctype html><html><head></head><body></body></html>`
+	findings := Permalink([]byte(broken))
+	if !hasRule(findings, "§5.5 permalink-og-tags-present") {
+		t.Fatalf("expected §5.5 permalink-og-tags-present finding, got %+v", findings)
+	}
+}
+
+func TestPermalink_OGTypeMustBeArticle(t *testing.T) {
+	broken := strings.Replace(goodPermalink, `content="article"`, `content="website"`, 1)
+	findings := Permalink([]byte(broken))
+	if !hasRule(findings, "§5.5 permalink-og-type-article") {
+		t.Fatalf("expected §5.5 permalink-og-type-article finding, got %+v", findings)
+	}
+}
+
+func TestPermalink_OGURLMustBeAbsolute(t *testing.T) {
+	broken := strings.Replace(goodPermalink,
+		`content="https://feeds.example.com/trivia-daily/items/trivia"`, `content="/items/trivia"`, 1)
+	findings := Permalink([]byte(broken))
+	if !hasRule(findings, "§5.1 no-relative-urls") {
+		t.Fatalf("expected §5.1 no-relative-urls finding, got %+v", findings)
+	}
+}
+
+func TestPermalink_PublishedTimeRFC3339(t *testing.T) {
+	broken := strings.Replace(goodPermalink,
+		`content="2026-08-09T12:01:39Z"`, `content="2026-08-09 12:01:39"`, 1)
+	findings := Permalink([]byte(broken))
+	if !hasRule(findings, "§5.5 permalink-published-time-rfc3339") {
+		t.Fatalf("expected §5.5 permalink-published-time-rfc3339 finding, got %+v", findings)
+	}
+}
+
+func TestPermalink_OGDescriptionPlainText(t *testing.T) {
+	broken := strings.Replace(goodPermalink,
+		`<meta property="og:description" content="Which studio animated Cowboy Bebop? Tap through to reveal the answer.">`,
+		`<meta property="og:description" content="Which studio <b>animated</b> Cowboy Bebop?">`, 1)
+	findings := Permalink([]byte(broken))
+	if !hasRule(findings, "§5.5 description-plain-text") {
+		t.Fatalf("expected §5.5 description-plain-text finding, got %+v", findings)
 	}
 }
 

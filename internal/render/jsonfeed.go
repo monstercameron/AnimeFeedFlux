@@ -95,11 +95,13 @@ func JSONFeed(c model.Channel) ([]byte, error) {
 		// could silently produce an item satisfying neither.
 		doc.Items = append(doc.Items, jsonFeedItem{
 			ID: TagURI(c.Host, c.TagYear, c.Feed.Slug, it.ItemKey),
-			// The answer, if any, lives only in BodyHTML (already assembled by
-			// the caller with SummaryText first, per §5.1's ordering rule) —
-			// never in Summary below, or the channel-level preview would spoil
-			// a trivia question (§5.5).
-			ContentHTML:   sanitizeXMLText(it.BodyHTML),
+			// itemBodyWithAnswer is the same helper RSS's content:encoded and
+			// Atom's content use — it folds the trivia answer (if any) in after
+			// a spoiler-break marker, so content_html says the same thing the
+			// other two formats say for the same item. It is never folded into
+			// Summary below, or the channel-level preview would spoil a trivia
+			// question (§5.5).
+			ContentHTML:   sanitizeXMLText(itemBodyWithAnswer(it)),
 			URL:           it.Link,
 			Title:         sanitizeXMLText(it.Title),
 			Summary:       sanitizeXMLText(it.SummaryText),

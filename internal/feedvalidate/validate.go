@@ -148,6 +148,40 @@ func firstSubmatch(re *regexp.Regexp, s string) string {
 	return m[1]
 }
 
+// dateRangeFinding returns a Finding if t is the zero time.Time, or its year
+// falls outside the four-digit range [0001, 9999], or nil if t is fine.
+//
+// Shared across RSS pubDate, Atom updated, and JSON Feed date_published:
+// the defect this exists to catch — a year >= 10000 formatting into a
+// string its OWN reference layout then rejects on Parse (internal/render/
+// dates.go's rfc822Layout/rfc3339Layout) — is symmetric across every format
+// this package checks, and internal/rpc/item.go's itemValidatePublishedAt
+// closes the same gap at the point a date enters the system. This is the
+// second line of defense: a document that somehow acquires an out-of-range
+// or zero date anyway (legacy data written before that check existed,
+// generation/other write paths this validator does not gate) must still
+// fail `make validate` as an ERROR, per PLAN.md §5.6 — not a warning, since
+// the document is unreadable or silently wrong, not merely suboptimal.
+//
+// The zero-value check is separate from the range check for the same
+// reason it is separate in itemValidatePublishedAt: 0001-01-01T00:00:00Z is
+// INSIDE the four-digit-year range and parses fine, but is overwhelmingly
+// more likely to be an unset Go time.Time that reached the renderer than an
+// intentional publish date — and it renders as a plausible-looking
+// timestamp instead of failing loudly, so a dedicated rule and message
+// distinguishes it from a genuine out-of-range year.
+func dateRangeFinding(t time.Time, zeroRule, rangeRule, label string) *Finding {
+	if t.IsZero() {
+		return &Finding{Error, zeroRule,
+			label + " is the zero time (0001-01-01T00:00:00Z) — almost certainly an unset published_at that reached the renderer, not an intended date"}
+	}
+	if y := t.Year(); y < 1 || y > 9999 {
+		return &Finding{Error, rangeRule,
+			label + " year is outside the four-digit range [0001, 9999] required by RFC 822/RFC 3339"}
+	}
+	return nil
+}
+
 // RSS validates an RSS 2.0 document against the subset of the RSS Advisory
 // Board Best Practices Profile this project's renderer targets (§5.1) plus
 // the Slack-compatibility ordering rule (§5.5).
@@ -225,6 +259,11 @@ func RSS(doc []byte) []Finding {
 		if err != nil {
 			findings = append(findings, Finding{Error, "§5.1 pubdate-rfc822",
 				itemLabel(i) + " pubDate does not parse as RFC 822 with a four-digit year and numeric offset: " + item.PubDate})
+			havePubDates = false
+			continue
+		}
+		if f := dateRangeFinding(t, "§5.1 pubdate-not-zero", "§5.1 pubdate-year-range", itemLabel(i)+" pubDate"); f != nil {
+			findings = append(findings, *f)
 			havePubDates = false
 			continue
 		}
@@ -353,9 +392,11 @@ func Atom(doc []byte) []Finding {
 		if len(updated) != 1 {
 			findings = append(findings, Finding{Error, "§5.2 feed-required-singletons",
 				scope + " must have exactly one <updated> element, found " + itoa(len(updated))})
-		} else if _, ok := parseAtomTimestamp(updated[0]); !ok {
+		} else if t, ok := parseAtomTimestamp(updated[0]); !ok {
 			findings = append(findings, Finding{Error, "§5.2 updated-rfc3339",
 				scope + " <updated> does not parse as RFC 3339 with uppercase T/Z: " + updated[0]})
+		} else if f := dateRangeFinding(t, "§5.2 updated-not-zero", "§5.2 updated-year-range", scope+" <updated>"); f != nil {
+			findings = append(findings, *f)
 		}
 	}
 
@@ -391,9 +432,11 @@ func Atom(doc []byte) []Finding {
 		if len(e.Updated) != 1 {
 			findings = append(findings, Finding{Error, "§5.2 entry-required-singletons",
 				scope + " must have exactly one <updated> element, found " + itoa(len(e.Updated))})
-		} else if _, ok := parseAtomTimestamp(e.Updated[0]); !ok {
+		} else if t, ok := parseAtomTimestamp(e.Updated[0]); !ok {
 			findings = append(findings, Finding{Error, "§5.2 updated-rfc3339",
 				scope + " <updated> does not parse as RFC 3339 with uppercase T/Z: " + e.Updated[0]})
+		} else if f := dateRangeFinding(t, "§5.2 updated-not-zero", "§5.2 updated-year-range", scope+" <updated>"); f != nil {
+			findings = append(findings, *f)
 		}
 
 		for _, l := range e.Links {
@@ -490,12 +533,88 @@ func JSONFeed(doc []byte) []Finding {
 
 		if item.DatePub == nil || trim(*item.DatePub) == "" {
 			findings = append(findings, Finding{Error, "§5.3 date-published-rfc3339", label + " is missing date_published"})
-		} else if _, ok := parseAtomTimestamp(*item.DatePub); !ok {
+		} else if t, ok := parseAtomTimestamp(*item.DatePub); !ok {
 			// date_published shares Atom's RFC 3339 formatter per §5.3, so
 			// the same strict parser applies here.
 			findings = append(findings, Finding{Error, "§5.3 date-published-rfc3339",
 				label + " date_published does not parse as RFC 3339: " + *item.DatePub})
+		} else if f := dateRangeFinding(t, "§5.3 date-published-not-zero", "§5.3 date-published-year-range", label+" date_published"); f != nil {
+			findings = append(findings, *f)
 		}
+	}
+
+	return findings
+}
+
+// ---- Permalink page OG/unfurl tags (§5.5 "Link unfurling") ----
+
+// metaTagPattern matches internal/render/permalink.go's writeMeta output
+// exactly: `<meta attr="key" content="value">`, one tag per line, attr value
+// unescaped (it is always a literal like "og:title" or "name"). Read against
+// the raw document rather than an HTML parser for the same independence
+// reason internal/render's own doc comment gives for RSS/Atom above: this
+// package must not import an HTML tree-builder that could paper over a
+// malformed tag the real unfurler would choke on.
+var metaTagPattern = regexp.MustCompile(`<meta (name|property)="([^"]+)" content="([^"]*)">`)
+
+// Permalink validates an item permalink page (PLAN.md §5.5 "Link
+// unfurling", §6 GET /items/{item_key}) against the OpenGraph/Twitter-card
+// contract Slack's unfurler reads. Slack never fetches the RSS entry when
+// deciding what to show for a shared link — it unfurls this page and reads
+// only these meta tags, never the <body> — so a missing or malformed tag
+// here is exactly as silent a failure as a bad pubDate: the unfurl just
+// renders a bare URL with no title/summary/image, with nothing else in the
+// pipeline reporting an error.
+func Permalink(doc []byte) []Finding {
+	var findings []Finding
+
+	meta := map[string]string{}
+	for _, m := range metaTagPattern.FindAllSubmatch(doc, -1) {
+		meta[string(m[2])] = string(m[3])
+	}
+
+	for _, key := range []string{"og:title", "og:description", "og:type", "og:url", "article:published_time"} {
+		if _, ok := meta[key]; !ok {
+			findings = append(findings, Finding{Error, "§5.5 permalink-og-tags-present",
+				"permalink page is missing meta tag: " + key + " (Slack's unfurl reads only these tags, never the page body)"})
+		}
+	}
+
+	if v, ok := meta["og:type"]; ok && v != "article" {
+		findings = append(findings, Finding{Error, "§5.5 permalink-og-type-article", `og:type must be "article", got: ` + v})
+	}
+
+	if v, ok := meta["og:url"]; ok && trim(v) != "" && !isAbsoluteURI(v) {
+		findings = append(findings, Finding{Error, "§5.1 no-relative-urls", "og:url is not an absolute URL: " + v})
+	}
+	if v, ok := meta["og:image"]; ok && trim(v) != "" && !isAbsoluteURI(v) {
+		findings = append(findings, Finding{Error, "§5.1 no-relative-urls", "og:image is not an absolute URL: " + v})
+	}
+
+	if v, ok := meta["article:published_time"]; ok {
+		if t, parseOK := parseAtomTimestamp(v); !parseOK {
+			findings = append(findings, Finding{Error, "§5.5 permalink-published-time-rfc3339",
+				"article:published_time does not parse as RFC 3339 with uppercase T/Z: " + v})
+		} else if f := dateRangeFinding(t, "§5.5 permalink-published-time-not-zero", "§5.5 permalink-published-time-year-range", "article:published_time"); f != nil {
+			findings = append(findings, *f)
+		}
+	}
+
+	// og:description is what Slack's unfurl shows as the summary line. It
+	// must be the same plain-text contract as RSS <description> (§5.5,
+	// description-plain-text above) — a raw tag here would render literally
+	// in the unfurl, exactly like it would in a Slack channel message.
+	//
+	// NOTE what this check cannot do: it has no oracle for which substring
+	// of the page is "the trivia answer", so it cannot detect a semantic
+	// spoiler leak the way internal/render/slack_test.go's
+	// TestSlack_DescriptionNeverLeaksAnswer can (that test knows the literal
+	// answer token going in). This check only catches raw markup landing in
+	// og:description, the same structural class of bug as the RSS
+	// description-plain-text rule.
+	if v, ok := meta["og:description"]; ok && htmlTagPattern.MatchString(v) {
+		findings = append(findings, Finding{Error, "§5.5 description-plain-text",
+			"og:description contains a raw HTML tag; Slack's unfurl shows this verbatim, no markup"})
 	}
 
 	return findings
