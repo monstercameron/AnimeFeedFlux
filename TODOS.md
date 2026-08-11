@@ -439,6 +439,151 @@ an incident — which is exactly when it is switched on.
       option only while unselected, so option indices shifted and the browser's index-based
       selection displayed the wrong feed; and the preview pane carried a duplicate set of the
       strip's controls.
+### Security review of the auth system 2026-08-11 (A8-31 onward)
+
+A read of the whole authenticated path — `internal/auth` (argon2id, pepper, sessions, TOTP,
+recovery codes, reset tokens), `internal/rpc/auth.go` + `interceptor.go`, `internal/bridge`
+(upgrade, tickets, revalidation), the `sessions`/`totp_used`/`recovery_codes` schema, the wiring
+gate on `AFF_DEV_INSECURE_AUTH`, and the nginx vhost that fronts all of it. Analysis, not a test
+run. What follows is what does NOT hold; the primitives themselves are in good shape (see the
+closing note).
+
+- [ ] `A8-31` **An elevated recovery session becomes a FULL session across a process restart.**
+      `interceptor.go`'s `authorize` decides scope purely from the in-memory `elevatedTracker`, then
+      WRITES that decision onto `sessions.scope` on every call. After a restart the tracker is empty,
+      so `isElevated` returns false, `wantScope` is `full`, the persisted `elevated` value is
+      overwritten with `full`, and the default-deny check (`wantScope != full && !allowed`) passes.
+      The session RecoverWithCode opened — scoped by §12.2 to ChangePassword and ReenrollTOTP — can
+      then reach every RPC in the system for the rest of its 10-minute life, including
+      `RegenerateRecoveryCodes` and every feed mutation.
+      `migrations/0005_session_scope.sql` exists specifically so scope is "something the session
+      carries rather than something that exists only in this process's memory" — and
+      `store.SessionScope`, the READER, has zero non-test callers. The column is write-only, so the
+      migration delivers none of its stated guarantee. `elevatedTracker`'s doc comment claims a
+      restart defaults to "not elevated (i.e. not trusted with anything extra)"; in this code "not
+      elevated" means *full privileges*, so the failure direction is the opposite of what is
+      written. Fix: read the persisted scope and treat elevated-on-the-row as authoritative, with
+      the in-memory tracker able only to NARROW, never to widen.
+      This requires an attacker to already hold a valid recovery-code session, so it is a scope
+      containment failure rather than an authentication bypass — but scope containment is the whole
+      of BF-32.
+- [ ] `A8-32` **Nothing in the process ever learns the client's IP, so per-IP login backoff is one
+      global bucket.** `clientIP()` reads gRPC's peer address; behind the deployed nginx
+      (`deploy/nginx/admin.anime.earlcameron.com.conf`) that is the proxy, and the
+      `X-Real-IP`/`X-Forwarded-For` headers nginx does set are read by no Go code anywhere in the
+      repo. Three consequences, in severity order:
+      (a) every failed login from anywhere shares one counter with the operator's own, so an
+      unauthenticated attacker who simply keeps guessing holds the real admin at a 60-second backoff
+      indefinitely — a remote lockout that costs nothing and needs no credential;
+      (b) `auth_events.ip` records the proxy for every event, so the §4 audit trail cannot attribute
+      anything;
+      (c) §12.5's active-sessions table shows the same address for every row, so "is one of these
+      not me?" — the question that table exists to answer — cannot be answered.
+      Fix: trust `X-Forwarded-For`'s rightmost hop ONLY when the peer is the known proxy, and carry
+      it into the RPC context; never trust the header on a direct connection.
+- [ ] `A8-33` **`AFF_SECRET_KEY` has no minimum length**, and neither does `AFF_PASSWORD_PEPPER`.
+      `config.required()` accepts any non-blank string, and `auth.deriveKey` SHA-256s whatever it
+      gets into a 32-byte AES key — so `AFF_SECRET_KEY=x` boots cleanly and encrypts the TOTP secret
+      at rest under a key with a few bits of entropy. §4's "a stolen DB file alone is not a second
+      factor" is then false, and nothing says so at boot. Fix: a length floor in the validator (the
+      same place that already rejects a pepper version with no pepper), failing loud at startup.
+- [ ] `A8-34` **The admin vhost has no HSTS, no CSP, and no request rate limit.** The publish vhost
+      has `limit_req_zone` and the admin one does not, which is backwards — the publish plane serves
+      cached XML, the admin plane serves the login. `Strict-Transport-Security` is absent from both,
+      so the first request of a session is downgradeable; `Content-Security-Policy` is absent from
+      the vhost that serves the WASM admin bundle. The IP allowlist covers much of this in practice,
+      but it is still the placeholder `203.0.113.0/24` in the file.
+- [ ] `A8-35` **The login ticket travels in the URL query string, so nginx writes it to the access
+      log.** `?ticket=…` lands in `$request` under the default log format. Bounded by the ticket
+      being single-use with a 20-second TTL — an attacker needs log read access inside that window,
+      by which point the browser has almost certainly redeemed it — but it is a credential in a
+      logfile. `ticket.go` documents why a query parameter was the only option available (WASM
+      cannot set WebSocket handshake headers); the cheap fix is at the nginx layer, logging without
+      arguments on this location.
+- [ ] `A8-36` **`auth.Normalize` is documented as applied before hashing and is not applied.**
+      "Normalize applies NFKC before hashing. Without it the same passphrase typed on a different
+      keyboard or platform produces different bytes and fails to verify" — but `Hash`,
+      `HashPeppered`, `Verify` and `VerifyPasswordPeppered` all pass the raw `password` to
+      `argon2.IDKey`. The only callers of `Normalize` are `IsWeak` and `IsBreached`, so it governs
+      the length and breach checks and nothing else. The stated cross-platform property does not
+      hold, and the policy is enforced against one string while the credential is derived from
+      another.
+- [ ] `A8-37` **`sessionTokenFromContext`'s metadata fallback fires for anonymous bridge sockets,
+      contrary to its own comment.** The comment says "only a connection with no bridge session at
+      all falls through this far"; the condition is `ok && sess.Token != ""`, and an anonymous
+      bridge upgrade has a Session with an empty Token — so it does fall through, and
+      browser-supplied gRPC metadata is consulted. Not exploitable on its own (the metadata still
+      has to carry a valid session token, which an XSS cannot read out of an HttpOnly cookie), but
+      §4's "the token never touches JavaScript or WASM" is stated as an invariant and this is a path
+      where a WASM-supplied value authenticates a call. Either drop the metadata source when a
+      bridge session is present, or correct the comment to describe what the code does.
+- [ ] `A8-38` **`backoffTracker`'s map is never evicted.** One entry per distinct peer address,
+      retained for the life of the process, with no sweep of entries whose window has long expired.
+      Inert behind the proxy (one key), unbounded on a directly-reachable listener.
+- [ ] `A8-39` Small inaccuracies found while reading, none of them exploitable: `recoveryAlphabet`'s
+      comment claims 31 symbols and says vowels are dropped (it holds 30, and `A`/`E` are in it — the
+      modulo-bias note is computed off the wrong number, though its conclusion still stands);
+      `auth.NewResetToken` calls `time.Now()` directly rather than an injected clock, unlike the rest
+      of the package; `totp_used` accumulates a row per successful login and is not among the
+      nightly prune's three tables.
+
+What holds, recorded so nobody re-derives it: argon2id at OWASP-plus cost with PHC-encoded params
+and a sanity ceiling computed FROM the defaults (so a future cost bump cannot lock the admin out);
+constant-time comparison everywhere it matters; one generic `errAuthFailed` for every credential
+failure; the KDF always run so a missing admin row is not a timing oracle; TOTP replay enforced by
+`totp_used.step` being the primary key rather than by application logic; recovery codes single-use
+via `UPDATE … WHERE used_at IS NULL` and `RowsAffected`; login tickets single-use inside one
+critical section; `__Host-` + Secure + HttpOnly + SameSite=Strict; exact-match Origin with no
+wildcarding and a missing Origin refused; the session re-checked against the store on EVERY RPC
+rather than at upgrade; and `AFF_DEV_INSECURE_AUTH` gated on a loopback-only listener with the dev
+credential prefill behind a build tag and `-ldflags`, so no credential sits in the tree.
+
+### Adversarial QA sweep 2026-08-11 (A8-20 onward)
+
+Every route and the STATES that matter — signed out, nothing selected, a feed loaded, a new unsaved
+draft, an expanded run, an open item form, all six settings sections — screenshotted in dark and
+light at 1500px, 1200px and 900px, and read as pixels rather than as code.
+
+- [x] `A8-20` **FIXED: on the sign-in screen, Back and Sign in were both filled primary buttons.**
+      The action that commits and the action that retreats looked identical, side by side, on the
+      screen where a wrong click throws away the code you just typed. Back is outlined now. (The fix
+      needed two classes to out-specify the page's generic `button` rule — a class plus a type
+      selector beats a single class, which is why the first attempt changed nothing visible.)
+- [x] `A8-21` **FIXED: the sign-in page had a horizontal scrollbar below ~1180px.** The ring
+      signature is a 110rem pseudo-element centred on the crest, and nothing clipped it, so it pushed
+      the document wide — measured at 900px: scrollWidth 1181 against a 900px viewport. Clipped at
+      the page container with `overflow: clip` (not `hidden`, which would have made it a scroll
+      container and swallowed the card's own focus scrolling). The rings still bleed past the card.
+- [x] `A8-22` **FIXED: pressing "New feed" looked like nothing had happened.** The picker still read
+      "Choose a feed…", the feed list stayed open, and the only tell was the Save button turning
+      blue. The picker now reads "New feed — not saved yet", and the feed list collapses, because a
+      new draft is not a moment for browsing the list you are no longer choosing from.
+- [x] `A8-23` **FIXED: the item form's single-line fields were 1400px wide** — a title or a URL
+      stretched across the whole page, unlike every other form in the app. Capped at a readable
+      measure; the text AREAS keep the full width, because what goes in them is a document.
+- [x] `A8-24` **FIXED: the item form's Save was disabled with no explanation.** It now says a title
+      is required, and the field is marked as such — a dead control with no reason is the same defect
+      §12.3 objects to elsewhere.
+- [x] `A8-25` **FIXED: every row checkbox on /history/items was unnamed and 13px.** A screen reader
+      heard twenty-five identical "checkbox"; a mouse had a 13px target. Named after the item's own
+      title, and enlarged.
+- [x] `A8-26` **FIXED: an expanded run with no log showed a heading over an empty box.** It says the
+      run recorded no log.
+- [x] `A8-27` **FIXED: run durations were raw `time.Duration` strings** — "13.261957s", "908.649ms"
+      and "508.6µs" in one column, six significant figures nobody asked for, on a screen used to scan
+      two dozen rows. Sub-second reads in ms, the rest to one decimal, over a minute in m/s.
+
+- [ ] `A8-28` **`/settings/security`'s only actions for recovery codes and active sessions are
+      unlabeled ⋯ glyphs**, and its fields sit in a ~333px column in a 64rem page. Same two defects
+      that `/settings/data` had before its rework (`A7-16`) — the fix is the same shape and was left
+      out of this pass only because another session is actively editing the settings package.
+- [ ] `A8-29` **`/settings/provider`'s "Active provider" is an unexplained empty text box.** It sits
+      under a labelled heading with no placeholder and no help text, so it reads as a broken field
+      rather than an optional override. Another session's area; noted, not touched.
+- [ ] `A8-30` **Reject reasons render as raw identifiers** — "novelty_duplicate: 1",
+      "tags_not_lowercase: 2". They are diagnostic, so this is defensible, but they are the only
+      machine identifiers left on an operator surface.
+
 ### Feed CRUD 2026-08-11 (A7 series)
 
 - [x] `A7-01` **FIXED: a feed could not be deleted from anywhere in the UI.** `FeedService.Delete`
@@ -644,19 +789,27 @@ worse than a missing feature, because the screen says the setting is in effect.
 
 #### The systemic one
 
-- [ ] `A5-01` **WRITE-ONLY SETTINGS: at least eleven settings persist, round-trip through the UI, and
-      are read by nothing.** Confirmed individually by four independent reviewers:
-      `public_base_url` (the publish plane takes its real base URL from `AFF_PUBLIC_BASE_URL` at boot
-      and never re-reads the setting, so every guid, `atom:link`, subscribe URL and JSON Feed URL
-      ignores it); `default_cache_control` (`internal/publish/server.go` hardcodes `max-age=900`);
-      `default_author` / `default_contact` / `default_copyright` / `default_og_image` (never seed a
-      new feed's identity columns); `default_daily_token_budget` / `default_daily_run_budget` /
-      `default_feed_window` (**partially fixed** — `/generate`'s new-feed draft now reads all three,
-      nothing else does); `staleness_threshold_minutes` (dead: the `/generate` rail uses a hardcoded
-      1440-minute constant and `/healthz` uses a separate env-driven mechanism, so three disagreeing
-      staleness thresholds exist); and the provider price table (see `A5-02`).
-      Each shows a "Saved." confirmation that is true of the database and false of the system.
-      Fix per setting: wire it, or mark the control as not-yet-active. Do not leave it ambiguous.
+- [x] `A5-01` **FIXED 2026-08-11: every setting that has somewhere to go now goes there. — original report:
+      WRITE-ONLY SETTINGS: at least eleven settings persist, round-trip through the UI, and are read by
+      nothing.** Confirmed individually by four independent reviewers. Each showed a "Saved." confirmation
+      that was true of the database and false of the system.
+      Resolved one at a time, each with a test:
+      `public_base_url` — already wired before this pass (`liveBaseURL` + `loadPublishingAtBoot` + the
+      publishing sink); the report was stale on this one.
+      `default_cache_control` — wired through `publish.Deps.CacheControlFn`, read per request so a change
+      needs no restart and is not frozen into already-cached bodies. Unset falls back to the previously
+      hardcoded `max-age=900`.
+      `default_author` / `default_copyright` / `default_og_image` / `default_ttl_minutes` — seed a feed at
+      CREATE, filling only fields the request left empty. Update deliberately does not consult them, or a
+      cleared author could never be cleared.
+      `default_daily_token_budget` / `default_daily_run_budget` / `default_feed_window` — already read by
+      `/generate`'s new-feed draft (`A5-06`).
+      `staleness_threshold_minutes` — the rail now flags stale against it instead of a hardcoded 24h
+      constant. `/healthz` and the nightly webhook keep their grace MULTIPLIER over each feed's own cron
+      interval, which is not a disagreement to collapse: a flat minute count cannot serve an hourly feed
+      and a weekly one at once.
+      the provider price table — `A5-02`.
+      Remaining, and split out rather than left ambiguous: `default_contact` (`A5-50`).
 
 #### Blockers
 
@@ -855,6 +1008,11 @@ worse than a missing feature, because the screen says the setting is in effect.
       files, not a side errand of adding the control.
 - [ ] `A5-42` **STILL OPEN.** Stale doc comments in `web/pages/auth/` (`doc.go`, `backoff_display.go`, `recover.go`)
       claim i18n keys are missing that are now defined and resolving.
+- [ ] `A5-50` **`settings.publishing.default_contact` has nowhere to go.** Split out of `A5-01`, which fixed
+      every other write-only setting. This one cannot be wired as things stand: `feeds` has `author`,
+      `copyright`, `og_image` and `ttl_minutes` columns and no `contact` column, and `Feed` carries no
+      contact field — so the control edits a value with no destination. Either add the column plus the proto
+      field and seed it at create like its siblings, or remove the control. Do not leave it looking wired.
 
 ### Design critique 2026-08-10 (A6 series)
 
@@ -2419,6 +2577,36 @@ no change at all. That is the payoff this section predicted, collected.
       so changing it is mechanical; and the typed-confirmation words are translated (REGENERAR,
       REVOCAR TODO, IMPORTAR, COMPACTAR) deliberately — see `web/i18n/es_settings.go`'s doc comment
       for why that is both safe and necessary.)
+- [x] `T-01` Repository coverage above 80%. §17.2
+      (closed 2026-08-11 at **81.6%**, up from 79.2%, ratchet floor raised 80.1 → 81.0.
+      **The first finding was a measurement bug, not a coverage one:** `./...` includes
+      `gen/aff/v1`, 3,574 statements of protoc output at 0%, which reported the repository at 61.9%
+      while hand-written code sat at 79.2% — and meant the CI ratchet had been failing against a
+      baseline describing a population that no longer existed. Coverage is now measured over
+      `go list ./... | grep -v /gen/` in the Makefile (`COVERPKG`), in `.github/workflows/ci.yml`,
+      and documented in `scripts/coverage-ratchet.sh` so the three cannot drift. The deliberately
+      NOT-taken option was a reflection walk calling all 1,191 generated getters, which would have
+      cleared 80% in one commit while asserting nothing — the exact failure the ratchet script's own
+      doc comment rejects. New tests went to the edges instead: `cmd/affseed` 0% → 83%,
+      `aff admin reset` 21% → covered, `aff admin reset-password` 0% → covered,
+      `animefeedflux healthcheck` 0% → covered, plus `aff encrypt`/`decrypt` overwrite and error
+      paths and the individual `aff doctor` check failures.)
+- [x] `T-02` Fix `affseed --force`, which had never worked. §15
+      (closed 2026-08-11, found by `T-01`'s first test. Three consecutive blockers, each revealed by
+      clearing the previous one: the feed slug already existed (`createFeed` now reuses it); every
+      `published_at` collided, since they derive from a day-truncated clock and two runs on one date
+      compute identical timestamps (`seedJitter` adds a constant per-run offset, constant so it
+      cannot disturb the strictly-increasing ordering the schema requires); and the correction's
+      `content_hash` collided because its wording was fixed (it now names the item it corrects,
+      which is better copy anyway). The flag's help text and the refusal message both promised
+      behaviour no version of this command had.)
+- [x] `T-03` Fix the flaky `TestSchedulerFiresOncePerDayAndRunsBackup`. §17
+      (closed 2026-08-11. Failed roughly one run in three, and it fails inside CI's coverage step,
+      so a red run meant the ratchet never executed. The test advanced a fake clock in a loop and
+      then polled WITHOUT advancing; the scheduler re-registers its next wait only after the real
+      VACUUM completes and computes it from the clock at that moment, so on a loaded machine the
+      next target lands beyond the loop's budget and a non-advancing poll can never reach a target
+      in the fake future. The poll advances too now. Eight consecutive runs green.)
 
 ## DF — Flow sanity walkthroughs, through the UI (§22, §17.5)
 
