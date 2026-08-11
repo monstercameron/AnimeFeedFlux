@@ -850,6 +850,66 @@ type wireRunExecutor struct {
 	log      *slog.Logger
 }
 
+// feedFailureSink implements schedule.FailureSink against the feeds table.
+//
+// The scheduler's consecutive-failure count and auto-disable were in-memory
+// only. feeds.consecutive_failures existed as a column and rode on the Feed
+// proto, and nothing ever wrote it; feeds.enabled — the column the admin UI's
+// toggle reads — was never cleared by an auto-disable. So the count displayed
+// 0 forever, a dropped feed still showed as Enabled while the scheduler
+// refused to dispatch it, and a restart handed a persistently broken feed a
+// clean slate to burn another maxConsecutiveFailures runs against.
+//
+// Raw SQL through Writer(), the same reach-through internal/rpc/feed.go uses
+// for the feed columns store.Store does not expose.
+type feedFailureSink struct {
+	st  *store.Store
+	log *slog.Logger
+}
+
+func (s feedFailureSink) RecordFailure(feedID int64) error {
+	_, err := s.st.Writer().ExecContext(context.Background(),
+		`UPDATE feeds SET consecutive_failures = consecutive_failures + 1 WHERE id = ?`, feedID)
+	return err
+}
+
+func (s feedFailureSink) ResetFailures(feedID int64) error {
+	_, err := s.st.Writer().ExecContext(context.Background(),
+		`UPDATE feeds SET consecutive_failures = 0 WHERE id = ?`, feedID)
+	return err
+}
+
+// DisableFeed clears enabled so the auto-disable survives a restart and the
+// UI agrees with the scheduler. version is bumped for the same reason every
+// other feed write bumps it (§11): a tab holding this feed open must see a
+// conflict rather than silently overwrite the disable with a stale copy.
+func (s feedFailureSink) DisableFeed(feedID int64) error {
+	_, err := s.st.Writer().ExecContext(context.Background(),
+		`UPDATE feeds SET enabled = 0, version = version + 1, updated_at = ? WHERE id = ?`,
+		formatStoreTime(time.Now()), feedID)
+	return err
+}
+
+func (s feedFailureSink) LoadFailures() (map[int64]int, error) {
+	rows, err := s.st.Reader().QueryContext(context.Background(),
+		`SELECT id, consecutive_failures FROM feeds WHERE deleted_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := map[int64]int{}
+	for rows.Next() {
+		var id int64
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
 // runHeartbeatInterval is how often a live run renews its lock. Comfortably
 // inside internal/store's runLockStaleAfter (3 minutes) so a single slow
 // renewal — a busy writer connection, a GC pause — does not let the lock
@@ -1119,6 +1179,9 @@ func buildScheduler(
 		schedule.WithJitterWindow(cfg.ScheduleJitter),
 		schedule.WithLogger(log),
 		schedule.WithMetrics(metrics),
+		// Without this the consecutive-failure count and the auto-disable
+		// live only in this process's memory — see schedule.FailureSink.
+		schedule.WithFailureSink(feedFailureSink{st: st, log: log}),
 	)
 	return r, nil
 }

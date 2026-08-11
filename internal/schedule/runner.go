@@ -132,7 +132,50 @@ func WithRunTimeout(d time.Duration) Option {
 	}
 }
 
-// WithMaxConsecutiveFailures sets how many consecutive failures auto-disable a feed.
+// FailureSink persists the failure state this Runner tracks in memory.
+//
+// It exists because that state was ONLY in memory. The consecutive-failure
+// count and the auto-disable both lived in maps on the Runner, so:
+//
+//   - a restart wiped them, and a persistently broken feed retried forever in
+//     bursts of maxConsecutiveFailures, each burst spending whatever it burns
+//     before failing;
+//   - feeds.consecutive_failures — a column that exists and is carried on the
+//     Feed proto — was never written, so it read 0 no matter what, and an
+//     operator asking "is this feed failing repeatedly?" was told no;
+//   - the admin UI's Enabled toggle reads feeds.enabled, which auto-disable
+//     never touched, so a dropped feed still displayed as Enabled while the
+//     scheduler silently refused to dispatch it.
+//
+// Defined as an interface, and nil-tolerant, because this package is
+// deliberately storage-agnostic (it knows Job, Gate and Executor, not SQL).
+// The composition root supplies the implementation; tests that do not care
+// about persistence leave it nil and get exactly the previous behaviour.
+type FailureSink interface {
+	// RecordFailure increments the stored consecutive-failure count.
+	RecordFailure(feedID int64) error
+	// ResetFailures clears it after a success.
+	ResetFailures(feedID int64) error
+	// DisableFeed persists the auto-disable so it survives a restart and so
+	// the UI stops claiming the feed is enabled.
+	DisableFeed(feedID int64) error
+	// LoadFailures seeds the in-memory counts at startup, so a count that
+	// reached four before a deploy does not restart at zero.
+	LoadFailures() (map[int64]int, error)
+}
+
+// WithFailureSink persists consecutive-failure counts and auto-disables. See
+// FailureSink for what was wrong without it.
+func WithFailureSink(s FailureSink) Option {
+	return func(r *Runner) {
+		if s != nil {
+			r.failureSink = s
+		}
+	}
+}
+
+// WithMaxConsecutiveFailures sets how many consecutive failures auto-disable
+// a feed.
 func WithMaxConsecutiveFailures(n int) Option {
 	return func(r *Runner) {
 		if n > 0 {
@@ -185,6 +228,10 @@ type Runner struct {
 	shutdownTimeout        time.Duration
 	logger                 *slog.Logger
 	metrics                *obs.Metrics
+
+	// failureSink persists what failures/disabled hold in memory. nil means
+	// "do not persist", which is what every test that predates it gets.
+	failureSink FailureSink
 
 	providerSem *Semaphore
 
@@ -265,6 +312,10 @@ func (r *Runner) Disabled(feedID int64) bool {
 // partially-charged LLM call is given every chance to complete rather than
 // being thrown away (PLAN.md §15).
 func (r *Runner) Run(ctx context.Context) error {
+	// Before any dispatch: a count that reached four before a restart must
+	// not resume at zero, or a broken feed retries forever in bursts.
+	r.seedFailures()
+
 	var wg sync.WaitGroup
 	for i := 0; i < r.maxConcurrent; i++ {
 		wg.Add(1)
@@ -485,15 +536,21 @@ func (r *Runner) recordOutcome(feedID int64, err error) {
 
 	if err == nil {
 		r.failures[feedID] = 0
+		r.persistLocked(feedID, "reset", func(s FailureSink) error { return s.ResetFailures(feedID) })
 		r.logOutcomeLocked(feedID, slug, "success", "")
 		return
 	}
 
 	r.failures[feedID]++
+	r.persistLocked(feedID, "record", func(s FailureSink) error { return s.RecordFailure(feedID) })
 	r.logOutcomeLocked(feedID, slug, "failed", err.Error())
 
 	if r.failures[feedID] >= r.maxConsecutiveFailures && !r.disabled[feedID] {
 		r.disabled[feedID] = true
+		// Persisted, so the feed stays stopped across a restart and the UI's
+		// Enabled toggle stops disagreeing with the scheduler about whether
+		// this feed runs.
+		r.persistLocked(feedID, "disable", func(s FailureSink) error { return s.DisableFeed(feedID) })
 		// NOT a run.finished event (this is a feed-state change, not a run
 		// outcome — "disabled" is not one of obs.Outcome's four values), so
 		// it does not go through obs.RunFinished. FieldFeedSlug is reused
@@ -507,6 +564,48 @@ func (r *Runner) recordOutcome(feedID int64, err error) {
 			obs.FieldFeedSlug, slug,
 			"consecutive_failures", r.failures[feedID],
 		)
+	}
+}
+
+// persistLocked runs one FailureSink write, logging a failure rather than
+// propagating it. The caller holds r.mu.
+//
+// A persistence error must not change what the scheduler does: the in-memory
+// state is already updated and is what governs dispatch, so failing to write
+// it down degrades to the previous behaviour (correct in this process, lost
+// on restart) instead of turning a database hiccup into a missed run or a
+// feed that never gets disabled.
+func (r *Runner) persistLocked(feedID int64, op string, write func(FailureSink) error) {
+	if r.failureSink == nil {
+		return
+	}
+	if err := write(r.failureSink); err != nil {
+		r.logger.Warn("persisting feed failure state failed; it is correct in memory but will not survive a restart",
+			"feed_id", feedID, "op", op, "error", err)
+	}
+}
+
+// seedFailures loads persisted consecutive-failure counts at startup so a
+// count that reached four before a deploy does not resume at zero. Feeds
+// already auto-disabled are not re-seeded into r.disabled: the sink persists
+// that as feeds.enabled = 0, and loadSchedulableFeedRows filters on it, so a
+// disabled feed is simply not in the job set to begin with.
+func (r *Runner) seedFailures() {
+	if r.failureSink == nil {
+		return
+	}
+	counts, err := r.failureSink.LoadFailures()
+	if err != nil {
+		r.logger.Warn("loading persisted feed failure counts failed; starting from zero",
+			"error", err)
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for feedID, n := range counts {
+		if _, scheduled := r.jobs[feedID]; scheduled {
+			r.failures[feedID] = n
+		}
 	}
 }
 
