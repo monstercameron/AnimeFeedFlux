@@ -661,6 +661,16 @@ func (s *Store) CompletePasswordReset(ctx context.Context, tokenHash string, now
 // security control by itself — Session.Valid already refuses an expired
 // session on every use — but an unbounded sessions table is still a table
 // that should not grow forever on a single-admin system that logs in daily.
+//
+// Nothing calls it. The nightly job (internal/ops.Prune) prunes exactly three
+// things — expired samples, over-window embeddings, old non-failure runs —
+// and its package doc states that boundary deliberately, so sessions are
+// simply not in it. Left unwired rather than added there: at a 12h absolute
+// lifetime and one admin logging in daily, this is on the order of a few
+// hundred rows a year, which is not worth widening a stated scope for. If the
+// deployment shape ever changes — more operators, shorter sessions, a
+// programmatic login — this is the function to wire, and it wants a
+// PruneResult field beside the other three rather than a call of its own.
 func (s *Store) PurgeExpiredSessions(ctx context.Context, now time.Time) (int, error) {
 	res, err := s.writer.ExecContext(ctx,
 		`DELETE FROM sessions WHERE expires_at < ?`, formatTime(now))
@@ -741,9 +751,21 @@ func (s *Store) ListAuthEvents(ctx context.Context, limit int) ([]AuthEvent, err
 	return out, nil
 }
 
-// RecentFailures counts failed attempts from ip since the given time — the
-// query the per-IP exponential backoff (§4) reads on every login attempt to
-// decide whether to slow this caller down.
+// RecentFailures counts failed attempts from ip since the given time.
+//
+// NOT the query the live backoff reads, despite what this comment used to
+// say. §4's per-IP exponential backoff is implemented in internal/rpc/auth.go
+// as an in-process backoffTracker (blocked/recordFailure/recordSuccess), and
+// this method has no caller outside tests. Anyone auditing the throttle by
+// following this comment would have concluded the database was its source of
+// truth and gone looking for a bug in the wrong layer.
+//
+// The difference is not academic, and it is the reason this is left in place
+// rather than deleted: an in-process tracker starts empty on every restart
+// and is not shared between processes, so backoff state does not survive a
+// deploy. That is acceptable for a single-admin, single-process deployment —
+// restarts are operator-driven, not attacker-driven — and it is what this
+// method would fix if the trade ever stops being acceptable.
 func (s *Store) RecentFailures(ctx context.Context, ip string, since time.Time) (int, error) {
 	var n int
 	err := s.writer.QueryRowContext(ctx,

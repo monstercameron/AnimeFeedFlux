@@ -238,6 +238,17 @@ func (s *Store) DiscardSample(ctx context.Context, id int64) error {
 // meant to be a cheap loop run often — filtering alone (as GetSample and
 // ListSamples already do, for the 24h window itself) would let the table
 // grow forever with rows nothing will ever read again.
+// Superseded, and not the one that runs. The nightly job prunes expired
+// samples with its own statement (internal/ops/prune.go's
+// pruneExpiredSamples, over *sql.DB), and this method has no caller outside
+// tests. Two implementations of one retention policy, and they do not even
+// agree on the boundary: ops uses `expires_at < now`, this uses `<=`. That
+// difference is worth exactly nothing today and is precisely the kind of
+// drift that matters the day someone changes one of them.
+//
+// Kept because it is the store-layer expression of the rule and its tests
+// document the "hard delete is correct here" reasoning above; wire callers to
+// internal/ops.Prune, not to this.
 func (s *Store) PruneExpiredSamples(ctx context.Context, now time.Time) (int, error) {
 	res, err := s.writer.ExecContext(ctx, `DELETE FROM samples WHERE expires_at <= ?`, formatTime(now))
 	if err != nil {
