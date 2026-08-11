@@ -1012,6 +1012,31 @@ func (s *FeedServer) RunNow(ctx context.Context, req *affv1.FeedServiceRunNowReq
 		return nil, err
 	}
 
+	// Refused BEFORE StartRun, because an aggregate has nothing to run and
+	// the row would never be closed.
+	//
+	// generate.Run rejects an aggregate outright (§14.2, "aggregate feeds
+	// have no generator to run") and it does so in the ONE early return that
+	// precedes its commit path — in a function whose doc says it "ALWAYS
+	// calls Store.CommitRun exactly once". The executor only logs that error.
+	// So a Run Now on an aggregate opened a run row, got refused a layer
+	// down, and left the row 'running' until a restart reclaimed it: the feed
+	// read as perpetually running, and this method still returned a run id,
+	// telling the operator it had started.
+	//
+	// Each press leaked another. Nothing renews the run lock once the
+	// executor has returned, so three minutes later the next press was not
+	// even refused as already-running.
+	//
+	// The scheduler never had this problem — loadSchedulableFeedRows filters
+	// `kind != 'aggregate'` — so this is the same rule, applied at the other
+	// entry point that reaches the same executor.
+	if rec.Kind == model.KindAggregate {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"feed %q is an aggregate and has no generator to run; it republishes its members (PLAN.md §14.2)",
+			rec.Slug)
+	}
+
 	runID, err := s.store.StartRun(ctx, rec.ID, "manual", "rpc:feed.RunNow")
 	if errors.Is(err, store.ErrRunInProgress) {
 		return nil, status.Errorf(codes.FailedPrecondition, "feed %q already has a run in progress", rec.Slug)
