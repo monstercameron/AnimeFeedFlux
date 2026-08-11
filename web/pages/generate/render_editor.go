@@ -6,6 +6,18 @@
 // with the variable list inline, novelty settings, budgets, grounded
 // sources, field-scoped validation errors, and the conflict-resolution UI.
 //
+// # Adopted from web/ui (this task)
+//
+// Every single-line field (slug/title/language/cron/timezone/model/
+// temperature/itemsPerRun/feedWindow/noveltyThreshold/budgets/source url
+// and kind) is wui.Input or wui.Select instead of a hand-rolled h.Input —
+// see fieldErrorKV below for how a server FieldError message (already
+// resolved text, not a key) is threaded through wui.Input's key+args
+// ErrorKey/ErrorArgs slot via the existing generate.common.errorText
+// passthrough key. description/systemPrompt/userPrompt stay hand-rolled
+// h.Textarea: web/ui has no multi-line-text primitive (a real gap for this
+// page — see this task's final report). Buttons are wui.Button throughout.
+//
 // # Hook-ordering discipline in this file
 //
 // GWC's On* handlers (h.OnClick/h.OnInput/h.OnChange) each consume one
@@ -31,6 +43,24 @@
 //     plain MapKeyed/MapKeyedIndexed, or adding/removing a row shifts
 //     every hook slot after it in the CALLING fiber. The grounded-sources
 //     list and the conflict per-field list both do this.
+//
+// A THIRD hazard this task's adoption of web/ui surfaced, checked rather
+// than assumed (verified by reading web/ui/input.go, select.go, button.go,
+// toggle.go directly): wui.Input/Select/Button/Toggle each skip
+// registering their On* hook ENTIRELY when Disabled (or Busy, for Button)
+// is true — `if p.OnChange != nil && !p.Disabled { ... }` — unlike this
+// page's own hand-rolled convention (render_sampler.go's original comment:
+// "DisabledIf... only its DOM presence toggles, [OnClick] is always
+// registered"). That means any wui field/button whose Disabled value can
+// legitimately flip between renders of the SAME fiber is a hook-count
+// hazard exactly like #2 above, even though it is not a list. Only the
+// slug field (SlugEditable can flip as the operator selects a different
+// feed into the SAME mounted editor fiber) and the Validate/Save actions
+// (Disabled/Busy track Connected/Saving/FieldErrs) have a Disabled that
+// varies here; both are isolated into their own child fiber below
+// (renderSlugField, renderEditorActions) so that variability can never
+// shift a sibling's hook slot. Every other field/button on this page has
+// a permanently-false Disabled, so no isolation is needed for them.
 package generatepage
 
 import (
@@ -38,16 +68,21 @@ import (
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	wui "github.com/monstercameron/AnimeFeedFlux/web/ui"
 )
 
 type editorProps struct {
-	Connected      bool
-	Draft          *affv1.Feed
-	Loaded         *affv1.Feed
-	IsNew          bool
-	FieldErrs      FieldErrors
-	Saving         bool
-	SaveErr        error
+	Connected bool
+	Draft     *affv1.Feed
+	Loaded    *affv1.Feed
+	IsNew     bool
+	FieldErrs FieldErrors
+	Saving    bool
+	SaveErr   error
+	// ValidateErr is a transport/server failure from Validate itself
+	// (TODOS.md D0-10) — distinct from FieldErrs, which is Validate's
+	// normal, successful response reporting per-field problems.
+	ValidateErr    error
 	ConflictTheirs *affv1.Feed
 	Resolution     ConflictResolution
 
@@ -82,20 +117,54 @@ func renderEditorEmpty(editorEmptyProps) ui.Node {
 	return h.Section(h.ClassStr("af-generate__editor"), h.P(h.Text(deps.I18n.T("generate.editor.noSelection"))))
 }
 
+// fieldErrorKV adapts one FieldErrors lookup (a server-supplied, already
+// resolved message string — MapFieldErrors in logic.go copies
+// FieldError.Message verbatim, it is not a catalogue key) into the
+// key+args pair wui.Input/wui.Select's ErrorKey/ErrorArgs expect: the
+// existing generate.common.errorText passthrough key ("{arg1}") with the
+// message as its one argument, the same pattern errors.go's
+// mutationErrorText already uses for a resolved error string. Returns
+// ("", nil) when the field has no error, so a plain field call site can
+// pass the result straight through without a branch of its own.
+func fieldErrorKV(fe FieldErrors, key string) (string, []any) {
+	msg, ok := fe.For(key)
+	if !ok {
+		return "", nil
+	}
+	return "generate.common.errorText", []any{msg}
+}
+
 func renderEditorForm(p editorProps) ui.Node {
 	t := deps.I18n
+	wt := wui.T(t.T)
 	d := p.Draft
 	spec := d.GetSpec()
 	if spec == nil {
 		spec = &affv1.FeedSpec{}
 	}
 
-	slugEditable := SlugEditable(d)
-
+	// fieldError still backs the three fields with no wui.Input equivalent
+	// (description/systemPrompt/userPrompt stay h.Textarea — web/ui has no
+	// multi-line primitive; see this file's package doc comment).
 	fieldError := func(key string) ui.Node {
 		msg, ok := p.FieldErrs.For(key)
 		return h.If(ok, h.Div(h.ClassStr("af-field-error"), h.Text(msg)))
 	}
+
+	titleErrKey, titleErrArgs := fieldErrorKV(p.FieldErrs, "title")
+	langErrKey, langErrArgs := fieldErrorKV(p.FieldErrs, "language")
+	cronErrKey, cronErrArgs := fieldErrorKV(p.FieldErrs, "cron")
+	tzErrKey, tzErrArgs := fieldErrorKV(p.FieldErrs, "timezone")
+	modelErrKey, modelErrArgs := fieldErrorKV(p.FieldErrs, "model")
+	tempErrKey, tempErrArgs := fieldErrorKV(p.FieldErrs, "temperature")
+	itemsErrKey, itemsErrArgs := fieldErrorKV(p.FieldErrs, "items_per_run")
+	windowErrKey, windowErrArgs := fieldErrorKV(p.FieldErrs, "feed_window")
+	noveltyErrKey, noveltyErrArgs := fieldErrorKV(p.FieldErrs, "novelty.similarity_threshold")
+	tokenBudgetErrKey, tokenBudgetErrArgs := fieldErrorKV(p.FieldErrs, "daily_token_budget")
+	runBudgetErrKey, runBudgetErrArgs := fieldErrorKV(p.FieldErrs, "daily_run_budget")
+	slugErrKey, slugErrArgs := fieldErrorKV(p.FieldErrs, "slug")
+
+	onFieldChange := p.OnFieldChange
 
 	return h.Section(
 		h.ClassStr("af-generate__editor"),
@@ -105,50 +174,45 @@ func renderEditorForm(p editorProps) ui.Node {
 		// an isolated child fiber only when ConflictTheirs != nil.
 		renderConflictGate(t, p),
 
+		// Isolated: SlugEditable can flip between renders of this same
+		// fiber (a different selected feed loads in) — see this file's
+		// package doc comment's third hazard.
+		ui.CreateElement(renderSlugField, slugFieldProps{
+			T: t, Value: d.GetSlug(), Editable: SlugEditable(d),
+			ErrorKey: slugErrKey, ErrorArgs: slugErrArgs, OnFieldChange: onFieldChange,
+		}),
+
+		wui.Input(wui.InputProps{
+			T: wt, ID: "generate-editor-title", LabelKey: "generate.editor.title", Value: d.GetTitle(),
+			ErrorKey: titleErrKey, ErrorArgs: titleErrArgs,
+			OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { f.Title = v }) },
+		}),
 		h.Div(h.ClassStr("af-field"),
-			h.Label(h.Text(t.T("generate.editor.slug"))),
-			h.Input(h.Value(d.GetSlug()), h.DisabledIf(!slugEditable),
-				h.OnInput(func(v string) { p.OnFieldChange(func(f *affv1.Feed) { f.Slug = v }) })),
-			h.If(!slugEditable, h.Div(h.ClassStr("af-field-hint"), h.Text(SlugImmutableReason(t)))),
-			fieldError("slug"),
-		),
-		h.Div(h.ClassStr("af-field"),
-			h.Label(h.Text(t.T("generate.editor.title"))),
-			h.Input(h.Value(d.GetTitle()), h.OnInput(func(v string) { p.OnFieldChange(func(f *affv1.Feed) { f.Title = v }) })),
-			fieldError("title"),
-		),
-		h.Div(h.ClassStr("af-field"),
-			h.Label(h.Text(t.T("generate.editor.description"))),
-			h.Textarea(h.Value(d.GetDescription()), h.OnInput(func(v string) { p.OnFieldChange(func(f *affv1.Feed) { f.Description = v }) })),
+			// for/id pairing, not a bare <label>: without it the field has no
+			// accessible name at all, unlike every wui.Input on this page.
+			h.Label(h.For("generate-editor-description"), h.Text(t.T("generate.editor.description"))),
+			h.Textarea(h.ID("generate-editor-description"), h.Value(d.GetDescription()), h.OnInput(func(v string) { onFieldChange(func(f *affv1.Feed) { f.Description = v }) })),
 			fieldError("description"),
 		),
-		h.Div(h.ClassStr("af-field"),
-			h.Label(h.Text(t.T("generate.editor.language"))),
-			h.Input(h.Value(d.GetLanguage()), h.OnInput(func(v string) { p.OnFieldChange(func(f *affv1.Feed) { f.Language = v }) })),
-			fieldError("language"),
-		),
-		h.Div(h.ClassStr("af-field"),
-			h.Label(h.Text(t.T("generate.editor.kind"))),
-			renderKindSelect(t, d, p),
-			fieldError("kind"),
-		),
+		wui.Input(wui.InputProps{
+			T: wt, ID: "generate-editor-language", LabelKey: "generate.editor.language", Value: d.GetLanguage(),
+			ErrorKey: langErrKey, ErrorArgs: langErrArgs,
+			OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { f.Language = v }) },
+		}),
+		renderKindSelect(t, d, p),
 
 		h.Fieldset(
 			h.Legend(h.Text(t.T("generate.editor.schedule"))),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.editor.cron"))),
-				h.Input(h.Value(spec.GetCron()), h.OnInput(func(v string) {
-					p.OnFieldChange(func(f *affv1.Feed) { ensureSpec(f).Cron = v })
-				})),
-				fieldError("cron"),
-			),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.editor.timezone"))),
-				h.Input(h.Value(spec.GetTimezone()), h.OnInput(func(v string) {
-					p.OnFieldChange(func(f *affv1.Feed) { ensureSpec(f).Timezone = v })
-				})),
-				fieldError("timezone"),
-			),
+			wui.Input(wui.InputProps{
+				T: wt, ID: "generate-editor-cron", LabelKey: "generate.editor.cron", Value: spec.GetCron(),
+				ErrorKey: cronErrKey, ErrorArgs: cronErrArgs,
+				OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Cron = v }) },
+			}),
+			wui.Input(wui.InputProps{
+				T: wt, ID: "generate-editor-timezone", LabelKey: "generate.editor.timezone", Value: spec.GetTimezone(),
+				ErrorKey: tzErrKey, ErrorArgs: tzErrArgs,
+				OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Timezone = v }) },
+			}),
 			h.P(h.ClassStr("af-field-hint"), h.Text(CronReadback(t, spec.GetCron(), spec.GetTimezone()))),
 			// D2-09: the next three runs, jittered — see render_rail.go's
 			// matching comment and logic.go's JitteredRuns doc comment for
@@ -159,55 +223,59 @@ func renderEditorForm(p editorProps) ui.Node {
 
 		h.Fieldset(
 			h.Legend(h.Text(t.T("generate.editor.modelParams"))),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.editor.model"))),
-				h.Input(h.Value(spec.GetModel()), h.OnInput(func(v string) {
-					p.OnFieldChange(func(f *affv1.Feed) { ensureSpec(f).Model = v })
-				})),
-				fieldError("model"),
-			),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.editor.temperature"))),
-				h.Input(h.Type("number"), h.Value(floatStr(spec.GetTemperature())), h.OnInput(func(v string) {
-					p.OnFieldChange(func(f *affv1.Feed) { ensureSpec(f).Temperature = parseFloatOr(v, spec.GetTemperature()) })
-				})),
-				fieldError("temperature"),
-			),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.editor.itemsPerRun"))),
-				h.Input(h.Type("number"), h.Value(intStr(spec.GetItemsPerRun())), h.OnInput(func(v string) {
-					p.OnFieldChange(func(f *affv1.Feed) { ensureSpec(f).ItemsPerRun = int32(parseIntOr(v, int(spec.GetItemsPerRun()))) })
-				})),
-				fieldError("items_per_run"),
-			),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.editor.feedWindow"))),
-				h.Input(h.Type("number"), h.Value(intStr(spec.GetFeedWindow())), h.OnInput(func(v string) {
-					p.OnFieldChange(func(f *affv1.Feed) { ensureSpec(f).FeedWindow = int32(parseIntOr(v, int(spec.GetFeedWindow()))) })
-				})),
-				fieldError("feed_window"),
-			),
+			wui.Input(wui.InputProps{
+				T: wt, ID: "generate-editor-model", LabelKey: "generate.editor.model", Value: spec.GetModel(),
+				ErrorKey: modelErrKey, ErrorArgs: modelErrArgs,
+				OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Model = v }) },
+			}),
+			wui.Input(wui.InputProps{
+				T: wt, ID: "generate-editor-temperature", LabelKey: "generate.editor.temperature", Type: "number",
+				Value: floatStr(spec.GetTemperature()), ErrorKey: tempErrKey, ErrorArgs: tempErrArgs,
+				OnChange: func(v string) {
+					onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Temperature = parseFloatOr(v, spec.GetTemperature()) })
+				},
+			}),
+			wui.Input(wui.InputProps{
+				T: wt, ID: "generate-editor-items-per-run", LabelKey: "generate.editor.itemsPerRun", Type: "number",
+				Value: intStr(spec.GetItemsPerRun()), ErrorKey: itemsErrKey, ErrorArgs: itemsErrArgs,
+				OnChange: func(v string) {
+					onFieldChange(func(f *affv1.Feed) { ensureSpec(f).ItemsPerRun = int32(parseIntOr(v, int(spec.GetItemsPerRun()))) })
+				},
+			}),
+			wui.Input(wui.InputProps{
+				T: wt, ID: "generate-editor-feed-window", LabelKey: "generate.editor.feedWindow", Type: "number",
+				Value: intStr(spec.GetFeedWindow()), ErrorKey: windowErrKey, ErrorArgs: windowErrArgs,
+				OnChange: func(v string) {
+					onFieldChange(func(f *affv1.Feed) { ensureSpec(f).FeedWindow = int32(parseIntOr(v, int(spec.GetFeedWindow()))) })
+				},
+			}),
 		),
 
 		h.Fieldset(
 			h.Legend(h.Text(t.T("generate.editor.prompts"))),
 			h.P(h.ClassStr("af-field-hint"), h.Text(t.T("generate.editor.promptVariablesHint"))),
 			h.Ul(h.ClassStr("af-prompt-vars"),
-				h.Li(h.Text("{{.Today}}")), h.Li(h.Text("{{.Weekday}}")), h.Li(h.Text("{{.Season}}")),
-				h.Li(h.Text("{{.FeedTitle}}")), h.Li(h.Text("{{.ItemsPerRun}}")),
-				h.Li(h.Text("{{.RecentTitles}}")), h.Li(h.Text("{{.Candidates}}")),
+				// These are literal Go text/template variable names the
+				// prompt templates below interpolate at generation time
+				// (logic.go's PromptVars) — identifiers/operator surface
+				// per TODOS.md D6-19, not prose: translating "{{.Today}}"
+				// would break the template it documents, so it is excluded
+				// on purpose rather than missed.
+				h.Li(h.Text("{{.Today}}")), h.Li(h.Text("{{.Weekday}}")), h.Li(h.Text("{{.Season}}")), //nolint:i18n -- template variable identifiers, must not be translated
+				h.Li(h.Text("{{.FeedTitle}}")), h.Li(h.Text("{{.ItemsPerRun}}")), //nolint:i18n -- template variable identifiers, must not be translated
+				h.Li(h.Text("{{.RecentTitles}}")), h.Li(h.Text("{{.Candidates}}")), //nolint:i18n -- template variable identifiers, must not be translated
 			),
 			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.editor.systemPrompt"))),
-				h.Textarea(h.Value(spec.GetSystemPromptTemplate()), h.OnInput(func(v string) {
-					p.OnFieldChange(func(f *affv1.Feed) { ensureSpec(f).SystemPromptTemplate = v })
+				h.Label(h.For("generate-editor-system-prompt"), h.Text(t.T("generate.editor.systemPrompt"))),
+				h.Textarea(h.ID("generate-editor-system-prompt"), h.Value(spec.GetSystemPromptTemplate()), h.OnInput(func(v string) {
+					onFieldChange(func(f *affv1.Feed) { ensureSpec(f).SystemPromptTemplate = v })
 				})),
 				fieldError("system_prompt_template"),
 			),
 			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.editor.userPrompt"))),
-				h.Textarea(h.Value(spec.GetUserPromptTemplate()), h.OnInput(func(v string) {
-					p.OnFieldChange(func(f *affv1.Feed) { ensureSpec(f).UserPromptTemplate = v })
+				h.Label(h.For("generate-editor-user-prompt"), h.Text(t.T("generate.editor.userPrompt"))),
+				h.Textarea(h.ID("generate-editor-user-prompt"), h.Value(spec.GetUserPromptTemplate()), h.OnInput(func(v string) {
+					onFieldChange(func(f *affv1.Feed) { ensureSpec(f).UserPromptTemplate = v })
 				})),
 				fieldError("user_prompt_template"),
 			),
@@ -215,37 +283,37 @@ func renderEditorForm(p editorProps) ui.Node {
 
 		h.Fieldset(
 			h.Legend(h.Text(t.T("generate.editor.noveltyAndBudgets"))),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.editor.noveltyThreshold"))),
-				h.Input(h.Type("number"), h.Value(floatStr(spec.GetNovelty().GetSimilarityThreshold())), h.OnInput(func(v string) {
-					p.OnFieldChange(func(f *affv1.Feed) {
+			wui.Input(wui.InputProps{
+				T: wt, ID: "generate-editor-novelty-threshold", LabelKey: "generate.editor.noveltyThreshold", Type: "number",
+				Value: floatStr(spec.GetNovelty().GetSimilarityThreshold()), ErrorKey: noveltyErrKey, ErrorArgs: noveltyErrArgs,
+				OnChange: func(v string) {
+					onFieldChange(func(f *affv1.Feed) {
 						sp := ensureSpec(f)
 						if sp.Novelty == nil {
 							sp.Novelty = &affv1.NoveltySettings{}
 						}
 						sp.Novelty.SimilarityThreshold = parseFloatOr(v, sp.Novelty.SimilarityThreshold)
 					})
-				})),
-				fieldError("novelty.similarity_threshold"),
-			),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.editor.dailyTokenBudget"))),
-				h.Input(h.Type("number"), h.Value(int64Str(spec.GetDailyTokenBudget())), h.OnInput(func(v string) {
-					p.OnFieldChange(func(f *affv1.Feed) {
+				},
+			}),
+			wui.Input(wui.InputProps{
+				T: wt, ID: "generate-editor-daily-token-budget", LabelKey: "generate.editor.dailyTokenBudget", Type: "number",
+				Value: int64Str(spec.GetDailyTokenBudget()), ErrorKey: tokenBudgetErrKey, ErrorArgs: tokenBudgetErrArgs,
+				OnChange: func(v string) {
+					onFieldChange(func(f *affv1.Feed) {
 						ensureSpec(f).DailyTokenBudget = int64(parseIntOr(v, int(spec.GetDailyTokenBudget())))
 					})
-				})),
-				fieldError("daily_token_budget"),
-			),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.editor.dailyRunBudget"))),
-				h.Input(h.Type("number"), h.Value(intStr(spec.GetDailyRunBudget())), h.OnInput(func(v string) {
-					p.OnFieldChange(func(f *affv1.Feed) {
+				},
+			}),
+			wui.Input(wui.InputProps{
+				T: wt, ID: "generate-editor-daily-run-budget", LabelKey: "generate.editor.dailyRunBudget", Type: "number",
+				Value: intStr(spec.GetDailyRunBudget()), ErrorKey: runBudgetErrKey, ErrorArgs: runBudgetErrArgs,
+				OnChange: func(v string) {
+					onFieldChange(func(f *affv1.Feed) {
 						ensureSpec(f).DailyRunBudget = int32(parseIntOr(v, int(spec.GetDailyRunBudget())))
 					})
-				})),
-				fieldError("daily_run_budget"),
-			),
+				},
+			}),
 		),
 
 		// renderSourcesGate: same "always call, hook-free dispatcher"
@@ -254,39 +322,95 @@ func renderEditorForm(p editorProps) ui.Node {
 		// its own fiber only when the kind is actually GROUNDED.
 		renderSourcesGate(t, d, p, spec),
 
-		h.Div(h.ClassStr("af-editor__actions"),
-			h.If(p.SaveErr != nil, h.Div(h.ClassStr("af-form-error"), h.Textf("%v", p.SaveErr))),
-			h.Button(h.Type("button"), h.DisabledIf(!p.Connected), h.OnClick(func() { p.OnValidate() }),
-				h.Text(t.T("generate.editor.validate"))),
-			h.Button(h.Type("button"), h.DisabledIf(!p.Connected || p.Saving || p.FieldErrs.HasAny()), h.OnClick(func() { p.OnSave() }),
-				h.Text(t.T("generate.editor.save"))),
-		),
+		// Isolated: Save/Validate's Disabled (and Save's Busy) track
+		// Connected/Saving/FieldErrs, which can flip across renders of
+		// this same fiber — see this file's package doc comment's third
+		// hazard.
+		ui.CreateElement(renderEditorActions, editorActionsProps{
+			T: t, Connected: p.Connected, Saving: p.Saving, HasFieldErr: p.FieldErrs.HasAny(),
+			ValidateErr: p.ValidateErr, SaveErr: p.SaveErr, OnValidate: p.OnValidate, OnSave: p.OnSave,
+		}),
 	)
 }
 
-// renderKindSelect's OnChange is a single, always-present hook (the
-// Select element itself never appears/disappears), so no isolation is
-// needed here; the per-option h.Option nodes carry no On* handlers of
-// their own (only Value/AttrIf, neither of which is a hook), so
-// html/shorthand.MapKeyed (not the *Component variant) is the correct,
-// cheaper choice for this particular list.
-func renderKindSelect(t Translator, d *affv1.Feed, p editorProps) ui.Node {
-	kinds := []affv1.FeedKind{affv1.FeedKind_FEED_KIND_GENERATIVE, affv1.FeedKind_FEED_KIND_GROUNDED, affv1.FeedKind_FEED_KIND_AGGREGATE}
-	// Go forbids mixing explicit arguments with a trailing `slice...`
-	// spread against a single `...any` parameter (the call must be either
-	// all individual values or exactly one spread slice) — so the
-	// argument list is assembled by hand instead of written as a mixed
-	// call. Every h.Xxx(fixedArgs..., mappedNodes...) call in this
-	// package follows the same shape for the same reason.
-	selectArgs := []any{
-		h.OnChange(func(v string) {
-			p.OnFieldChange(func(f *affv1.Feed) { f.Kind = kindFromString(v) })
-		}),
+// slugFieldProps/renderSlugField isolate the one field on this page whose
+// Disabled value genuinely varies across renders of the SAME editor fiber
+// (SlugEditable flips as the operator selects a different feed without the
+// Draft-nil/non-nil split in renderEditor remounting the whole form) — see
+// this file's package doc comment.
+type slugFieldProps struct {
+	T             Translator
+	Value         string
+	Editable      bool
+	ErrorKey      string
+	ErrorArgs     []any
+	OnFieldChange func(func(*affv1.Feed))
+}
+
+func renderSlugField(p slugFieldProps) ui.Node {
+	wt := wui.T(p.T.T)
+	helpKey := ""
+	if !p.Editable {
+		helpKey = "generate.editor.slug.immutableReason"
 	}
-	selectArgs = append(selectArgs, anyNodes(h.MapKeyed(kinds, func(k affv1.FeedKind) any { return k }, func(k affv1.FeedKind) ui.Node {
-		return h.Option(h.Value(k.String()), h.AttrIf(d.GetKind() == k, "selected", "selected"), h.Text(t.T(kindKey(k))))
-	}))...)
-	return h.Select(selectArgs...)
+	onFieldChange := p.OnFieldChange
+	return wui.Input(wui.InputProps{
+		T: wt, ID: "generate-editor-slug", LabelKey: "generate.editor.slug",
+		Value: p.Value, Disabled: !p.Editable, HelpKey: helpKey,
+		ErrorKey: p.ErrorKey, ErrorArgs: p.ErrorArgs,
+		OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { f.Slug = v }) },
+	})
+}
+
+// editorActionsProps/renderEditorActions isolate Validate/Save — see this
+// file's package doc comment's third hazard (their Disabled/Busy vary
+// across renders of the same fiber).
+type editorActionsProps struct {
+	T           Translator
+	Connected   bool
+	Saving      bool
+	HasFieldErr bool
+	ValidateErr error
+	SaveErr     error
+	OnValidate  func()
+	OnSave      func()
+}
+
+func renderEditorActions(p editorActionsProps) ui.Node {
+	t := p.T
+	wt := wui.T(t.T)
+	return h.Div(h.ClassStr("af-editor__actions"),
+		h.If(p.ValidateErr != nil, h.Div(h.ClassStr("af-form-error"), h.Role("alert"), h.Text(mutationErrorText(t, p.ValidateErr)))),
+		h.If(p.SaveErr != nil, h.Div(h.ClassStr("af-form-error"), h.Role("alert"), h.Text(mutationErrorText(t, p.SaveErr)))),
+		wui.Button(wui.ButtonProps{
+			T: wt, ID: "generate-editor-validate", LabelKey: "generate.editor.validate",
+			Variant: wui.ButtonSecondary, Disabled: !p.Connected, OnClick: p.OnValidate,
+		}),
+		wui.Button(wui.ButtonProps{
+			T: wt, ID: "generate-editor-save", LabelKey: "generate.editor.save",
+			Variant: wui.ButtonPrimary, Disabled: !p.Connected || p.HasFieldErr, Busy: p.Saving, OnClick: p.OnSave,
+		}),
+	)
+}
+
+// renderKindSelect's OnChange is a single, always-present hook (Disabled is
+// never set here, so wui.Select never skips registering it — see this
+// file's package doc comment's third hazard), so no isolation is needed;
+// safe to call inline in renderEditorForm's own fiber.
+func renderKindSelect(t Translator, d *affv1.Feed, p editorProps) ui.Node {
+	wt := wui.T(t.T)
+	kinds := []affv1.FeedKind{affv1.FeedKind_FEED_KIND_GENERATIVE, affv1.FeedKind_FEED_KIND_GROUNDED, affv1.FeedKind_FEED_KIND_AGGREGATE}
+	options := make([]wui.SelectOption, len(kinds))
+	for i, k := range kinds {
+		options[i] = wui.SelectOption{Value: k.String(), LabelKey: kindKey(k)}
+	}
+	errKey, errArgs := fieldErrorKV(p.FieldErrs, "kind")
+	onFieldChange := p.OnFieldChange
+	return wui.Select(wui.SelectProps{
+		T: wt, ID: "generate-editor-kind", LabelKey: "generate.editor.kind",
+		Value: d.GetKind().String(), Options: options, ErrorKey: errKey, ErrorArgs: errArgs,
+		OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { f.Kind = kindFromString(v) }) },
+	})
 }
 
 func kindFromString(v string) affv1.FeedKind {
@@ -337,6 +461,7 @@ type sourceRow struct {
 
 func renderSources(p sourcesProps) ui.Node {
 	t := p.T
+	wt := wui.T(t.T)
 	rows := make([]sourceRow, len(p.Sources))
 	for i, s := range p.Sources {
 		rows[i] = sourceRow{Index: i, Source: s}
@@ -348,37 +473,45 @@ func renderSources(p sourcesProps) ui.Node {
 	return h.Fieldset(
 		h.Legend(h.Text(t.T("generate.editor.sources"))),
 		h.Ul(sourceListArgs...),
-		h.Button(h.Type("button"), h.OnClick(func() {
+		wui.Button(wui.ButtonProps{T: wt, LabelKey: "generate.editor.addSource", Variant: wui.ButtonSecondary, OnClick: func() {
 			p.OnFieldChange(func(f *affv1.Feed) {
 				sp := ensureSpec(f)
 				sp.Sources = append(sp.Sources, &affv1.SourceSpec{})
 			})
-		}), h.Text(t.T("generate.editor.addSource"))),
+		}}),
 	)
 }
 
 // renderSourceRow is the per-item render func MapKeyedComponent mounts as
 // its OWN fiber (see mapItemComponent in the pinned module's html/sugar.go)
-// — so its two OnInput and one OnClick hooks are isolated from every other
-// row and from renderSources' own (hook-free) fiber, and adding/removing a
-// row cannot shift anyone else's hook slots.
+// — so its OnInput/OnClick hooks are isolated from every other row and
+// from renderSources' own (hook-free) fiber, and adding/removing a row
+// cannot shift anyone else's hook slots. None of this row's controls ever
+// set Disabled, so it does not additionally need this file's third-hazard
+// isolation on top of MapKeyedComponent's own per-row isolation.
 func renderSourceRow(t Translator, p sourcesProps, r sourceRow) ui.Node {
 	i := r.Index
-	msg, hasErr := p.FieldErrs.For(sourceFieldKey(i))
+	wt := wui.T(t.T)
+	idxStr := intStr(int32(i))
+	urlErrKey, urlErrArgs := fieldErrorKV(p.FieldErrs, sourceFieldKey(i))
+	onFieldChange := p.OnFieldChange
 	return h.Li(
-		h.Input(h.Value(r.Source.GetUrl()), h.OnInput(func(v string) {
-			p.OnFieldChange(func(f *affv1.Feed) { ensureSpec(f).Sources[i].Url = v })
-		})),
-		h.Input(h.Value(r.Source.GetKind()), h.Placeholder(t.T("generate.editor.sourceKindPlaceholder")), h.OnInput(func(v string) {
-			p.OnFieldChange(func(f *affv1.Feed) { ensureSpec(f).Sources[i].Kind = v })
-		})),
-		h.Button(h.Type("button"), h.OnClick(func() {
-			p.OnFieldChange(func(f *affv1.Feed) {
+		wui.Input(wui.InputProps{
+			T: wt, ID: "generate-editor-source-url-" + idxStr, LabelKey: "generate.editor.sourceUrl",
+			Value: r.Source.GetUrl(), ErrorKey: urlErrKey, ErrorArgs: urlErrArgs,
+			OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Sources[i].Url = v }) },
+		}),
+		wui.Input(wui.InputProps{
+			T: wt, ID: "generate-editor-source-kind-" + idxStr, LabelKey: "generate.editor.sourceKind",
+			PlaceholderKey: "generate.editor.sourceKindPlaceholder", Value: r.Source.GetKind(),
+			OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Sources[i].Kind = v }) },
+		}),
+		wui.Button(wui.ButtonProps{T: wt, LabelKey: "generate.editor.removeSource", Variant: wui.ButtonSecondary, OnClick: func() {
+			onFieldChange(func(f *affv1.Feed) {
 				sp := ensureSpec(f)
 				sp.Sources = append(sp.Sources[:i], sp.Sources[i+1:]...)
 			})
-		}), h.Text(t.T("generate.editor.removeSource"))),
-		h.If(hasErr, h.Div(h.ClassStr("af-field-error"), h.Text(msg))),
+		}}),
 	)
 }
 
@@ -399,15 +532,14 @@ func renderConflictGate(t Translator, p editorProps) ui.Node {
 
 func renderConflict(p editorProps) ui.Node {
 	t := deps.I18n
+	wt := wui.T(t.T)
 	diffs := DiffFeedFields(p.Draft, p.ConflictTheirs)
 	return h.Div(
 		h.ClassStr("af-conflict"),
 		h.P(h.ClassStr("af-conflict__headline"), h.Text(t.T("generate.editor.conflict.headline"))),
 		h.Div(h.ClassStr("af-conflict__choices"),
-			h.Button(h.Type("button"), h.OnClick(func() { p.OnResolveConflict(ResolveKeepMine, nil) }),
-				h.Text(t.T("generate.editor.conflict.keepMine"))),
-			h.Button(h.Type("button"), h.OnClick(func() { p.OnResolveConflict(ResolveTakeTheirs, nil) }),
-				h.Text(t.T("generate.editor.conflict.takeTheirs"))),
+			wui.Button(wui.ButtonProps{T: wt, LabelKey: "generate.editor.conflict.keepMine", Variant: wui.ButtonSecondary, OnClick: func() { p.OnResolveConflict(ResolveKeepMine, nil) }}),
+			wui.Button(wui.ButtonProps{T: wt, LabelKey: "generate.editor.conflict.takeTheirs", Variant: wui.ButtonSecondary, OnClick: func() { p.OnResolveConflict(ResolveTakeTheirs, nil) }}),
 		),
 		// renderConflictPerFieldGate is itself hook-free; safe to call
 		// whether or not diffs is empty.
@@ -430,6 +562,7 @@ type conflictPerFieldProps struct {
 
 func renderConflictPerField(props conflictPerFieldProps) ui.Node {
 	t := props.T
+	wt := wui.T(t.T)
 	p := props.P
 	rowsArgs := []any{h.ClassStr("af-conflict__rows")}
 	rowsArgs = append(rowsArgs, anyNodes(h.MapKeyedComponent(props.Diffs, func(d FieldDiff) any { return d.FieldKey }, func(d FieldDiff) ui.Node {
@@ -439,25 +572,26 @@ func renderConflictPerField(props conflictPerFieldProps) ui.Node {
 		h.ClassStr("af-conflict__fields"),
 		h.P(h.Text(t.T("generate.editor.conflict.perFieldHint"))),
 		h.Div(rowsArgs...),
-		h.Button(h.Type("button"), h.OnClick(func() {
+		wui.Button(wui.ButtonProps{T: wt, LabelKey: "generate.editor.conflict.applyPerField", Variant: wui.ButtonPrimary, OnClick: func() {
 			p.OnResolveConflict(ResolvePerField, p.PerFieldKeepMine)
-		}), h.Text(t.T("generate.editor.conflict.applyPerField"))),
+		}}),
 	)
 }
 
 // renderConflictFieldRow runs in its own MapKeyedComponent-provided fiber
 // (see renderSourceRow's doc comment for why that matters).
 func renderConflictFieldRow(t Translator, p editorProps, d FieldDiff) ui.Node {
+	wt := wui.T(t.T)
 	return h.Div(
 		h.ClassStr("af-conflict__field"),
 		h.Div(h.Text(d.FieldKey)),
-		h.Div(h.Textf("%s: %s", t.T("generate.editor.conflict.mine"), d.Mine)),
-		h.Div(h.Textf("%s: %s", t.T("generate.editor.conflict.theirs"), d.Theirs)),
-		h.Button(h.Type("button"), h.OnClick(func() {
+		h.Div(h.Text(t.T("generate.common.labelValue", t.T("generate.editor.conflict.mine"), d.Mine))),
+		h.Div(h.Text(t.T("generate.common.labelValue", t.T("generate.editor.conflict.theirs"), d.Theirs))),
+		wui.Button(wui.ButtonProps{T: wt, LabelKey: "generate.editor.conflict.keepMineField", Variant: wui.ButtonSecondary, OnClick: func() {
 			choice := cloneBoolMap(p.PerFieldKeepMine)
 			choice[d.FieldKey] = true
 			p.SetPerFieldChoice(choice)
-		}), h.Text(t.T("generate.editor.conflict.keepMineField"))),
+		}}),
 	)
 }
 

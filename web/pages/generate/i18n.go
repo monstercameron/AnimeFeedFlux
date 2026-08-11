@@ -2,6 +2,7 @@ package generatepage
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -40,6 +41,10 @@ type Formatters interface {
 	// RelativeTime renders how long ago t was, relative to now (rail's
 	// "last build" — D2-02).
 	RelativeTime(t, now time.Time) string
+	// Percent renders a 0..1 fraction as "NN%". Novelty similarity is the
+	// only caller: it was being interpolated raw, so the sampler showed
+	// "0.8734222" where it meant "87%".
+	Percent(fraction float64) string
 }
 
 // fallbackTranslator returns the key itself when no real catalogue is
@@ -80,6 +85,10 @@ func (fallbackFormatters) Currency(usd float64) string {
 	return fmt.Sprintf("$%.4f", usd)
 }
 
+func (fallbackFormatters) Percent(fraction float64) string {
+	return strconv.FormatFloat(fraction*100, 'f', 0, 64) + "%"
+}
+
 func (fallbackFormatters) RelativeTime(t, now time.Time) string {
 	d := now.Sub(t)
 	switch {
@@ -98,3 +107,8 @@ func (fallbackFormatters) RelativeTime(t, now time.Time) string {
 
 // DefaultFormatters is used until Deps.Formatters is set.
 var DefaultFormatters Formatters = fallbackFormatters{}
+
+// catalogLocale, formatCount and errorText moved to errors.go: every caller
+// is `js && wasm`, and an untagged declaration is dead code in the host
+// build that `staticcheck ./...` — which the pre-commit hook runs with the
+// host toolchain — reports as U1000.

@@ -376,9 +376,12 @@ func CandidateViewContent(v CandidateView, c *affv1.SampleCandidate) string {
 // nearest existing item when there is one so PLAN.md §12.3's "shows the
 // verdict with the nearest existing item" holds even on a pass (near-miss
 // but still accepted), not only on a hard reject.
-func NoveltySummary(t Translator, v *affv1.NoveltyVerdict) string {
+func NoveltySummary(t Translator, fmtr Formatters, v *affv1.NoveltyVerdict) string {
 	if t == nil {
 		t = DefaultTranslator
+	}
+	if fmtr == nil {
+		fmtr = DefaultFormatters
 	}
 	if v == nil {
 		return t.T("generate.sampler.novelty.unknown")
@@ -387,9 +390,9 @@ func NoveltySummary(t Translator, v *affv1.NoveltyVerdict) string {
 		return t.T("generate.sampler.novelty.novel")
 	}
 	if v.GetIsNovel() {
-		return t.T("generate.sampler.novelty.novelNear", v.GetSimilarity(), v.GetNearestItemTitle())
+		return t.T("generate.sampler.novelty.novelNear", fmtr.Percent(v.GetSimilarity()), v.GetNearestItemTitle())
 	}
-	return t.T("generate.sampler.novelty.rejected", v.GetSimilarity(), v.GetNearestItemTitle())
+	return t.T("generate.sampler.novelty.rejected", fmtr.Percent(v.GetSimilarity()), v.GetNearestItemTitle())
 }
 
 // FailedLinks filters a candidate's link verdicts down to the failures
@@ -606,6 +609,45 @@ func applyFeedField(f *affv1.Feed, key, value string) {
 // "changed".
 func DraftDirty(loaded, draft *affv1.Feed) bool {
 	return len(DiffFeedFields(draft, loaded)) > 0
+}
+
+// ---------------------------------------------------------------------
+// Sample-survives-refresh persistence (D2-29)
+// ---------------------------------------------------------------------
+
+// persistedSampleStorageKey lives in render.go: its only callers are
+// `js && wasm`, and an untagged declaration is dead code in the host build
+// that `staticcheck ./...` reports as U1000.
+
+// sampleRetentionTTL is D2-29's "survive a page refresh for 24h" window.
+const sampleRetentionTTL = 24 * time.Hour
+
+// PersistedSampleState is the JSON envelope written to/read from
+// localStorage so an in-flight (or just-finished) sample survives a page
+// refresh. SavedAtUnix is stamped at write time so a stale entry (older
+// than sampleRetentionTTL, or from a browser session left open past it)
+// is treated as absent rather than resurrected.
+type PersistedSampleState struct {
+	SavedAtUnix       int64                    `json:"savedAtUnix"`
+	FeedSlug          string                   `json:"feedSlug"`
+	SampleID          string                   `json:"sampleId"`
+	Candidates        []*affv1.SampleCandidate `json:"candidates"`
+	SampleSize        int32                    `json:"sampleSize"`
+	TempOverride      float64                  `json:"tempOverride"`
+	SelectedCandidate int                      `json:"selectedCandidate"`
+	SelectedView      CandidateView            `json:"selectedView"`
+}
+
+// PersistedSampleUsable reports whether a stored snapshot is both for the
+// given feed slug and still inside the 24h retention window as of now, so
+// the hydration effect and its tests can share one definition of "still
+// good" instead of duplicating the slug/TTL check inline.
+func PersistedSampleUsable(ps PersistedSampleState, slug string, now time.Time) bool {
+	if ps.SampleID == "" || len(ps.Candidates) == 0 || ps.FeedSlug == "" || ps.FeedSlug != slug {
+		return false
+	}
+	savedAt := time.Unix(ps.SavedAtUnix, 0)
+	return now.Sub(savedAt) < sampleRetentionTTL && now.Sub(savedAt) >= 0
 }
 
 // ---------------------------------------------------------------------

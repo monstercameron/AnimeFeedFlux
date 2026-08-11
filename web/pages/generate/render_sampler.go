@@ -10,13 +10,27 @@
 // ItemService.PromoteSample against a server-issued sample_id/
 // candidate_id pair, never a locally-constructed item.
 //
+// # Adopted from web/ui (this task)
+//
+// The candidate list's six-state switch renders through wui.StatePanel/
+// uiListState (nodeutil.go) — the precedence decision is still
+// SelectListState in logic.go, unchanged and host-tested. The per-candidate
+// tab strip and the four-view tab strip are both wui.Tabs (roving-tabindex
+// arrow-key navigation, which the previous hand-rolled `<button>` loops had
+// none of). Sample-size/temperature-override are wui.Input; Sample/Cancel/
+// Promote/Discard are wui.Button.
+//
 // See render_editor.go's package-level doc comment for this file's hook-
 // ordering discipline (hook-free dispatchers + ui.CreateElement for real
 // Go-level branches, MapKeyedComponent for any variable-length list whose
-// rows carry their own On* handler) — the same two hazards apply here:
+// rows carry their own On* handler, and the THIRD hazard web/ui's own
+// Disabled-skips-the-hook behavior introduces) — all four apply here:
 // the "no feed selected/saved yet" early state, the six-state candidate
-// list switch, and the candidate tab strip (0-5 items, changing live as a
-// stream comes in).
+// list switch, the candidate tab strip (0-5 items, changing live as a
+// stream comes in — genuinely variable, unlike the four fixed view tabs),
+// and the Sample/Cancel controls (Disabled tracks Connected/Sampling/
+// DisabledReason, isolated below for the same reason render_editor.go
+// isolates Validate/Save).
 package generatepage
 
 import (
@@ -24,6 +38,7 @@ import (
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	wui "github.com/monstercameron/AnimeFeedFlux/web/ui"
 )
 
 type samplerProps struct {
@@ -46,6 +61,12 @@ type samplerProps struct {
 
 	RemainingBudget float64
 	Prices          []*affv1.PriceEntry
+
+	// ActionErr is the last Promote/Discard mutation failure (TODOS.md
+	// D0-10) — distinct from SampleErr, which is the sample stream's own
+	// failure and drives the six-state candidate list, not a
+	// post-candidate action on it.
+	ActionErr error
 
 	OnSample  func()
 	OnCancel  func()
@@ -75,55 +96,70 @@ func renderSamplerBody(p samplerProps) ui.Node {
 
 	state := SelectListState(p.Connected, p.DisabledReason, p.Sampling, p.SampleErr, !p.Sampling && len(p.Candidates) == 0)
 
-	estUSD, haveEst := EstimateSampleCostUSD(p.Prices, p.Feed.GetSpec().GetModel(),
-		len(p.Feed.GetSpec().GetSystemPromptTemplate())+len(p.Feed.GetSpec().GetUserPromptTemplate()),
-		400, p.SampleSize)
-	estText := t.T("generate.sampler.estimateUnavailable")
-	if haveEst {
-		estText = t.T("generate.sampler.estimatedCost", fmtr.Currency(estUSD))
-	}
-
 	return h.Section(
 		h.ClassStr("af-generate__sampler"),
-		h.Div(h.ClassStr("af-sampler__controls"),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.sampler.size"))),
-				h.Input(h.Type("number"), h.Value(intStr(p.SampleSize)), h.OnInput(func(v string) {
-					n := int32(parseIntOr(v, int(p.SampleSize)))
-					if ValidSampleSize(n) {
-						p.SetSampleSize(n)
-					}
-				})),
-			),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.Text(t.T("generate.sampler.temperatureOverride"))),
-				h.Input(h.Type("number"), h.Value(floatStr(p.TempOverride)), h.OnInput(func(v string) {
-					p.SetTempOverride(parseFloatOr(v, p.TempOverride))
-				})),
-			),
-			h.Div(h.ClassStr("af-sampler__budget"),
-				h.Text(estText),
-				h.Br(),
-				h.Text(t.T("generate.sampler.remainingBudget", fmtr.Currency(p.RemainingBudget))),
-			),
-			h.If(p.DisabledReason != "", h.Div(
-				h.ClassStr("af-sampler__disabled-reason"),
-				h.Text(p.DisabledReason),
-			)),
-			h.Button(
-				h.Type("button"),
-				h.DisabledIf(!p.Connected || p.Sampling || p.DisabledReason != "" || !ValidSampleSize(p.SampleSize)),
-				h.OnClick(func() { p.OnSample() }),
-				h.Text(t.T("generate.sampler.sampleButton", estText)),
-			),
-			// h.If evaluates the Button node eagerly every render (see
-			// render_editor.go's doc comment) — this OnClick hook is
-			// always registered, only its DOM presence toggles on
-			// p.Sampling, which keeps this fiber's hook count fixed.
-			h.If(true, h.Button(h.Type("button"), h.DisabledIf(!p.Sampling), h.OnClick(func() { p.OnCancel() }), h.Text(t.T("generate.sampler.cancel")))),
-		),
+		// Isolated: Cancel's Disabled tracks Sampling, and web/ui.Button
+		// skips registering its OnClick hook entirely while Disabled is
+		// true, so this block is its own child fiber rather than risking a
+		// hook-slot shift in whatever is added after it here.
+		ui.CreateElement(renderSamplerControls, samplerControlsProps{
+			T: t, Fmtr: fmtr, RemainingBudget: p.RemainingBudget,
+			DisabledReason: p.DisabledReason, Sampling: p.Sampling, OnCancel: p.OnCancel,
+		}),
 
 		renderCandidateListGate(state, p),
+	)
+}
+
+type samplerControlsProps struct {
+	T               Translator
+	Fmtr            Formatters
+	RemainingBudget float64
+	DisabledReason  string
+	Sampling        bool
+	OnCancel        func()
+}
+
+// renderSamplerControls is what is LEFT of the sampler's old control block.
+//
+// Size, temperature override, the cost estimate and the Sample button all
+// moved to the strip (render_workbench.go): they are inputs that change what
+// a preview produces, and the workbench's one rule is that those live on the
+// row with the button that spends the money. Repeating them here gave the
+// page two Sample buttons and two size fields whose values had to agree.
+//
+// What stays is everything that is ABOUT a run rather than an input to one:
+// the remaining budget, the reason the button is disabled, and Cancel — which
+// cannot move to the strip because the strip's single button is already the
+// Preview action mid-flight.
+func renderSamplerControls(p samplerControlsProps) ui.Node {
+	t := p.T
+	wt := wui.T(t.T)
+	fmtr := p.Fmtr
+
+	return h.Div(h.ClassStr("af-sampler__controls"),
+		// The remaining-budget figure that used to sit here is gone until
+		// something can fill it. It was initialised to 0.0 and updated by no
+		// response on any code path — SampleStream's proto carries no field
+		// for it — so it read "Remaining budget: $0.0000" forever, which an
+		// operator can only take as "the budget is spent". A number that is
+		// always wrong is worse than an absent one. Restoring it needs a
+		// proto field; see TODOS A5-13.
+		h.Show(p.RemainingBudget > 0, h.Div(h.ClassStr("af-sampler__budget"),
+			h.Text(t.T("generate.sampler.remainingBudget", fmtr.Currency(p.RemainingBudget))),
+		)),
+		// Cancel appears only while a sample is actually in flight. A
+		// permanently visible, permanently disabled button at the top of the
+		// output pane was the largest control on the page and did nothing
+		// 99% of the time.
+		h.Show(p.Sampling, wui.Button(wui.ButtonProps{
+			T: wt, ID: "generate-sampler-cancel", LabelKey: "generate.sampler.cancel",
+			Variant: wui.ButtonSecondary, OnClick: p.OnCancel,
+		})),
+		h.If(p.DisabledReason != "", h.Div(
+			h.ClassStr("af-sampler__disabled-reason"),
+			h.Text(p.DisabledReason),
+		)),
 	)
 }
 
@@ -136,22 +172,40 @@ func renderSamplerBody(p samplerProps) ui.Node {
 // switch builds zero On*-handler nodes directly (ListPopulated dispatches
 // through CreateElement instead of building hook-bearing nodes inline),
 // so no case can leave a stray hook behind that another case skips.
+//
+// wui.StatePanel replaces the previous hand-rolled per-state switch (see
+// this file's package doc comment); like render_rail.go's use of it, this
+// is safe called inline because none of StatePanel's own branches directly
+// register an On* hook in THIS fiber (its error view's retry button is
+// never built — OnRetry is always nil here — and its populated view
+// delegates entirely to the CreateElement-isolated renderCandidateResults
+// below).
 func renderCandidateListGate(state ListState, p samplerProps) ui.Node {
 	t := deps.I18n
-	switch state {
-	case ListDisconnected:
-		return h.P(h.ClassStr("af-sampler__status"), h.Text(t.T("generate.sampler.disconnected")))
-	case ListDisabledWithReason:
-		return h.P(h.ClassStr("af-sampler__status"), h.Text(p.DisabledReason))
-	case ListError:
-		return h.P(h.ClassStr("af-sampler__status af-sampler__status--error"), h.Textf("%v", p.SampleErr))
-	case ListLoading:
-		return h.P(h.ClassStr("af-sampler__status"), h.Text(t.T("generate.sampler.streaming")))
-	case ListEmpty:
-		return h.P(h.ClassStr("af-sampler__status"), h.Text(t.T("generate.sampler.empty")))
-	default:
-		return ui.CreateElement(renderCandidateResults, p)
-	}
+	wt := wui.T(t.T)
+	// DisabledReasonKey below is p.DisabledReason itself — already
+	// resolved prose (SampleDisabledReason in logic.go calls t.T
+	// internally and may interpolate a failure count), not a catalogue
+	// key. wui.StatePanelProps has no DisabledReasonArgs field to
+	// interpolate a reason through properly (unlike ErrorKey/ErrorArgs
+	// below) — a real web/ui API gap for a state whose reason needs an
+	// argument (see this task's final report). This relies on the
+	// documented catalogue contract that an unrecognized key renders as
+	// itself (D6-07/i18n.go's fallbackTranslator doc comment), which
+	// happens to already be the correct, resolved text — correct in
+	// practice, but not a clean use of the key+args API.
+	return wui.StatePanel(wui.StatePanelProps{
+		T:                 wt,
+		State:             uiListState(state),
+		ErrorKey:          "generate.common.errorText",
+		ErrorArgs:         []any{mutationErrorText(t, p.SampleErr)},
+		EmptyKey:          "generate.sampler.empty",
+		ReconnectingKey:   "generate.sampler.disconnected",
+		DisabledReasonKey: p.DisabledReason,
+		Populated: func() []ui.Node {
+			return []ui.Node{ui.CreateElement(renderCandidateResults, p)}
+		},
+	})
 }
 
 func renderCandidateResults(p samplerProps) ui.Node {
@@ -161,46 +215,64 @@ func renderCandidateResults(p samplerProps) ui.Node {
 	}
 	current := p.Candidates[idx]
 
-	tabs := make([]candidateTab, len(p.Candidates))
-	for i, c := range p.Candidates {
-		tabs[i] = candidateTab{Index: i, Candidate: c, Selected: i == idx, OnSelect: p.SetSelected}
-	}
-
-	tabsArgs := []any{h.ClassStr("af-sampler__tabs")}
-	tabsArgs = append(tabsArgs, anyNodes(h.MapKeyedComponent(tabs, func(tb candidateTab) any { return tb.Candidate.GetCandidateId() }, renderCandidateTab))...)
-
 	return h.Div(
 		h.ClassStr("af-sampler__results"),
-		h.Div(tabsArgs...),
+		// Isolated: candidate count is 0-5 and changes live as the stream
+		// delivers more candidates — a genuinely variable-length tab strip
+		// (see this file's package doc comment), so it gets its own child
+		// fiber rather than being called inline the way the four FIXED
+		// view tabs are in renderCandidateDetail below.
+		ui.CreateElement(renderCandidateTabStrip, candidateTabsProps{
+			T: deps.I18n, Candidates: p.Candidates, Selected: p.SelectedIndex, SetSelected: p.SetSelected,
+		}),
 		// current's identity/content changes as selection or streaming
 		// progresses, but renderCandidateDetail's own hook count never
-		// depends on that content (fixed 4 view tabs + Promote + Discard;
-		// see its doc comment) — no isolation needed beyond it being its
-		// own component below, which keeps its hooks off this function's
-		// (also hook-free, aside from the isolated MapKeyedComponent
-		// rows above) fiber.
-		ui.CreateElement(renderCandidateDetail, candidateDetailProps{T: deps.I18n, Fmtr: deps.Formatters, Candidate: current, View: p.View, SetView: p.SetView, OnPromote: p.OnPromote, OnDiscard: p.OnDiscard}),
+		// depends on that content (see its doc comment) — no isolation
+		// needed beyond it being its own component below, which keeps its
+		// hooks off this function's (also hook-free, aside from the
+		// isolated candidate-tabs fiber above) fiber.
+		ui.CreateElement(renderCandidateDetail, candidateDetailProps{T: deps.I18n, Fmtr: deps.Formatters, Candidate: current, View: p.View, SetView: p.SetView, OnPromote: p.OnPromote, OnDiscard: p.OnDiscard, ActionErr: p.ActionErr}),
 	)
 }
 
-// candidateTab is MapKeyedComponent's per-row item for the tab strip —
-// bundling Index/Selected/OnSelect this way (rather than a shared loop
-// variable) is what makes each tab's own OnClick hook see the right
-// index once it lands in its own isolated fiber.
-type candidateTab struct {
-	Index     int
-	Candidate *affv1.SampleCandidate
-	Selected  bool
-	OnSelect  func(int)
+// candidateTabsProps/renderCandidateTabStrip wrap the per-candidate
+// wui.Tabs call in its own fiber (see renderCandidateResults' call site
+// comment above for why: 0-5 tabs, changing live).
+type candidateTabsProps struct {
+	T           Translator
+	Candidates  []*affv1.SampleCandidate
+	Selected    int
+	SetSelected func(int)
 }
 
-func renderCandidateTab(tb candidateTab) ui.Node {
-	return h.Button(
-		h.Type("button"),
-		h.ClassStr(h.ClassMap(map[string]bool{"af-sampler__tab": true, "af-sampler__tab--active": tb.Selected})),
-		h.OnClick(func() { tb.OnSelect(tb.Index) }),
-		h.Textf("%d", tb.Index+1),
-	)
+func renderCandidateTabStrip(p candidateTabsProps) ui.Node {
+	wt := wui.T(p.T.T)
+	idx := p.Selected
+	if idx < 0 || idx >= len(p.Candidates) {
+		idx = 0
+	}
+	activeID := ""
+	if len(p.Candidates) > 0 {
+		activeID = p.Candidates[idx].GetCandidateId()
+	}
+	tabs := make([]wui.Tab, len(p.Candidates))
+	for i, c := range p.Candidates {
+		tabs[i] = wui.Tab{ID: c.GetCandidateId(), LabelKey: candidateTabLabelKey(i), PanelID: "generate-sampler-candidate-panel"}
+	}
+	candidates := p.Candidates
+	setSelected := p.SetSelected
+	return wui.Tabs(wui.TabsProps{
+		T: wt, ID: "generate-sampler-candidate-tabs", LabelKey: "generate.sampler.candidateTabs.label",
+		Tabs: tabs, ActiveID: activeID,
+		OnChange: func(id string) {
+			for i, c := range candidates {
+				if c.GetCandidateId() == id {
+					setSelected(i)
+					return
+				}
+			}
+		},
+	})
 }
 
 type candidateDetailProps struct {
@@ -211,37 +283,52 @@ type candidateDetailProps struct {
 	SetView   func(CandidateView)
 	OnPromote func(string)
 	OnDiscard func()
+	ActionErr error
 }
 
 // renderCandidateDetail's hook count is fixed regardless of Candidate's
-// content: CandidateViews is a constant 4-element slice (never filtered),
-// so its per-view tab loop always registers exactly 4 OnClick hooks in
-// the same order; the link-verdicts block carries no On* handlers at all
-// (h.If just toggles DOM presence of plain text/class nodes); and Promote
-// /Discard are two more, always present. Total: 6, every render,
-// regardless of which candidate or view is selected.
+// content: the view tab strip is wui.Tabs over the constant 4-element
+// CandidateViews (never filtered — one UseCompositeNavigation hook plus 4
+// always-present per-tab OnClick hooks, every render); the link-verdicts
+// block carries no On* handlers at all (h.If just toggles DOM presence of
+// plain text/class nodes); and Promote/Discard are two more, always
+// present and never Disabled (so web/ui.Button never skips their hook —
+// see render_editor.go's package doc comment's third hazard). Total: 7,
+// every render, regardless of which candidate or view is selected.
 func renderCandidateDetail(p candidateDetailProps) ui.Node {
 	t := p.T
+	wt := wui.T(t.T)
 	fmtr := p.Fmtr
 	c := p.Candidate
 	failed := FailedLinks(c.GetLinkVerdicts())
 
-	viewTabsArgs := []any{h.ClassStr("af-candidate__view-tabs")}
-	viewTabsArgs = append(viewTabsArgs, anyNodes(h.MapKeyed(CandidateViews, func(v CandidateView) any { return v }, func(v CandidateView) ui.Node {
-		return h.Button(
-			h.Type("button"),
-			h.ClassStr(h.ClassMap(map[string]bool{"af-candidate__view-tab": true, "af-candidate__view-tab--active": v == p.View})),
-			h.OnClick(func() { p.SetView(v) }),
-			h.Text(t.T(v.TranslationKey())),
-		)
-	}))...)
+	viewTabs := make([]wui.Tab, len(CandidateViews))
+	for i, v := range CandidateViews {
+		viewTabs[i] = wui.Tab{ID: viewTabID(v), LabelKey: v.TranslationKey(), PanelID: "generate-sampler-view-panel"}
+	}
+	activeViewID := viewTabID(p.View)
+	setView := p.SetView
+	viewTabsNode := wui.Tabs(wui.TabsProps{
+		T: wt, ID: "generate-sampler-view-tabs", LabelKey: "generate.sampler.viewTabs.label",
+		Tabs: viewTabs, ActiveID: activeViewID,
+		OnChange: func(id string) { setView(viewFromTabID(id)) },
+	})
 
 	return h.Div(
 		h.ClassStr("af-candidate"),
-		h.Div(viewTabsArgs...),
-		h.Pre(h.ClassStr("af-candidate__content"), h.Text(CandidateViewContent(p.View, c))),
+		h.Role("tabpanel"),
+		h.Aria("labelledby", c.GetCandidateId()),
+		h.ID("generate-sampler-candidate-panel"),
 
-		h.Div(h.ClassStr("af-candidate__novelty"), h.Text(NoveltySummary(t, c.GetNovelty()))),
+		viewTabsNode,
+		h.Div(
+			h.ID("generate-sampler-view-panel"),
+			h.Role("tabpanel"),
+			h.Aria("labelledby", activeViewID),
+			h.Pre(h.ClassStr("af-candidate__content"), h.Text(CandidateViewContent(p.View, c))),
+		),
+
+		h.Div(h.ClassStr("af-candidate__novelty"), h.Text(NoveltySummary(t, deps.Formatters, c.GetNovelty()))),
 
 		h.If(len(c.GetLinkVerdicts()) > 0, h.Div(
 			h.ClassStr("af-candidate__links"),
@@ -254,16 +341,17 @@ func renderCandidateDetail(p candidateDetailProps) ui.Node {
 					)
 				}))...,
 			),
-			h.If(len(failed) > 0, h.P(h.ClassStr("af-candidate__links-failed"), h.Textf("%s: %d", t.T("generate.sampler.failedLinks"), len(failed)))),
+			h.If(len(failed) > 0, h.P(h.ClassStr("af-candidate__links-failed"), h.Text(t.T("generate.common.labelValue", t.T("generate.sampler.failedLinks"), formatCount(len(failed)))))),
 		)),
 
 		h.Div(h.ClassStr("af-candidate__cost"),
-			h.Textf("%s: %s (tokens in=%d out=%d)", t.T("generate.sampler.candidateCost"), fmtr.Currency(c.GetEstimatedCostUsd()), c.GetTokensIn(), c.GetTokensOut()),
+			h.Text(t.T("generate.sampler.candidateCostDetail", t.T("generate.sampler.candidateCost"), fmtr.Currency(c.GetEstimatedCostUsd()), formatCount(int(c.GetTokensIn())), formatCount(int(c.GetTokensOut())))),
 		),
 
+		h.If(p.ActionErr != nil, h.Div(h.ClassStr("af-candidate__action-error"), h.Role("alert"), h.Text(mutationErrorText(t, p.ActionErr)))),
 		h.Div(h.ClassStr("af-candidate__actions"),
-			h.Button(h.Type("button"), h.OnClick(func() { p.OnPromote(c.GetCandidateId()) }), h.Text(t.T("generate.sampler.promote"))),
-			h.Button(h.Type("button"), h.OnClick(func() { p.OnDiscard() }), h.Text(t.T("generate.sampler.discard"))),
+			wui.Button(wui.ButtonProps{T: wt, ID: "generate-sampler-promote", LabelKey: "generate.sampler.promote", Variant: wui.ButtonPrimary, OnClick: func() { p.OnPromote(c.GetCandidateId()) }}),
+			wui.Button(wui.ButtonProps{T: wt, ID: "generate-sampler-discard", LabelKey: "generate.sampler.discard", Variant: wui.ButtonSecondary, OnClick: func() { p.OnDiscard() }}),
 		),
 	)
 }

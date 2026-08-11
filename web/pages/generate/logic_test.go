@@ -252,9 +252,9 @@ func TestCandidateViewsOrderEndsOnSlack(t *testing.T) {
 
 func TestNoveltySummaryDistinguishesNovelNearAndRejected(t *testing.T) {
 	tr := fallbackTranslator{}
-	novel := NoveltySummary(tr, &affv1.NoveltyVerdict{IsNovel: true})
-	novelNear := NoveltySummary(tr, &affv1.NoveltyVerdict{IsNovel: true, Similarity: 0.7, NearestItemId: 5, NearestItemTitle: "close one"})
-	rejected := NoveltySummary(tr, &affv1.NoveltyVerdict{IsNovel: false, Similarity: 0.97, NearestItemId: 5, NearestItemTitle: "dupe"})
+	novel := NoveltySummary(tr, DefaultFormatters, &affv1.NoveltyVerdict{IsNovel: true})
+	novelNear := NoveltySummary(tr, DefaultFormatters, &affv1.NoveltyVerdict{IsNovel: true, Similarity: 0.7, NearestItemId: 5, NearestItemTitle: "close one"})
+	rejected := NoveltySummary(tr, DefaultFormatters, &affv1.NoveltyVerdict{IsNovel: false, Similarity: 0.97, NearestItemId: 5, NearestItemTitle: "dupe"})
 	if novel == novelNear || novel == rejected || novelNear == rejected {
 		t.Fatalf("expected three distinct summaries, got %q / %q / %q", novel, novelNear, rejected)
 	}
@@ -385,6 +385,35 @@ func TestDraftDirty(t *testing.T) {
 	}
 	if !DraftDirty(loaded, changed) {
 		t.Fatalf("changed draft must be dirty")
+	}
+}
+
+func TestPersistedSampleUsable(t *testing.T) {
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	fresh := PersistedSampleState{
+		SavedAtUnix: now.Add(-1 * time.Hour).Unix(),
+		FeedSlug:    "one-piece",
+		SampleID:    "s1",
+		Candidates:  []*affv1.SampleCandidate{{CandidateId: "c1"}},
+	}
+	if !PersistedSampleUsable(fresh, "one-piece", now) {
+		t.Fatalf("a 1h-old snapshot for the matching slug must be usable")
+	}
+	if PersistedSampleUsable(fresh, "naruto", now) {
+		t.Fatalf("a snapshot for a different feed slug must not be usable")
+	}
+	stale := fresh
+	stale.SavedAtUnix = now.Add(-25 * time.Hour).Unix()
+	if PersistedSampleUsable(stale, "one-piece", now) {
+		t.Fatalf("a snapshot older than the 24h retention window must not be usable")
+	}
+	empty := PersistedSampleState{FeedSlug: "one-piece", SampleID: "s1"}
+	if PersistedSampleUsable(empty, "one-piece", now) {
+		t.Fatalf("a snapshot with no candidates must not be usable")
+	}
+	noID := PersistedSampleState{FeedSlug: "one-piece", Candidates: []*affv1.SampleCandidate{{CandidateId: "c1"}}}
+	if PersistedSampleUsable(noID, "one-piece", now) {
+		t.Fatalf("a snapshot with no sample ID must not be usable")
 	}
 }
 

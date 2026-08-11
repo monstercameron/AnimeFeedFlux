@@ -1,0 +1,457 @@
+//go:build js && wasm
+
+package generatepage
+
+import (
+	"strconv"
+	"syscall/js"
+
+	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
+	"github.com/monstercameron/GoWebComponents/v5/ui"
+
+	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+)
+
+// render_workbench.go is /generate's layout, rebuilt.
+//
+// # What was wrong
+//
+// The page was three columns of roughly equal weight — an 18rem feed rail, a
+// recipe form, a 22rem sampler. That spends a permanent quarter of the screen
+// on a list of three feeds, gives the prompt and its output a third each, and
+// interleaves the fields an operator retunes every few minutes (prompts,
+// model, effort) with the ones they set once and never touch again (slug,
+// cron, timezone, budgets, feed window, sources). The loop the page exists
+// for — write, preview, judge, adjust — was the thing it made hardest.
+//
+// # The shape now
+//
+// One thesis: THE PROMPT AND ITS OUTPUT, SIDE BY SIDE, FILLING THE SCREEN.
+// Everything else gets out of the way.
+//
+//	┌──────────────────────────────────────────────────────────┐
+//	│ [feed ▾]  model ▾  effort ▾  size ▾        [Preview ~$—] │  sticky strip
+//	├───────────────────────────────┬──────────────────────────┤
+//	│ SYSTEM  (mono, grows)         │ PREVIEW                  │
+//	│ USER    (mono, grows)         │  rendered / raw / xml /  │
+//	│ {{.Today}} {{.Season}} chips  │  slack, promote, discard │
+//	├───────────────────────────────┴──────────────────────────┤
+//	│ ▸ Recipe settings — slug, schedule, budgets, sources      │
+//	└──────────────────────────────────────────────────────────┘
+//
+// The prompts are the CONTENT of this screen, so they wear the mono face at a
+// size meant for writing rather than scanning; the chrome around them stays
+// the UI sans.
+//
+// # The signature: template-variable chips
+//
+// §7 gives prompts a fixed set of template variables, and the editor used to
+// list them as static text above the fields. A list you read and then retype
+// is the worst version of that: the failure mode is a typo like {{.Titles}},
+// which `Parse` accepts and only `Execute` rejects — so it surfaces as a
+// validation error AFTER a paid provider call. The chips insert the exact
+// identifier at the cursor. It is the one flourish on the page, it is lifted
+// from the product's own mechanics rather than decoration, and it removes a
+// class of error rather than illustrating one.
+
+// promptVariables are §7's template variables, in the order they appear
+// there. Kept in sync with internal/generate.Data by hand — that type's own
+// doc comment names this drift as the thing to watch.
+var promptVariables = []string{
+	"{{.Today}}", "{{.Weekday}}", "{{.Season}}",
+	"{{.FeedTitle}}", "{{.ItemsPerRun}}",
+	"{{.RecentTitles}}", "{{.Candidates}}",
+}
+
+// workbenchProps is everything the layout needs that it does not own.
+type workbenchProps struct {
+	Strip   ui.Node
+	Prompts ui.Node
+	Preview ui.Node
+	Recipe  ui.Node
+}
+
+// renderWorkbench composes the three regions. It holds no state of its own:
+// every region is built by the caller from Render's existing state, so this
+// function is pure layout and can be reasoned about as such.
+func renderWorkbench(p workbenchProps) ui.Node {
+	t := deps.I18n
+	return h.Div(
+		h.ClassStr("af-gen"),
+		h.Div(h.ClassStr("af-gen__strip"), p.Strip),
+		h.Div(h.ClassStr("af-gen__work"),
+			h.Section(h.ClassStr("af-gen__prompts"), p.Prompts),
+			h.Section(h.ClassStr("af-gen__preview"), p.Preview),
+		),
+		// The recipe is collapsed by default and that is the point: these are
+		// set-once fields, and having them open is what made the page a form
+		// with a preview bolted on instead of a workbench.
+		h.Tag("details", h.ClassStr("af-gen__recipe"),
+			h.Tag("summary", nil, h.Text(t.T("generate.workbench.recipeSettings"))),
+			p.Recipe,
+		),
+	)
+}
+
+// promptFieldProps is one prompt editor.
+type promptFieldProps struct {
+	ID       string
+	LabelKey string
+	HintKey  string
+	Value    string
+	OnChange func(string)
+	ErrNode  ui.Node
+	// Chips adds the variable chips under this field. Only the user prompt
+	// gets them: the system prompt is standing instruction text, and §7's
+	// variables are about the per-run data the user prompt interpolates.
+	Chips bool
+}
+
+// renderPromptField is a labelled mono textarea, optionally with the
+// variable chips beneath it.
+func renderPromptField(p promptFieldProps) ui.Node {
+	t := deps.I18n
+	body := []any{
+		h.ClassStr("af-gen__field"),
+		h.Label(h.For(p.ID), h.Text(t.T(p.LabelKey))),
+		h.Textarea(
+			h.ID(p.ID),
+			h.ClassStr("af-gen__prompt"),
+			h.Value(p.Value),
+			h.Attr("spellcheck", "false"),
+			h.OnInput(p.OnChange),
+		),
+		h.P(h.ClassStr("af-gen__hint"), h.Text(t.T(p.HintKey))),
+		p.ErrNode,
+	}
+	if p.Chips {
+		body = append(body, renderVariableChips(p.ID, p.OnChange))
+	}
+	return h.Div(body...)
+}
+
+// renderVariableChips is the signature element: click a variable, it lands at
+// the cursor.
+//
+// The insert is done through syscall/js against the textarea's own
+// selectionStart/selectionEnd rather than by rebuilding the value in Go,
+// because only the DOM knows where the caret is — a Go-side append would
+// always add at the end, which is wrong the moment someone is editing the
+// middle of a prompt, and moving the caret afterwards is the difference
+// between a control that helps and one that has to be undone.
+func renderVariableChips(targetID string, onChange func(string)) ui.Node {
+	t := deps.I18n
+	chips := make([]any, 0, len(promptVariables)+2)
+	chips = append(chips,
+		h.ClassStr("af-gen__chips"),
+		h.Span(h.ClassStr("af-gen__chips-label"), h.Text(t.T("generate.workbench.insertVariable"))),
+	)
+	for _, v := range promptVariables {
+		v := v
+		chips = append(chips, h.Button(
+			h.Type("button"),
+			h.ClassStr("af-gen__chip"),
+			h.Aria("label", t.T("generate.workbench.insertNamed", v)),
+			h.OnClick(ui.UseEvent(func() {
+				if next, ok := insertAtCursor(targetID, v); ok {
+					onChange(next)
+				}
+			})),
+			h.Text(v), //nolint:i18n -- a template identifier, must never be translated
+		))
+	}
+	return h.Div(chips...)
+}
+
+// insertAtCursor splices text into the element's value at the caret and
+// returns the new value. ok is false when the element is not on the page —
+// a chip clicked against a field that has since unmounted must be a no-op,
+// not a panic.
+func insertAtCursor(id, text string) (string, bool) {
+	doc := js.Global().Get("document")
+	if !doc.Truthy() {
+		return "", false
+	}
+	el := doc.Call("getElementById", id)
+	if !el.Truthy() {
+		return "", false
+	}
+	value := el.Get("value").String()
+	start := el.Get("selectionStart").Int()
+	end := el.Get("selectionEnd").Int()
+	if start < 0 || start > len(value) || end < start || end > len(value) {
+		// A caret position the DOM will not vouch for: append rather than
+		// slice at an index that could panic.
+		start, end = len(value), len(value)
+	}
+	next := value[:start] + text + value[end:]
+	el.Set("value", next)
+	// Put the caret after what was just inserted, so a second chip does not
+	// land inside the first.
+	caret := start + len(text)
+	el.Call("setSelectionRange", caret, caret)
+	el.Call("focus")
+	return next, true
+}
+
+// stripProps is the sticky control row: what to generate, and the one button
+// that does it.
+type stripProps struct {
+	Feeds       []*affv1.Feed
+	FeedsErr    error
+	OnRetryFeed func()
+	Selected    string
+	OnSelect    func(string)
+	OnNew       func()
+	Model       string
+	OnModel     func(string)
+	// Models is the provider's own list (SystemService.ListModels). When it
+	// is empty or ModelsUnavailable is set, the model control degrades to the
+	// text input it used to be — a workbench that cannot pick a model while
+	// OpenAI is down is worse than one that asks for the id.
+	Models            []*affv1.ProviderModel
+	ModelsUnavailable bool
+	ModelsReason      string
+	Effort            string
+	OnEffort          func(string)
+	Size              int32
+	OnSize            func(int32)
+	Temp              float64
+	OnTemp            func(float64)
+	Estimate          string
+	Disabled          bool
+	Reason            string
+	Sampling          bool
+	OnPreview         func()
+}
+
+// tempFieldValue renders the override, blank when unset.
+func tempFieldValue(v float64) string {
+	if v == 0 {
+		return ""
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// renderStripModel is the model control: a menu of the models this
+// deployment's key can actually call, hydrated from the provider.
+//
+// Chat models come first and are the only ones in the main group — the
+// workbench writes text — but nothing is REMOVED from the menu, because the
+// chat/embedding split is a heuristic over the model id (internal/llm's
+// ClassifyModel) and a family it guesses wrong about must still be
+// reachable. A model the recipe already names but the provider does not
+// list is pinned in as its own option, so opening a feed built on a
+// deprecated or custom id never silently retargets it.
+func renderStripModel(p stripProps) ui.Node {
+	t := deps.I18n
+
+	if p.ModelsUnavailable || len(p.Models) == 0 {
+		return h.Input(h.ID("gen-strip-model"), h.Type("text"),
+			h.ClassStr("af-gen__model"),
+			h.Aria("label", t.T("generate.workbench.model")),
+			h.Attr("placeholder", t.T("generate.workbench.model")),
+			h.Attr("title", stripModelTitle(p)),
+			h.Value(p.Model),
+			h.OnInput(p.OnModel))
+	}
+
+	chat := make([]*affv1.ProviderModel, 0, len(p.Models))
+	other := make([]*affv1.ProviderModel, 0, len(p.Models))
+	listed := false
+	for _, m := range p.Models {
+		if m.GetId() == p.Model {
+			listed = true
+		}
+		if m.GetChat() {
+			chat = append(chat, m)
+			continue
+		}
+		other = append(other, m)
+	}
+
+	opts := make([]any, 0, len(p.Models)+6)
+	opts = append(opts,
+		h.ID("gen-strip-model"),
+		h.ClassStr("af-gen__model"),
+		h.Aria("label", t.T("generate.workbench.model")),
+		h.OnChange(ui.UseEvent(func(e ui.InputEvent) { p.OnModel(e.GetValue()) })),
+	)
+	if p.Model == "" {
+		opts = append(opts, h.Option(h.Value(""), h.SelectedIf(true),
+			h.Text(t.T("generate.workbench.modelDefault"))))
+	} else if !listed {
+		opts = append(opts, h.Option(h.Value(p.Model), h.SelectedIf(true),
+			h.Text(t.T("generate.workbench.modelUnlisted", p.Model))))
+	}
+	appendGroup := func(label string, models []*affv1.ProviderModel) {
+		if len(models) == 0 {
+			return
+		}
+		group := make([]any, 0, len(models)+1)
+		group = append(group, h.Attr("label", label))
+		for _, m := range models {
+			id := m.GetId()
+			group = append(group, h.Option(h.Value(id), h.SelectedIf(id == p.Model), h.Text(id)))
+		}
+		opts = append(opts, h.Optgroup(group...))
+	}
+	appendGroup(t.T("generate.workbench.modelGroupChat"), chat)
+	appendGroup(t.T("generate.workbench.modelGroupOther"), other)
+	return h.Select(opts...)
+}
+
+// stripModelTitle explains the degraded state on the fallback input rather
+// than spending a row of the strip on a warning line.
+func stripModelTitle(p stripProps) string {
+	if p.ModelsReason != "" {
+		return p.ModelsReason
+	}
+	return deps.I18n.T("generate.workbench.model")
+}
+
+// renderStrip puts every input that changes what a preview produces on one
+// row, next to the button that produces it. Cause and effect within one
+// glance; the recipe fields that do NOT change a single preview (schedule,
+// budgets, window) are deliberately not here.
+func renderStrip(p stripProps) ui.Node {
+	t := deps.I18n
+
+	feedOpts := make([]any, 0, len(p.Feeds)+3)
+	feedOpts = append(feedOpts,
+		h.ID("gen-strip-feed"),
+		h.Aria("label", t.T("generate.workbench.feed")),
+		h.OnChange(ui.UseEvent(func(e ui.InputEvent) { p.OnSelect(e.GetValue()) })),
+	)
+	// The placeholder is rendered UNCONDITIONALLY, not only while nothing is
+	// selected. Dropping it once a feed is chosen shifts every option's index
+	// by one, and the browser keeps its selection by INDEX across a re-render
+	// — which is how the picker came to display the second feed's name while
+	// the editor below it held the first feed's prompts.
+	placeholder := t.T("generate.workbench.chooseFeed")
+	if p.FeedsErr != nil {
+		// The strip replaced the rail, and the rail was where a failed feed
+		// list said so. Without this the picker is simply empty, which reads
+		// as "no feeds exist" — the one thing it does not mean.
+		placeholder = t.T("generate.workbench.feedsUnavailable")
+	}
+	feedOpts = append(feedOpts, h.Option(h.Value(""), h.SelectedIf(p.Selected == ""), h.Text(placeholder)))
+	for _, f := range p.Feeds {
+		slug := f.GetSlug()
+		feedOpts = append(feedOpts, h.Option(h.Value(slug), h.SelectedIf(slug == p.Selected),
+			h.Text(f.GetTitle())))
+	}
+
+	effortOpts := make([]any, 0, 6)
+	effortOpts = append(effortOpts,
+		h.ID("gen-strip-effort"),
+		h.Aria("label", t.T("generate.workbench.effort")),
+		h.OnChange(ui.UseEvent(func(e ui.InputEvent) { p.OnEffort(e.GetValue()) })),
+	)
+	for _, tier := range []struct{ v, k string }{
+		{"smart", "generate.workbench.effort.smart"},
+		{"fast", "generate.workbench.effort.fast"},
+		{"quick", "generate.workbench.effort.quick"},
+	} {
+		effortOpts = append(effortOpts, h.Option(h.Value(tier.v),
+			h.SelectedIf(tier.v == p.Effort || (p.Effort == "" && tier.v == "smart")),
+			h.Text(t.T(tier.k))))
+	}
+
+	sizeOpts := make([]any, 0, 8)
+	sizeOpts = append(sizeOpts,
+		h.ID("gen-strip-size"),
+		h.Aria("label", t.T("generate.workbench.size")),
+		h.OnChange(ui.UseEvent(func(e ui.InputEvent) {
+			if n, err := strconv.Atoi(e.GetValue()); err == nil {
+				p.OnSize(int32(n))
+			}
+		})),
+	)
+	for n := int32(1); n <= 5; n++ {
+		v := strconv.Itoa(int(n))
+		sizeOpts = append(sizeOpts, h.Option(h.Value(v), h.SelectedIf(n == p.Size),
+			h.Text(t.T("generate.workbench.sizeN", v))))
+	}
+
+	return h.Fragment(
+		h.Div(h.ClassStr("af-gen__strip-left"),
+			h.Select(feedOpts...),
+			h.Button(h.Type("button"), h.ClassStr("af-gen__new"),
+				h.OnClick(ui.UseEvent(func() { p.OnNew() })),
+				h.Text(t.T("generate.workbench.newFeed"))),
+			// Built every render, shown only on failure: a control that
+			// appears and disappears would shift this fiber's hook slots.
+			h.Show(p.FeedsErr != nil, h.Button(h.Type("button"), h.ClassStr("af-gen__new"),
+				h.OnClick(ui.UseEvent(func() {
+					if p.OnRetryFeed != nil {
+						p.OnRetryFeed()
+					}
+				})),
+				h.Text(t.T("generate.workbench.retryFeeds")))),
+			renderStripModel(p),
+			h.Select(effortOpts...),
+			h.Select(sizeOpts...),
+			// Temperature is a sample-time OVERRIDE, not a recipe field, so
+			// it belongs on the strip with the other inputs that change what
+			// a preview produces rather than in the collapsed recipe form.
+			h.Input(h.ID("gen-strip-temp"), h.Type("number"),
+				h.ClassStr("af-gen__temp"),
+				h.Attr("step", "0.1"), h.Attr("min", "0"), h.Attr("max", "2"),
+				h.Aria("label", t.T("generate.workbench.temp")),
+				h.Attr("title", t.T("generate.workbench.temp")),
+				// Zero means "no override", so the field shows empty rather
+				// than a literal 0 that reads as temperature=0 — the one
+				// value an operator might actually have meant to set.
+				h.Value(tempFieldValue(p.Temp)),
+				h.Attr("placeholder", t.T("generate.workbench.tempPlaceholder")),
+				h.OnInput(func(v string) {
+					if f, err := strconv.ParseFloat(v, 64); err == nil {
+						p.OnTemp(f)
+					}
+				})),
+		),
+		h.Div(h.ClassStr("af-gen__strip-right"),
+			// The cost sits ON the button's row, not in a panel elsewhere:
+			// §12.3 requires the estimate to be visible at the moment of
+			// spending, and a number in another column is not that.
+			h.Show(p.Estimate != "", h.Span(h.ClassStr("af-gen__estimate"), h.Text(p.Estimate))),
+			h.Button(
+				h.Type("button"),
+				h.ClassStr("af-gen__preview-btn"),
+				h.Disabled(p.Disabled || p.Sampling),
+				h.OnClick(ui.UseEvent(func() { p.OnPreview() })),
+				h.Text(previewLabel(p.Sampling)),
+			),
+		),
+		// A disabled control must say why (§12.3: "the kill switch disables
+		// it with a visible reason rather than leaving a dead control").
+		h.Show(p.Reason != "", h.P(h.ClassStr("af-gen__strip-reason"), h.Role("status"), h.Text(p.Reason))),
+	)
+}
+
+func previewLabel(sampling bool) string {
+	if sampling {
+		return deps.I18n.T("generate.workbench.previewing")
+	}
+	return deps.I18n.T("generate.workbench.preview")
+}
+
+// previewEstimate is the cost shown beside the Preview button.
+//
+// It reuses the sampler's own EstimateSampleCostUSD rather than a second
+// calculation: two estimates of the same call that could disagree is worse
+// than one that is sometimes unavailable. Unavailable is a real answer here
+// and says so — an empty price table (settings → Provider → Rates) is
+// exactly why a run can report $0.0000 while spending money, and a blank
+// where a number belongs would hide that.
+func previewEstimate(p samplerProps) string {
+	t := deps.I18n
+	spec := p.Feed.GetSpec()
+	usd, ok := EstimateSampleCostUSD(p.Prices, spec.GetModel(),
+		len(spec.GetSystemPromptTemplate())+len(spec.GetUserPromptTemplate()), 400, p.SampleSize)
+	if !ok {
+		return t.T("generate.sampler.estimateUnavailable")
+	}
+	return t.T("generate.sampler.estimatedCost", deps.Formatters.Currency(usd))
+}

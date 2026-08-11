@@ -18,16 +18,146 @@ package generatepage
 
 import (
 	"context"
+	"encoding/json"
+	"time"
 
 	"github.com/monstercameron/GoWebComponents/v5/fetch"
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
+	"github.com/monstercameron/GoWebComponents/v5/interop"
 	"github.com/monstercameron/GoWebComponents/v5/state"
 	"github.com/monstercameron/GoWebComponents/v5/ui"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/web/appstate"
 	"github.com/monstercameron/AnimeFeedFlux/web/shell"
 )
+
+// tapeWindowDays is the width of the tape's fixed time window (the
+// signature element render_rail.go draws per feed — see this task's brief
+// and docs/design-direction.md's "Signature: the tape"). Fixed rather than
+// derived from the data span so an empty/near-empty tape still reads as "no
+// activity in two weeks", not as a degenerate zero-width scale.
+const tapeWindowDays = 14
+
+// persistedSampleStorageKey is the single localStorage key the sampler's
+// candidates/sampleID snapshot lives under. FeedSlug (inside the envelope,
+// not the key) disambiguates which feed the snapshot belongs to, so
+// switching feeds without a matching snapshot just reads a non-match
+// instead of needing a second storage round-trip per slug.
+const persistedSampleStorageKey = "generate.sampler.samples.v1"
+
+// loadPersistedSampleState reads and decodes the D2-29 sample snapshot from
+// localStorage. Any failure (storage unavailable, nothing stored, corrupt
+// JSON) is reported as "not found" rather than an error the page has to
+// surface — a missing/broken snapshot degrades to the pre-D2-29 behavior
+// (candidates just start empty), it never blocks the page.
+func loadPersistedSampleState() (PersistedSampleState, bool) {
+	store, err := interop.LocalStorage()
+	if err != nil {
+		return PersistedSampleState{}, false
+	}
+	raw, found, err := store.GetItem(persistedSampleStorageKey)
+	if err != nil || !found || raw == "" {
+		return PersistedSampleState{}, false
+	}
+	var ps PersistedSampleState
+	if err := json.Unmarshal([]byte(raw), &ps); err != nil {
+		return PersistedSampleState{}, false
+	}
+	return ps, true
+}
+
+// savePersistedSampleState writes (or, with a zero-value ps, effectively
+// clears — SampleID/Candidates empty fails PersistedSampleUsable) the
+// D2-29 snapshot. Storage errors (quota, unavailable) are swallowed: this
+// is a nice-to-have surviving a refresh, never a blocker for sampling
+// itself.
+func savePersistedSampleState(ps PersistedSampleState) {
+	store, err := interop.LocalStorage()
+	if err != nil {
+		return
+	}
+	data, err := json.Marshal(ps)
+	if err != nil {
+		return
+	}
+	_ = store.SetItem(persistedSampleStorageKey, string(data))
+}
+
+// clearPersistedSampleState removes the D2-29 snapshot outright (used when
+// a sample is discarded, or a stale/mismatched entry is found on load).
+func clearPersistedSampleState() {
+	store, err := interop.LocalStorage()
+	if err != nil {
+		return
+	}
+	_ = store.RemoveItem(persistedSampleStorageKey)
+}
+
+// Feed-window and TTL fallbacks for a brand-new draft, used when the admin
+// has not configured a default. The feed window matches the schema's own
+// default; the TTL matches internal/publish's hardcoded 15-minute
+// Cache-Control, so a feed's advertised TTL and the header it is served with
+// agree out of the box.
+// These mirror internal/rpc's DefaultFeed* constants, which seed the same
+// values into Settings. They cannot be imported (this is browser code and
+// that is server code), so the duplication is deliberate and only matters
+// when Settings has no value to supply — see newFeedDraft, which prefers the
+// configured default whenever there is one.
+const (
+	newFeedItemsPerRun     = 1
+	newFeedWindowFallback  = 50
+	newFeedTTLMinutes      = 15
+	newFeedTokenBudget     = 100_000
+	newFeedRunBudgetPerDay = 24
+)
+
+// newFeedDraft builds the blank feed the "+ New" control starts from.
+//
+// It used to set ItemsPerRun and FeedWindow and nothing else, which made a
+// new feed UNSAVEABLE: internal/feedspec's validateBudgets rejects a zero
+// daily token budget and a zero daily run budget (ReasonBudgetDailyTokensZero
+// / ReasonBudgetDailyRunsZero), so the first save of every new feed failed
+// validation on two fields the operator had never been shown and had no
+// reason to think were required.
+//
+// The admin's configured defaults win where they are set. Those settings
+// (§12.5's default_daily_token_budget / default_daily_run_budget /
+// default_feed_window) previously had no reader anywhere in the app — they
+// were editable, persisted, and inert. This is what they are for.
+func newFeedDraft(g *affv1.Settings_Generation) *affv1.Feed {
+	spec := &affv1.FeedSpec{
+		ItemsPerRun:      newFeedItemsPerRun,
+		FeedWindow:       newFeedWindowFallback,
+		DailyTokenBudget: newFeedTokenBudget,
+		DailyRunBudget:   newFeedRunBudgetPerDay,
+	}
+	if v := g.GetDefaultFeedWindow(); v > 0 {
+		spec.FeedWindow = v
+	}
+	if v := g.GetDefaultDailyTokenBudget(); v > 0 {
+		spec.DailyTokenBudget = v
+	}
+	if v := g.GetDefaultDailyRunBudget(); v > 0 {
+		spec.DailyRunBudget = v
+	}
+	// A zero TTL renders as <ttl>0</ttl>, which tells every aggregator to
+	// never cache; the column's own schema default is 15 but the RPC always
+	// sends an explicit value, so the default never applied to a feed created
+	// from this page.
+	// Kind must be explicit. Left at the proto zero value
+	// (FEED_KIND_UNSPECIFIED) the select matches none of its three options, so
+	// the browser displays the FIRST one — "Generative" — while the value
+	// underneath is unspecified. Validate then rejects a draft nobody touched,
+	// complaining about a field that visibly shows a legal value. Generative
+	// is also the right default: it is the kind that needs no sources.
+	return &affv1.Feed{
+		Spec:       spec,
+		Kind:       affv1.FeedKind_FEED_KIND_GENERATIVE,
+		TtlMinutes: newFeedTTLMinutes,
+	}
+}
 
 // Render is registered against "/generate" (see deps.go's init). It is a
 // router.Component body (via web/shell/pages.go's pageComponent), so GWC
@@ -48,11 +178,86 @@ func Render() ui.Node {
 		}
 		return resp.GetFeeds(), nil
 	})
+	// The public base URL, for the subscribe-URL panel (render_urls.go).
+	// It lives in Settings and this page has no other way to know it — a feed
+	// URL is base + slug + extension, and two of those three are here.
+	settingsRes := fetch.UseResource(func(ctx context.Context) (*affv1.SystemServiceGetSettingsResponse, error) {
+		if !wired() || deps.System == nil {
+			return nil, errNotWired
+		}
+		return deps.System.GetSettings(ctx, &affv1.SystemServiceGetSettingsRequest{})
+	})
+	// The provider's own model list, so the strip's model control is a CHOSEN
+	// value rather than a typed one — same reasoning, and the same RPC, as
+	// the Settings provider screen (internal/rpc/models.go). ListModels never
+	// fails the request; it reports Unavailable, and the strip falls back to
+	// the text input in that case.
+	modelsRes := fetch.UseResource(func(ctx context.Context) (*affv1.SystemServiceListModelsResponse, error) {
+		if !wired() || deps.System == nil {
+			return nil, errNotWired
+		}
+		return deps.System.ListModels(ctx, &affv1.SystemServiceListModelsRequest{})
+	})
+
+	// UseResource fetches once at mount, and on a hard load of /generate that
+	// mount happens while the session is still ANON: the WebSocket has not
+	// finished its handshake, so every loader above ran against a socket that
+	// could not carry the call, and nothing re-ran them afterwards. The feed
+	// picker was permanently empty on a page navigated straight to — which
+	// reads as "no feeds exist", the one thing it did not mean.
+	//
+	// Keyed on the session state ITSELF, not on a `connected` boolean:
+	// appstate.Anon is the zero value and `state != Disconnected` is already
+	// true there, so a bool never changes when the session actually becomes
+	// usable and the effect would never re-fire.
+	ui.UseEffect(func() func() {
+		if sess.Get() == appstate.Auth || sess.Get() == appstate.Killed {
+			feedsRes.Reload()
+			settingsRes.Reload()
+			modelsRes.Reload()
+		}
+		return nil
+	}, sess.Get())
+
+	// Effort is a per-preview knob on the strip; it is not a recipe field
+	// today, so it lives here rather than on the draft feed.
+	effort := ui.UseState("smart")
 	statsRes := fetch.UseResource(func(ctx context.Context) (*affv1.SystemServiceStatsResponse, error) {
 		if !wired() || deps.System == nil {
 			return nil, errNotWired
 		}
 		return deps.System.Stats(ctx, &affv1.SystemServiceStatsRequest{})
+	})
+	// itemsRes feeds render_rail.go's tape (the signature element,
+	// docs/design-direction.md: "one tick per item, positioned by
+	// published_at") — a flat recent-items page across every feed, grouped
+	// per-row by FeedId in renderRailRow rather than one request per feed.
+	itemsRes := fetch.UseResource(func(ctx context.Context) ([]*affv1.Item, error) {
+		if !wired() || deps.Item == nil {
+			return nil, errNotWired
+		}
+		resp, err := deps.Item.List(ctx, &affv1.ItemServiceListRequest{PageSize: 300})
+		if err != nil {
+			return nil, err
+		}
+		return resp.GetItems(), nil
+	})
+	// runsRes drives the rail's 7-day spend column (Run.EstCostUsd is the
+	// only cost figure this page has any RPC for — Feed/SystemService carry
+	// none — so it is aggregated client-side per feed_id over the trailing
+	// week, same window as the tape).
+	runsRes := fetch.UseResource(func(ctx context.Context) ([]*affv1.Run, error) {
+		if !wired() || deps.Run == nil {
+			return nil, errNotWired
+		}
+		resp, err := deps.Run.History(ctx, &affv1.RunServiceHistoryRequest{
+			PageSize:     500,
+			StartedAfter: timestamppb.New(time.Now().Add(-tapeWindowDays * 24 * time.Hour)),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return resp.GetRuns(), nil
 	})
 
 	// --- Editor state ----------------------------------------------------
@@ -62,6 +267,7 @@ func Render() ui.Node {
 	fieldErrs := ui.UseState(FieldErrors(nil))
 	saving := ui.UseState(false)
 	saveErr := ui.UseState(error(nil))
+	validateErr := ui.UseState(error(nil))
 	conflictTheirs := ui.UseState((*affv1.Feed)(nil))
 	conflictChoice := ui.UseState(ResolveTakeTheirs)
 	perFieldKeepMine := ui.UseState(map[string]bool(nil))
@@ -78,6 +284,8 @@ func Render() ui.Node {
 	selectedView := ui.UseState(ViewRendered)
 	remainingBudget := ui.UseState(0.0)
 	cancelGen := ui.UseRef(0)
+	railErr := ui.UseState(error(nil))
+	actionErr := ui.UseState(error(nil))
 
 	// The unsaved-changes guard (D2-15) and the session-expiry hold
 	// (web/shell D0-08) share one predicate: is the draft different from
@@ -102,6 +310,16 @@ func Render() ui.Node {
 		go func() {
 			resp, err := deps.Feed.Get(ctxLoad, &affv1.FeedServiceGetRequest{Slug: slug})
 			if err != nil {
+				// Surfaced, not swallowed. This used to be a bare `return`,
+				// so a feed that failed to load left the editor showing the
+				// PREVIOUS feed's fields with the picker showing the new
+				// one's name — the worst of both, and indistinguishable from
+				// a dead click. saveErr is the editor's own error slot; a
+				// load failure and a save failure both mean "this form is not
+				// what you think it is", which is the message either way.
+				if ctxLoad.Err() == nil {
+					saveErr.Set(err)
+				}
 				return
 			}
 			draft.Set(cloneFeed(resp.GetFeed()))
@@ -109,8 +327,34 @@ func Render() ui.Node {
 			fieldErrs.Set(nil)
 			saveErr.Set(nil)
 			conflictTheirs.Set(nil)
-			candidates.Set(nil)
-			sampleID.Set("")
+
+			// D2-29: before wiping the sampler pane for the newly-selected
+			// feed, check whether a still-fresh (<24h) snapshot for THIS
+			// slug was left in localStorage by an earlier page load — a
+			// stale/mismatched/expired entry is discarded rather than
+			// resurrected, so switching feeds never leaks one feed's
+			// candidates into another's pane.
+			if ps, ok := loadPersistedSampleState(); ok && PersistedSampleUsable(ps, slug, time.Now()) {
+				candidates.Set(ps.Candidates)
+				sampleID.Set(ps.SampleID)
+				sampleSize.Set(ps.SampleSize)
+				tempOverride.Set(ps.TempOverride)
+				selectedCandidate.Set(ps.SelectedCandidate)
+				selectedView.Set(ps.SelectedView)
+			} else {
+				if ok {
+					clearPersistedSampleState()
+				}
+				candidates.Set(nil)
+				sampleID.Set("")
+				// The sample-shaping knobs belong to the sample, not to the
+				// session: leaving them set carried the previous feed's
+				// candidate count and temperature override onto the next
+				// feed, where the operator had not chosen them.
+				sampleSize.Set(1)
+				tempOverride.Set(0)
+				selectedCandidate.Set(0)
+			}
 		}()
 		return func() { cancel() }
 	}, selectedSlug.Get())
@@ -130,7 +374,10 @@ func Render() ui.Node {
 		Connected: connected,
 		Resource:  feedsRes,
 		Stats:     statsRes,
+		Items:     itemsRes,
+		Runs:      runsRes,
 		Selected:  selectedSlug.Get(),
+		Err:       railErr.Get(),
 		OnSelect: func(slug string) {
 			selectedSlug.Set(slug)
 			creatingNew.Set(false)
@@ -138,29 +385,46 @@ func Render() ui.Node {
 		OnNew: func() {
 			selectedSlug.Set("")
 			creatingNew.Set(true)
-			draft.Set(&affv1.Feed{Spec: &affv1.FeedSpec{ItemsPerRun: 1, FeedWindow: 50}})
+			draft.Set(newFeedDraft(settingsRes.Get().Value.GetSettings().GetGeneration()))
 			loadedSnapshot.Set(nil)
 			fieldErrs.Set(nil)
 		},
+		// OnToggleEnabled/OnRunNow deliberately no longer gate on the
+		// render-time `connected` snapshot before attempting the call
+		// (TODOS.md D0-10): the guarded client refuses instantly with
+		// wsconn.ErrDisconnected if the socket is not Ready regardless, so
+		// gating here only risked a stale closure silently no-opping a
+		// click with no feedback at all — which is exactly the bug this
+		// task closes (previously neither handler surfaced any error, not
+		// even a rejection). Attempting always and classifying the result
+		// is what actually produces the required visible refusal.
 		OnToggleEnabled: func(f *affv1.Feed) {
-			if !connected || f == nil {
+			if f == nil {
 				return
 			}
+			railErr.Set(nil)
 			go func() {
 				_, err := deps.Feed.SetEnabled(context.Background(), &affv1.FeedServiceSetEnabledRequest{
 					FeedId: f.GetId(), Enabled: !f.GetEnabled(), ExpectedVersion: f.GetVersion(),
 				})
-				if err == nil {
-					feedsRes.Reload()
+				if err != nil {
+					railErr.Set(err)
+					return
 				}
+				feedsRes.Reload()
 			}()
 		},
 		OnRunNow: func(f *affv1.Feed) {
-			if !connected || f == nil {
+			if f == nil {
 				return
 			}
+			railErr.Set(nil)
 			go func() {
-				deps.Feed.RunNow(context.Background(), &affv1.FeedServiceRunNowRequest{FeedId: f.GetId()})
+				_, err := deps.Feed.RunNow(context.Background(), &affv1.FeedServiceRunNowRequest{FeedId: f.GetId()})
+				if err != nil {
+					railErr.Set(err)
+					return
+				}
 				feedsRes.Reload()
 			}()
 		},
@@ -174,6 +438,7 @@ func Render() ui.Node {
 		FieldErrs:      fieldErrs.Get(),
 		Saving:         saving.Get(),
 		SaveErr:        saveErr.Get(),
+		ValidateErr:    validateErr.Get(),
 		ConflictTheirs: conflictTheirs.Get(),
 		Resolution:     conflictChoice.Get(),
 		OnFieldChange: func(mutate func(*affv1.Feed)) {
@@ -187,14 +452,20 @@ func Render() ui.Node {
 		},
 		OnValidate: func() {
 			d := draft.Get()
-			if d == nil || !connected {
+			if d == nil {
 				return
 			}
+			validateErr.Set(nil)
 			go func() {
 				resp, err := deps.Feed.ValidateSpec(context.Background(), &affv1.FeedServiceValidateSpecRequest{
 					Kind: d.GetKind(), Slug: d.GetSlug(), Spec: d.GetSpec(),
 				})
 				if err != nil {
+					// D0-10: a transport-level failure here (disconnected or
+					// otherwise) must not be swallowed just because
+					// ValidateSpec's own contract is "return field errors,
+					// not a top-level error" for validation failures proper.
+					validateErr.Set(err)
 					return
 				}
 				fieldErrs.Set(MapFieldErrors(resp.GetErrors()))
@@ -202,7 +473,7 @@ func Render() ui.Node {
 		},
 		OnSave: func() {
 			d := draft.Get()
-			if d == nil || !connected {
+			if d == nil {
 				return
 			}
 			saving.Set(true)
@@ -275,10 +546,26 @@ func Render() ui.Node {
 		View:            selectedView.Get(),
 		SetView:         selectedView.Set,
 		RemainingBudget: remainingBudget.Get(),
-		Prices:          nil,
+		// The admin's configured rates (§13: estimates are "an editable price
+		// table multiplied by recorded token counts"). This was hardcoded nil,
+		// so EstimateSampleCostUSD could never match a model and the strip's
+		// estimate read "Estimate unavailable" permanently — §12.3 requires
+		// the cost to be visible at the moment of spending, and a value that
+		// is never available is not that. The settings resource is already
+		// fetched on this page for the subscribe-URL panel; this is the same
+		// response's provider section.
+		Prices:    settingsRes.Get().Value.GetSettings().GetProvider().GetPriceTable(),
+		ActionErr: actionErr.Get(),
 		OnSample: func() {
 			d := draft.Get()
-			if d == nil || d.GetId() == 0 || !connected || killedReason != "" || !ValidSampleSize(sampleSize.Get()) {
+			// D0-10: `connected` is intentionally not checked here anymore —
+			// the Sample button is already DisabledIf(!p.Connected) in
+			// render_sampler.go, so this is only reachable via a stale
+			// click racing a connection drop, and letting the guarded
+			// SampleStream call itself fail with wsconn.ErrDisconnected
+			// (classified below into sampleErr) is what actually produces
+			// a visible refusal instead of a silent no-op.
+			if d == nil || d.GetId() == 0 || killedReason != "" || !ValidSampleSize(sampleSize.Get()) {
 				return
 			}
 			gen := cancelGen.Get() + 1
@@ -286,12 +573,26 @@ func Render() ui.Node {
 			sampling.Set(true)
 			sampleErr.Set(nil)
 			candidates.Set(nil)
+			clearPersistedSampleState() // D2-29: a new sample invalidates any prior snapshot
+			slug := d.GetSlug()
 			ctxStream, cancel := context.WithCancel(context.Background())
 			activeCancel.Set(cancel)
 			go func() {
 				defer sampling.Set(false)
+				// The UNSAVED editor state rides along, so a preview shows
+				// what the operator is currently typing rather than what is
+				// on file. Without this, trying a prompt meant saving it
+				// over the working recipe first (§22 J3), which is not an
+				// iteration loop — it is a commitment with a preview
+				// attached. See SampleDraft in proto/aff/v1/sample.proto.
 				stream, err := deps.Sample.SampleStream(ctxStream, &affv1.SampleServiceSampleStreamRequest{
 					FeedId: d.GetId(), SampleSize: sampleSize.Get(), TemperatureOverride: tempOverride.Get(),
+					Draft: &affv1.SampleDraft{
+						SystemPrompt: d.GetSpec().GetSystemPromptTemplate(),
+						UserPrompt:   d.GetSpec().GetUserPromptTemplate(),
+						Model:        d.GetSpec().GetModel(),
+						Effort:       effort.Get(),
+					},
 				})
 				if err != nil {
 					if cancelGen.Get() == gen {
@@ -300,6 +601,7 @@ func Render() ui.Node {
 					return
 				}
 				var acc []*affv1.SampleCandidate
+				sid := ""
 				for {
 					msg, rerr := stream.Recv()
 					if cancelGen.Get() != gen {
@@ -309,7 +611,8 @@ func Render() ui.Node {
 						break
 					}
 					if msg.GetSampleId() != "" {
-						sampleID.Set(msg.GetSampleId())
+						sid = msg.GetSampleId()
+						sampleID.Set(sid)
 					}
 					if c := msg.GetCandidate(); c != nil {
 						acc = append(acc, c)
@@ -322,6 +625,22 @@ func Render() ui.Node {
 						break
 					}
 				}
+				// D2-29: only a completed sample (a real sample ID plus at
+				// least one candidate) is worth surviving a refresh — a
+				// cancelled/errored/empty stream leaves nothing behind, so
+				// a refresh after a failed attempt doesn't resurrect it.
+				if sid != "" && len(acc) > 0 {
+					savePersistedSampleState(PersistedSampleState{
+						SavedAtUnix:       time.Now().Unix(),
+						FeedSlug:          slug,
+						SampleID:          sid,
+						Candidates:        acc,
+						SampleSize:        sampleSize.Get(),
+						TempOverride:      tempOverride.Get(),
+						SelectedCandidate: selectedCandidate.Get(),
+						SelectedView:      selectedView.Get(),
+					})
+				}
 			}()
 		},
 		OnCancel: func() {
@@ -332,13 +651,34 @@ func Render() ui.Node {
 			sampling.Set(false)
 		},
 		OnPromote: func(candidateID string) {
+			// No optimistic local update happens here (Promote never wrote
+			// local state before this task and still does not), so there is
+			// nothing to roll back on failure — only a visible error to
+			// surface where D0-10 previously found none at all.
 			if deps.Item == nil || sampleID.Get() == "" {
 				return
 			}
+			id := sampleID.Get()
+			actionErr.Set(nil)
 			go func() {
-				deps.Item.PromoteSample(context.Background(), &affv1.ItemServicePromoteSampleRequest{
-					SampleId: sampleID.Get(), CandidateId: candidateID,
+				_, err := deps.Item.PromoteSample(context.Background(), &affv1.ItemServicePromoteSampleRequest{
+					SampleId: id, CandidateId: candidateID,
 				})
+				if err != nil {
+					actionErr.Set(err)
+					return
+				}
+				// Success has to CHANGE something. Promote used to leave the
+				// pane exactly as it found it: the candidate stayed listed
+				// and still promotable, so the only way to tell a promote had
+				// worked was to go and look at /history — and clicking twice
+				// created the item twice. Discard already clears this state
+				// on success; promotion is the more consequential of the two
+				// and cleared nothing.
+				candidates.Set(nil)
+				sampleID.Set("")
+				selectedCandidate.Set(0)
+				clearPersistedSampleState()
 			}()
 		},
 		OnDiscard: func() {
@@ -346,20 +686,118 @@ func Render() ui.Node {
 				return
 			}
 			id := sampleID.Get()
-			go func() {
-				deps.Sample.DiscardSample(context.Background(), &affv1.SampleServiceDiscardSampleRequest{SampleId: id})
-			}()
+			// D0-10's rollback rule: this clears candidates/sampleID
+			// optimistically for a snappy UI, but that view update implies
+			// the discard reached the server. If the guarded call comes
+			// back non-OK (disconnected refused it outright, or the server
+			// rejected it, or anything else), ShouldRollbackOptimisticState
+			// says to undo it — restoring the prior candidates/sampleID so
+			// the operator never sees "discarded" for a discard that never
+			// left the browser.
+			prevCandidates := candidates.Get()
+			prevSampleID := id
+			prevSlug := draft.Get().GetSlug()
+			actionErr.Set(nil)
 			candidates.Set(nil)
 			sampleID.Set("")
+			clearPersistedSampleState() // D2-29: discarded samples don't come back on refresh
+			go func() {
+				_, err := deps.Sample.DiscardSample(context.Background(), &affv1.SampleServiceDiscardSampleRequest{SampleId: id})
+				outcome := ClassifyMutationError(err, shell.ErrDisconnected)
+				if ShouldRollbackOptimisticState(outcome) {
+					candidates.Set(prevCandidates)
+					sampleID.Set(prevSampleID)
+					actionErr.Set(err)
+					// The discard never actually reached the server, so the
+					// snapshot D2-29 relies on for "survives a refresh" has
+					// to come back too, not just the in-memory view.
+					savePersistedSampleState(PersistedSampleState{
+						SavedAtUnix:       time.Now().Unix(),
+						FeedSlug:          prevSlug,
+						SampleID:          prevSampleID,
+						Candidates:        prevCandidates,
+						SampleSize:        sampleSize.Get(),
+						TempOverride:      tempOverride.Get(),
+						SelectedCandidate: selectedCandidate.Get(),
+						SelectedView:      selectedView.Get(),
+					})
+				}
+			}()
 		},
 	}
 
-	return h.Div(
-		h.ClassStr("af-generate"),
-		ui.CreateElement(renderRail, railProps),
-		ui.CreateElement(renderEditor, editorProps),
-		ui.CreateElement(renderSampler, samplerProps),
+	dspec := draft.Get().GetSpec()
+	// The same mutation path the recipe form uses, so a field edited on the
+	// strip and one edited in the collapsed form land in the same draft.
+	onFieldChange := editorProps.OnFieldChange
+	strip := renderStrip(stripProps{
+		Feeds:             feedsRes.Get().Value,
+		Selected:          selectedSlug.Get(),
+		OnSelect:          railProps.OnSelect,
+		OnNew:             railProps.OnNew,
+		Model:             dspec.GetModel(),
+		Models:            modelsRes.Get().Value.GetModels(),
+		ModelsUnavailable: modelsRes.Get().Value.GetUnavailable(),
+		ModelsReason:      modelsRes.Get().Value.GetUnavailableReason(),
+		OnModel: func(v string) {
+			onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Model = v })
+		},
+		Effort:   effort.Get(),
+		OnEffort: func(v string) { effort.Set(v) },
+		Size:     sampleSize.Get(),
+		OnSize:   func(n int32) { sampleSize.Set(n) },
+		Temp:     tempOverride.Get(),
+		OnTemp:   func(f float64) { tempOverride.Set(f) },
+		Estimate: previewEstimate(samplerProps),
+		Disabled: !samplerProps.Connected || draft.Get().GetId() == 0 || samplerProps.DisabledReason != "",
+		Reason:   samplerProps.DisabledReason,
+		Sampling: sampling.Get(),
+		OnPreview: func() {
+			if samplerProps.OnSample != nil {
+				samplerProps.OnSample()
+			}
+		},
+	})
+
+	prompts := h.Fragment(
+		// There is no rail to select from any more — the feed picker is the
+		// first control on the strip — so this says where to look now.
+		h.Show(draft.Get() == nil,
+			h.P(h.ClassStr("af-gen__empty"), h.Text(deps.I18n.T("generate.workbench.noFeed")))),
+		renderPromptField(promptFieldProps{
+			ID: "gen-system-prompt", LabelKey: "generate.editor.systemPrompt",
+			HintKey: "generate.workbench.systemHint",
+			Value:   dspec.GetSystemPromptTemplate(),
+			OnChange: func(v string) {
+				onFieldChange(func(f *affv1.Feed) { ensureSpec(f).SystemPromptTemplate = v })
+			},
+		}),
+		renderPromptField(promptFieldProps{
+			ID: "gen-user-prompt", LabelKey: "generate.editor.userPrompt",
+			HintKey: "generate.workbench.userHint",
+			Value:   dspec.GetUserPromptTemplate(),
+			OnChange: func(v string) {
+				onFieldChange(func(f *affv1.Feed) { ensureSpec(f).UserPromptTemplate = v })
+			},
+			Chips: true,
+		}),
 	)
+
+	return renderWorkbench(workbenchProps{
+		Strip:   strip,
+		Prompts: prompts,
+		Preview: ui.CreateElement(renderSampler, samplerProps),
+		Recipe: h.Fragment(
+			ui.CreateElement(renderRail, railProps),
+			ui.CreateElement(renderEditor, editorProps),
+			ui.CreateElement(renderURLPanel, urlPanelProps{
+				BaseURL: settingsRes.Get().Value.GetSettings().GetPublishing().GetPublicBaseUrl(),
+				// The SAVED slug, never the draft's: a subscribe URL for a
+				// slug that has not been saved is a URL that 404s.
+				Slug: savedSlug(editorProps.Loaded),
+			}),
+		),
+	})
 }
 
 // renderNotWired is shown instead of a blank page or a nil-pointer panic
