@@ -55,6 +55,7 @@ type runsAction struct {
 	total  int64
 	runID  int64
 	log    string
+	page   int
 }
 
 func runsReducer(s runsLoadState, a runsAction) runsLoadState {
@@ -78,8 +79,15 @@ func runsReducer(s runsLoadState, a runsAction) runsLoadState {
 		// pager: "Previous" and "Refresh", no "Next".
 		s.nextTk = a.nextTk
 		s.total = a.total
-	case "next-page":
-		s.cursor.Advance(a.nextTk)
+	// Navigation (A5-41). All four kinds go through one host-testable
+	// function shared with the items reducer; a refused move — a jump to a
+	// page with no token, Previous on page 1 — leaves the state untouched.
+	case NavNext, NavPrev, NavJump, NavReset:
+		c, moved := ApplyPageNav(s.cursor, a.kind, a.nextTk, a.page)
+		if !moved {
+			return s
+		}
+		s.cursor = c
 	case "load-err":
 		s.loading = false
 		s.err = a.err
@@ -216,7 +224,7 @@ func RunsTab(props RunsTabProps) ui.Node {
 		if !props.Ready || !feedsSettled.Get() {
 			return nil
 		}
-		store.Get().cursor.Reset()
+		store.Dispatch(runsAction{kind: NavReset})
 		load("")
 		return nil
 	}, filter.Get(), props.Ready, feedsSettled.Get())
@@ -302,18 +310,23 @@ func RunsTab(props RunsTabProps) ui.Node {
 			// Next is disabled on the last page, which is exactly when the
 			// server stops returning a next_page_token.
 			HasNext: s.nextTk != "",
+			// All three navigations go through the reducer, then read the
+			// token back off the committed state — a click handler runs on
+			// the frame loop, where a dispatch lands synchronously (A5-41).
 			OnPrev: func() {
-				s.cursor.Back()
-				load(s.cursor.Current())
+				store.Dispatch(runsAction{kind: NavPrev})
+				load(store.Get().cursor.Current())
 			},
 			OnNext: func() {
-				s.cursor.Advance(s.nextTk)
-				load(s.cursor.Current())
+				store.Dispatch(runsAction{kind: NavNext, nextTk: s.nextTk})
+				load(store.Get().cursor.Current())
 			},
 			OnJump: func(page int) {
-				if s.cursor.JumpTo(page) {
-					load(s.cursor.Current())
+				if !s.cursor.CanJumpTo(page) {
+					return
 				}
+				store.Dispatch(runsAction{kind: NavJump, page: page})
+				load(store.Get().cursor.Current())
 			},
 			OnRefresh: func() { load(s.cursor.Current()) },
 		}),

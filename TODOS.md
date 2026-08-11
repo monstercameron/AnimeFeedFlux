@@ -1264,12 +1264,25 @@ worse than a missing feature, because the screen says the setting is in effect.
       temperature override; only `candidates`/`sampleID` reset.
 - [x] `A5-40` **PARTLY FIXED (the field now says it is inert; effort default still hardcoded).** The temperature override is a documented no-op under §8.1 with no disclosure in the UI,
       and the effort default is hardcoded `"smart"` rather than read from Settings.
-- [ ] `A5-41` **STILL OPEN, and now wider.** The pager's Previous/Next handlers mutate the cursor pointer directly
+- [x] `A5-41` **FIXED 2026-08-11.** — original report: The pager's Previous/Next handlers mutate the cursor pointer directly
       instead of going through `Dispatch`, leaving a matching `"next-page"` reducer case dead and untested.
       2026-08-11: the numbered jump control added by `D3-21` follows the same pattern — `OnJump` calls
       `cursor.JumpTo` directly — so there are now three direct mutations, not two. Recorded rather than
       quietly fixed: routing all three through the reducer is a state-handling change across both tab
       files, not a side errand of adding the control.
+      Fixed: navigation is now one host-testable function, `ApplyPageNav` in `pagination.go`, which
+      both reducers call for all four kinds (`NavNext`/`NavPrev`/`NavJump`/`NavReset`). It returns a
+      NEW cursor — `PageCursor.Clone` — because the cursor sits behind a pointer, so mutating it in
+      place left the reducer's state struct byte-identical and GWC's change detection scheduled no
+      re-render; the pager only repainted when some unrelated state happened to change. A refused
+      move (Previous on page 1, a jump to a page with no token, Next with no token) returns the same
+      cursor and `false`, so the reducer returns its state untouched and the handler skips the fetch.
+      The handlers dispatch and then read the token off the committed state, which is sound because a
+      click handler runs on the frame loop where a dispatch lands synchronously.
+      Found and fixed alongside it: the revision panel had its own copy of the bug this ticket's
+      sibling fixed in `runs_ui.go` — `revisions-load-ok` called `Advance` on load, so Previous lit up
+      on page 1, Refresh fetched a page that was never on screen, and with no Next control at all
+      page 2 was unreachable. It now records `revisionsNextTk` and has a Next button.
 - [x] `A5-42` **FIXED 2026-08-11.** Stale doc comments in `web/pages/auth/` (`doc.go`, `backoff_display.go`,
       `recover.go`) claimed `keyConnectionUnreachable`, `keyBackoffCleared` and `keyRecoverSavedConfirm` were
       not yet in the catalogue and leaned on D6-07's "a missing key renders the key itself" to cover the gap.

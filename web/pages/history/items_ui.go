@@ -51,6 +51,10 @@ type itemsLoadState struct {
 	revisionsCursor  *PageCursor
 	revisionsLoading bool
 	revisionsErr     error
+	// revisionsNextTk is the token for the page AFTER the one on screen,
+	// held rather than consumed — see the load-ok case in runs_ui.go for
+	// why loading a page must not advance the cursor.
+	revisionsNextTk string
 }
 
 type itemsAction struct {
@@ -62,6 +66,7 @@ type itemsAction struct {
 	itemID    int64
 	item      *affv1.Item
 	revisions []*affv1.ItemRevision
+	page      int
 }
 
 func itemsReducer(s itemsLoadState, a itemsAction) itemsLoadState {
@@ -75,6 +80,27 @@ func itemsReducer(s itemsLoadState, a itemsAction) itemsLoadState {
 		// Record, do not advance — see runs_ui.go's identical case.
 		s.nextTk = a.nextTk
 		s.total = a.total
+	// Navigation (A5-41). Both cursors on this page — the item list's and
+	// the open revision panel's — go through the same host-testable
+	// function the runs reducer uses; a refused move leaves state untouched.
+	case NavNext, NavPrev, NavJump, NavReset:
+		c, moved := ApplyPageNav(s.cursor, a.kind, a.nextTk, a.page)
+		if !moved {
+			return s
+		}
+		s.cursor = c
+	case "revisions-next-page":
+		c, moved := ApplyPageNav(s.revisionsCursor, NavNext, a.nextTk, 0)
+		if !moved {
+			return s
+		}
+		s.revisionsCursor = c
+	case "revisions-prev-page":
+		c, moved := ApplyPageNav(s.revisionsCursor, NavPrev, "", 0)
+		if !moved {
+			return s
+		}
+		s.revisionsCursor = c
 	case "load-err":
 		s.loading = false
 		s.err = a.err
@@ -110,6 +136,7 @@ func itemsReducer(s itemsLoadState, a itemsAction) itemsLoadState {
 			s.viewRev = a.itemID
 			s.revisions = nil
 			s.revisionsCursor = NewPageCursor()
+			s.revisionsNextTk = ""
 			s.revisionsLoading = false
 			s.revisionsErr = nil
 		}
@@ -125,7 +152,13 @@ func itemsReducer(s itemsLoadState, a itemsAction) itemsLoadState {
 		}
 		s.revisionsLoading = false
 		s.revisions = a.revisions
-		s.revisionsCursor.Advance(a.nextTk)
+		// Record the next page's token; do NOT advance. Advancing here made
+		// merely loading page 1 move the cursor onto page 2's token, so
+		// Previous lit up on the first page, Refresh fetched a page that was
+		// never on screen, and — with no forward control at all — page 2 was
+		// unreachable. Identical to the bug fixed in runs_ui.go's load-ok;
+		// this panel had its own copy of it (A5-41).
+		s.revisionsNextTk = a.nextTk
 	case "revisions-load-err":
 		if a.itemID != s.viewRev {
 			break
@@ -242,7 +275,7 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 		if !props.Ready || !feedsSettled.Get() {
 			return nil
 		}
-		store.Get().cursor.Reset()
+		store.Dispatch(itemsAction{kind: NavReset})
 		selection.Get().Clear()
 		load("")
 		return nil
@@ -494,8 +527,12 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 			RevertErr:     revertErr.Get(),
 			OnRevert:      revertRevision,
 			OnPrev: func() {
-				s.revisionsCursor.Back()
-				loadRevisions(it.Id, s.revisionsCursor.Current())
+				store.Dispatch(itemsAction{kind: "revisions-prev-page"})
+				loadRevisions(it.Id, store.Get().revisionsCursor.Current())
+			},
+			OnNext: func() {
+				store.Dispatch(itemsAction{kind: "revisions-next-page", nextTk: s.revisionsNextTk})
+				loadRevisions(it.Id, store.Get().revisionsCursor.Current())
 			},
 			OnRefresh: func() { loadRevisions(it.Id, s.revisionsCursor.Current()) },
 			OnReloadItems: func() {
@@ -583,18 +620,23 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 			VisitedN:   s.cursor.Visited(),
 			HasPrev:    s.cursor.HasPrevious(),
 			HasNext:    s.nextTk != "",
+			// All three navigations go through the reducer, then read the
+			// token back off the committed state — a click handler runs on
+			// the frame loop, where a dispatch lands synchronously (A5-41).
 			OnPrev: func() {
-				s.cursor.Back()
-				load(s.cursor.Current())
+				store.Dispatch(itemsAction{kind: NavPrev})
+				load(store.Get().cursor.Current())
 			},
 			OnNext: func() {
-				s.cursor.Advance(s.nextTk)
-				load(s.cursor.Current())
+				store.Dispatch(itemsAction{kind: NavNext, nextTk: s.nextTk})
+				load(store.Get().cursor.Current())
 			},
 			OnJump: func(page int) {
-				if s.cursor.JumpTo(page) {
-					load(s.cursor.Current())
+				if !s.cursor.CanJumpTo(page) {
+					return
 				}
+				store.Dispatch(itemsAction{kind: NavJump, page: page})
+				load(store.Get().cursor.Current())
 			},
 			OnRefresh: func() { load(s.cursor.Current()) },
 		}),
@@ -799,6 +841,7 @@ type revisionPanelProps struct {
 	RevertErr     error
 	OnRevert      func(*affv1.Item, int64)
 	OnPrev        func()
+	OnNext        func()
 	OnRefresh     func()
 	// OnReloadItems re-fetches the Items list's current page after a
 	// version conflict (IsVersionConflict), so the operator sees the
@@ -854,6 +897,7 @@ func revisionPanel(p revisionPanelProps) ui.Node {
 		),
 		h.Div(h.ClassStr("history-revisions-pager"),
 			h.Button(h.Type("button"), h.Disabled(!s.revisionsCursor.HasPrevious()), h.OnClick(p.OnPrev), t.T("history.pager.previous", nil)),
+			h.Button(h.Type("button"), h.Disabled(s.revisionsNextTk == ""), h.OnClick(p.OnNext), t.T("history.pager.next", nil)),
 			h.Button(h.Type("button"), h.OnClick(p.OnRefresh), t.T("history.pager.refresh", nil)),
 		),
 	)

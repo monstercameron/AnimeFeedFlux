@@ -82,6 +82,21 @@ func (c *PageCursor) Reset() {
 	c.index = 0
 }
 
+// Clone returns an independent copy.
+//
+// Every navigation now happens inside a reducer (A5-41), and a reducer that
+// mutated the cursor in place would return a state struct byte-identical to
+// the one it was given — the cursor is a pointer, so the struct's own fields
+// never change. GWC's fastEqual would see no change and schedule no re-render,
+// leaving the pager drawing the old page number until some unrelated state
+// change happened to repaint it. Cloning before mutating makes the new state
+// genuinely new.
+func (c *PageCursor) Clone() *PageCursor {
+	tokens := make([]string, len(c.tokens))
+	copy(tokens, c.tokens)
+	return &PageCursor{tokens: tokens, index: c.index}
+}
+
 // PageNumber is the 1-based page the cursor is on, for display.
 func (c *PageCursor) PageNumber() int { return c.index + 1 }
 
@@ -113,6 +128,53 @@ func (c *PageCursor) JumpTo(page int) bool {
 	}
 	c.index = page - 1
 	return true
+}
+
+// Page-navigation action kinds, shared by the runs and items reducers.
+// They are strings because both reducers key on a string `kind`, and both
+// hand theirs straight to ApplyPageNav.
+const (
+	NavNext  = "next-page"
+	NavPrev  = "prev-page"
+	NavJump  = "jump-page"
+	NavReset = "reset-page"
+)
+
+// ApplyPageNav is the whole of page navigation, factored out of the two
+// reducers that used to each carry their own copy (A5-41).
+//
+// It returns a NEW cursor rather than mutating the one it was given: the
+// reducers hold the cursor behind a pointer, so an in-place mutation leaves
+// the state struct byte-identical and GWC's change detection schedules no
+// re-render. See PageCursor.Clone.
+//
+// The bool reports whether anything moved. A refused jump — a page the cursor
+// holds no token for — returns (c, false) so the reducer can return its state
+// untouched and the caller can skip the fetch, rather than re-requesting the
+// page already on screen.
+func ApplyPageNav(c *PageCursor, kind, nextToken string, page int) (*PageCursor, bool) {
+	next := c.Clone()
+	switch kind {
+	case NavNext:
+		if nextToken == "" {
+			return c, false
+		}
+		next.Advance(nextToken)
+	case NavPrev:
+		if !next.HasPrevious() {
+			return c, false
+		}
+		next.Back()
+	case NavJump:
+		if !next.JumpTo(page) {
+			return c, false
+		}
+	case NavReset:
+		next.Reset()
+	default:
+		return c, false
+	}
+	return next, true
 }
 
 // TotalPages converts a server total_count into a page count.

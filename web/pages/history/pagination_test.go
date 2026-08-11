@@ -101,3 +101,96 @@ func TestPageCursorReset(t *testing.T) {
 		t.Fatalf("Reset did not return to the first page: Current()=%q HasPrevious()=%v", c.Current(), c.HasPrevious())
 	}
 }
+
+// ApplyPageNav is the whole of page navigation for both history tabs, which
+// is why it is a plain function in an untagged file rather than four cases
+// inside two //go:build js reducers: those cases were unreachable from a host
+// test, and the duplicated pair had already drifted apart once (A5-41).
+
+func TestApplyPageNavReturnsANewCursorRatherThanMutating(t *testing.T) {
+	c := NewPageCursor()
+	next, moved := ApplyPageNav(c, NavNext, "tok2", 0)
+	if !moved {
+		t.Fatal("advancing with a token did not move")
+	}
+	if next == c {
+		t.Fatal("ApplyPageNav returned the same cursor pointer — the reducer's " +
+			"state would compare equal to itself and never re-render")
+	}
+	if c.PageNumber() != 1 {
+		t.Fatalf("the original cursor moved to page %d; it must be untouched", c.PageNumber())
+	}
+	if next.PageNumber() != 2 || next.Current() != "tok2" {
+		t.Fatalf("new cursor is on page %d with token %q, want page 2 / tok2",
+			next.PageNumber(), next.Current())
+	}
+}
+
+func TestApplyPageNavRefusesMovesThatWouldGoNowhere(t *testing.T) {
+	first := NewPageCursor()
+	for _, tc := range []struct {
+		name  string
+		kind  string
+		token string
+		page  int
+	}{
+		{"next with no token — the server said this is the last page", NavNext, "", 0},
+		{"previous on page 1", NavPrev, "", 0},
+		{"jump to a page no token was ever received for", NavJump, "", 4},
+		{"jump to page 0", NavJump, "", 0},
+		{"an action this function does not handle", "toggle-expand", "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, moved := ApplyPageNav(first, tc.kind, tc.token, tc.page)
+			if moved {
+				t.Fatal("reported a move")
+			}
+			// The unchanged cursor comes back identically, so the reducer can
+			// return its state untouched instead of manufacturing a new one.
+			if got != first {
+				t.Fatal("a refused move still allocated a new cursor")
+			}
+		})
+	}
+}
+
+func TestApplyPageNavWalksForwardBackAndJumps(t *testing.T) {
+	c := NewPageCursor()
+	for i, tok := range []string{"tok2", "tok3", "tok4"} {
+		var moved bool
+		c, moved = ApplyPageNav(c, NavNext, tok, 0)
+		if !moved {
+			t.Fatalf("advance %d refused", i)
+		}
+	}
+	if c.PageNumber() != 4 {
+		t.Fatalf("after three advances the cursor is on page %d, want 4", c.PageNumber())
+	}
+
+	c, _ = ApplyPageNav(c, NavPrev, "", 0)
+	if c.PageNumber() != 3 || c.Current() != "tok3" {
+		t.Fatalf("back landed on page %d / %q, want 3 / tok3", c.PageNumber(), c.Current())
+	}
+
+	// A jump backwards must not discard the forward history: the tokens for
+	// pages 2..4 were already paid for and are still valid.
+	c, moved := ApplyPageNav(c, NavJump, "", 1)
+	if !moved || c.PageNumber() != 1 || c.Current() != "" {
+		t.Fatalf("jump to page 1 landed on page %d / %q", c.PageNumber(), c.Current())
+	}
+	if c.Visited() != 4 {
+		t.Fatalf("jumping back left %d visited pages, want 4 — forward history was discarded",
+			c.Visited())
+	}
+	if c, _ = ApplyPageNav(c, NavJump, "", 4); c.Current() != "tok4" {
+		t.Fatalf("jumping forward again gave token %q, want tok4", c.Current())
+	}
+
+	// Reset is what a filter change dispatches: the old tokens describe a
+	// result set that no longer exists, so they must all go.
+	c, moved = ApplyPageNav(c, NavReset, "", 0)
+	if !moved || c.PageNumber() != 1 || c.Visited() != 1 {
+		t.Fatalf("after reset: page %d, %d visited; want page 1, 1 visited",
+			c.PageNumber(), c.Visited())
+	}
+}
