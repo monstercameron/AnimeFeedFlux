@@ -55,6 +55,7 @@ func ContextWithSessionToken(ctx context.Context, rawToken string) context.Conte
 //     went out of its way to set this key is asserting a specific token on
 //     purpose — a value arriving incidentally by transport must never
 //     override a value arriving deliberately by API.
+//
 //  2. bridge.SessionFromContext(ctx).Token — the value internal/bridge's
 //     ServeHTTP attaches to every request on a validated WebSocket connection
 //     UNCONDITIONALLY (see bridge.Session.Token's doc comment). That fallback
@@ -64,6 +65,7 @@ func ContextWithSessionToken(ctx context.Context, rawToken string) context.Conte
 //     of how valid the underlying session was. No composition root has to
 //     remember to call ContextWithSessionToken anymore; a bridge-backed
 //     connection supplies the token by construction.
+//
 //  3. Incoming gRPC metadata under SessionTokenHeader — the path
 //     ContextWithSessionToken's own doc comment anticipates for "any future
 //     transport that isn't internal/bridge (e.g. cmd/aff's plain-gRPC
@@ -75,6 +77,17 @@ func ContextWithSessionToken(ctx context.Context, rawToken string) context.Conte
 //     metadata riding along on the same connection — only a connection with
 //     no bridge session at all falls through this far.
 //
+//     That last clause used to be false. The check was `ok && sess.Token !=
+//     ""`, and an ANONYMOUS bridge upgrade carries a Session with an empty
+//     Token, so it fell through to metadata: a value supplied by the browser's
+//     own WASM could authenticate a call on a bridge connection. Not
+//     exploitable by itself — the metadata still has to carry a valid session
+//     token, which an XSS cannot read out of an HttpOnly cookie — but §4
+//     states "the token never touches JavaScript or WASM" as an invariant, and
+//     this was a path where a WASM-supplied value did. The presence of a
+//     bridge session is now what gates the fallback, not whether that session
+//     happens to be authenticated (A8-37).
+//
 // Whichever source wins, the token is treated identically from here on:
 // authorize always hashes it and re-checks the session against the store, so
 // arriving by metadata carries no less scrutiny (and no shortcut) than
@@ -83,8 +96,15 @@ func sessionTokenFromContext(ctx context.Context) (string, bool) {
 	if v, _ := ctx.Value(sessionTokenCtxKey{}).(string); v != "" {
 		return v, true
 	}
-	if sess, ok := bridge.SessionFromContext(ctx); ok && sess.Token != "" {
-		return sess.Token, true
+	// A bridge session PRESENT at all — authenticated or anonymous — settles
+	// it. An anonymous upgrade has an empty Token and is simply unauthenticated;
+	// falling through to metadata there is what let a WASM-supplied value
+	// authenticate a bridge call.
+	if sess, ok := bridge.SessionFromContext(ctx); ok {
+		if sess.Token != "" {
+			return sess.Token, true
+		}
+		return "", false
 	}
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		if v := md.Get(SessionTokenHeader); len(v) > 0 && v[0] != "" {

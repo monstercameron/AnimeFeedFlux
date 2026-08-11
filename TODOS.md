@@ -665,7 +665,7 @@ closing note).
       reachable for that credential. For an ASCII passphrase NFKC is the identity and nothing changes at all.
       Tested with U+FB01 (the fi ligature) against a genuinely old-format hash, plus that a wrong password is
       still wrong — the fallback widens what verifies to exactly one more form of the SAME string.
-- [ ] `A8-37` **`sessionTokenFromContext`'s metadata fallback fires for anonymous bridge sockets,
+- [x] `A8-37` **FIXED 2026-08-11.** — original report: **`sessionTokenFromContext`'s metadata fallback fires for anonymous bridge sockets,
       contrary to its own comment.** The comment says "only a connection with no bridge session at
       all falls through this far"; the condition is `ok && sess.Token != ""`, and an anonymous
       bridge upgrade has a Session with an empty Token — so it does fall through, and
@@ -674,6 +674,12 @@ closing note).
       §4's "the token never touches JavaScript or WASM" is stated as an invariant and this is a path
       where a WASM-supplied value authenticates a call. Either drop the metadata source when a
       bridge session is present, or correct the comment to describe what the code does.
+      Took the first option, which is the stronger one: the PRESENCE of a bridge session now gates the
+      fallback, not whether that session happens to be authenticated. An anonymous upgrade is simply
+      unauthenticated and stops there. cmd/aff, which dials the admin port directly and has no bridge
+      session at all, still authenticates by metadata — a test pins that, along with the anonymous case,
+      an authenticated bridge session beating metadata on the same connection, and the explicit context
+      key still outranking both.
 - [x] `A8-38` **FIXED 2026-08-11.** `backoffTracker`'s map was never evicted: one entry per distinct peer
       address, retained for the life of the process. Inert behind the proxy (one key), unbounded on a
       directly-reachable listener.
