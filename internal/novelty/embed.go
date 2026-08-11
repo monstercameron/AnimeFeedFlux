@@ -83,12 +83,25 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 		return nil, fmt.Errorf("novelty: embed: expected %d vectors, got %d", len(texts), len(resp.Data))
 	}
 
+	// Placed by each object's own Index, not by its position in the array.
+	// The API returns that field precisely because the array order is not
+	// guaranteed, and pairing by position would attach one candidate's
+	// embedding to another candidate's text. That failure is invisible from
+	// the outside: the novelty scores stay entirely plausible, they are just
+	// about the wrong pair — so a near-duplicate passes and an original item
+	// is rejected, with nothing in any log to say why.
 	out := make([][]float32, len(resp.Data))
-	for i, d := range resp.Data {
+	for _, d := range resp.Data {
+		if d.Index < 0 || d.Index >= len(out) {
+			return nil, fmt.Errorf("novelty: embed: vector index %d out of range for %d texts", d.Index, len(texts))
+		}
+		if out[d.Index] != nil {
+			return nil, fmt.Errorf("novelty: embed: provider returned two vectors for index %d", d.Index)
+		}
 		if len(d.Embedding) != e.dim {
 			return nil, fmt.Errorf("novelty: embed: model %s returned dim %d, expected %d", e.model, len(d.Embedding), e.dim)
 		}
-		out[i] = normalize(d.Embedding)
+		out[d.Index] = normalize(d.Embedding)
 	}
 	return out, nil
 }
