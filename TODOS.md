@@ -648,7 +648,7 @@ closing note).
       logfile. `ticket.go` documents why a query parameter was the only option available (WASM
       cannot set WebSocket handshake headers); the cheap fix is at the nginx layer, logging without
       arguments on this location.
-- [ ] `A8-36` **`auth.Normalize` is documented as applied before hashing and is not applied.**
+- [x] `A8-36` **FIXED 2026-08-11.** — original report: **`auth.Normalize` is documented as applied before hashing and is not applied.**
       "Normalize applies NFKC before hashing. Without it the same passphrase typed on a different
       keyboard or platform produces different bytes and fails to verify" — but `Hash`,
       `HashPeppered`, `Verify` and `VerifyPasswordPeppered` all pass the raw `password` to
@@ -656,6 +656,15 @@ closing note).
       the length and breach checks and nothing else. The stated cross-platform property does not
       hold, and the policy is enforced against one string while the credential is derived from
       another.
+      `Hash` and `HashPeppered` now derive from `Normalize(password)`, and both verify paths compare the
+      normalised form first. A raw match is still ACCEPTED and reported as `needsRehash`, which is what
+      makes this safe to ship: every hash written before today derived from the raw string, and for a
+      passphrase containing a composed accent or a ligature the normalised form derives a different key —
+      refusing it would lock the admin out of a credential that has not changed, with no way back short of
+      `aff admin reset`. The next successful login rewrites the hash normalised and the fallback stops being
+      reachable for that credential. For an ASCII passphrase NFKC is the identity and nothing changes at all.
+      Tested with U+FB01 (the fi ligature) against a genuinely old-format hash, plus that a wrong password is
+      still wrong — the fallback widens what verifies to exactly one more form of the SAME string.
 - [ ] `A8-37` **`sessionTokenFromContext`'s metadata fallback fires for anonymous bridge sockets,
       contrary to its own comment.** The comment says "only a connection with no bridge session at
       all falls through this far"; the condition is `ok && sess.Token != ""`, and an anonymous

@@ -67,7 +67,14 @@ func Hash(password string, p Params) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("auth: generating salt: %w", err)
 	}
-	key := argon2.IDKey([]byte(password), salt, p.Time, p.Memory, p.Threads, p.KeyLen)
+	// NFKC before derivation, which is what Normalize's own doc has always
+	// claimed happened and did not: Hash passed the raw string to argon2 while
+	// only IsWeak and IsBreached normalised. The policy was therefore enforced
+	// against one string and the credential derived from another, and the
+	// stated cross-platform property — "the same passphrase typed on a
+	// different keyboard or platform produces different bytes and fails to
+	// verify" — did not hold (A8-36).
+	key := argon2.IDKey([]byte(Normalize(password)), salt, p.Time, p.Memory, p.Threads, p.KeyLen)
 	encoded := fmt.Sprintf("$%s$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2Variant, argon2.Version, p.Memory, p.Time, p.Threads,
 		base64.RawStdEncoding.EncodeToString(salt),
@@ -96,16 +103,37 @@ func Verify(password, encoded string) (ok bool, needsRehash bool, err error) {
 		return false, false, fmt.Errorf("auth: unsupported argon2 version %d", version)
 	}
 
-	candidate := argon2.IDKey([]byte(password), salt, p.Time, p.Memory, p.Threads, uint32(len(key)))
+	derive := func(pw string) []byte {
+		return argon2.IDKey([]byte(pw), salt, p.Time, p.Memory, p.Threads, uint32(len(key)))
+	}
 
 	// subtle.ConstantTimeCompare requires equal-length slices to give its constant-time
 	// guarantee; a length mismatch alone would otherwise leak via early return, so it's folded
 	// into the comparison result rather than short-circuited.
-	match := subtle.ConstantTimeCompare(candidate, key) == 1
+	normalized := Normalize(password)
+	match := subtle.ConstantTimeCompare(derive(normalized), key) == 1
+
+	// Legacy fallback, and the reason applying NFKC to Hash is not a lockout.
+	//
+	// Every hash written before A8-36 was derived from the RAW string. For an
+	// ASCII passphrase NFKC is the identity and nothing changes, but for one
+	// containing, say, a composed accent or a full-width character, the
+	// normalised form derives a different key — and the admin would simply
+	// stop being able to log in, with no way back in short of `aff admin
+	// reset`. So a raw match is still accepted, and reported as needing a
+	// rehash so the very next successful login rewrites the stored hash in
+	// normalised form and the fallback stops being reachable for that
+	// credential.
+	legacy := false
+	if !match && normalized != password {
+		if subtle.ConstantTimeCompare(derive(password), key) == 1 {
+			match, legacy = true, true
+		}
+	}
 
 	def := DefaultParams()
 	weaker := p.Time < def.Time || p.Memory < def.Memory || p.Threads < def.Threads || uint32(len(key)) < def.KeyLen
-	return match, match && weaker, nil
+	return match, match && (weaker || legacy), nil
 }
 
 // HashPeppered is Hash, but additionally mixes the optional pepper (PLAN.md §4) into the raw
@@ -127,7 +155,8 @@ func HashPeppered(password string, p Params, pepper []byte) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("auth: generating salt: %w", err)
 	}
-	key := argon2.IDKey([]byte(password), salt, p.Time, p.Memory, p.Threads, p.KeyLen)
+	// Normalised, exactly as Hash does — see the note there (A8-36).
+	key := argon2.IDKey([]byte(Normalize(password)), salt, p.Time, p.Memory, p.Threads, p.KeyLen)
 	key = Pepper(key, pepper)
 	encoded := fmt.Sprintf("$%s$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2Variant, argon2.Version, p.Memory, p.Time, p.Threads,
@@ -164,12 +193,26 @@ func VerifyPasswordPeppered(password, encoded string, pepper []byte) (ok bool, n
 		return false, false, fmt.Errorf("auth: unsupported argon2 version %d", version)
 	}
 
-	candidate := argon2.IDKey([]byte(password), salt, p.Time, p.Memory, p.Threads, uint32(len(key)))
-	match := VerifyPeppered(candidate, key, pepper)
+	derive := func(pw string) []byte {
+		return argon2.IDKey([]byte(pw), salt, p.Time, p.Memory, p.Threads, uint32(len(key)))
+	}
+	normalized := Normalize(password)
+	match := VerifyPeppered(derive(normalized), key, pepper)
+
+	// Same legacy fallback as Verify: hashes written before A8-36 derived from
+	// the raw string, and refusing them would lock the admin out of a
+	// credential that has not changed. A raw match reports needsRehash so the
+	// next successful login rewrites it normalised.
+	legacy := false
+	if !match && normalized != password {
+		if VerifyPeppered(derive(password), key, pepper) {
+			match, legacy = true, true
+		}
+	}
 
 	def := DefaultParams()
 	weaker := p.Time < def.Time || p.Memory < def.Memory || p.Threads < def.Threads || uint32(len(key)) < def.KeyLen
-	return match, match && weaker, nil
+	return match, match && (weaker || legacy), nil
 }
 
 // decode parses a PHC-style argon2id string back into its components. It never panics on
