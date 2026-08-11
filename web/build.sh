@@ -41,7 +41,31 @@ echo "web/build.sh: building in isolated scratch dir $scratch"
 # --- 1. Compile to WASM, entirely inside the scratch dir. ---
 (
 	cd "$repo_root"
-	GOOS=js GOARCH=wasm go build -trimpath -o "$scratch/app.wasm" ./web
+	# DEV=1 builds the dev-only login prefill (web/pages/auth/devfill_on.go),
+	# which needs a password and TOTP secret. They are passed by -ldflags, never
+	# committed, and the whole path is behind a build tag so a release bundle
+	# cannot contain them even by accident — scripts/check-wasm-secrets.sh greps
+	# the built artifact for exactly this class of mistake.
+	devtags=""
+	devldflags=""
+	if [ "${DEV:-}" = "1" ]; then
+		if [ -z "${AFF_DEV_PASSWORD:-}" ]; then
+			echo "web/build.sh: DEV=1 needs AFF_DEV_PASSWORD (and AFF_DEV_TOTP_SECRET)" >&2
+			exit 2
+		fi
+		devtags="-tags devui"
+		pkg="github.com/monstercameron/AnimeFeedFlux/web/pages/auth"
+		# base64 because -ldflags word-splits on spaces and a passphrase has
+		# them by design, and because it keeps the plaintext out of `ps`.
+		pw_b64=$(printf %s "$AFF_DEV_PASSWORD" | base64 | tr -d '
+')
+		totp_b64=$(printf %s "${AFF_DEV_TOTP_SECRET:-}" | base64 | tr -d '
+')
+		devldflags="-X ${pkg}.devPasswordB64=${pw_b64} -X ${pkg}.devTOTPSecretB64=${totp_b64}"
+		echo "web/build.sh: DEV BUILD — login form will be pre-filled. Never deploy this bundle."
+	fi
+	# shellcheck disable=SC2086  # devtags/devldflags are intentionally word-split
+	GOOS=js GOARCH=wasm go build -trimpath $devtags -ldflags "$devldflags" -o "$scratch/app.wasm" ./web
 )
 
 # --- 2. Gzip it (also inside the scratch dir). ---
@@ -63,9 +87,26 @@ fi
 cp "$wasm_exec" "$scratch/wasm_exec.js"
 cp "$script_dir/static/index.html" "$scratch/index.html"
 
+# The brand icons: docs/design-direction.md's brand assets. Staged
+# alongside the bundle the same way index.html is — copied into the
+# isolated scratch dir first, then atomic-replaced into the serve dir below
+# — so a concurrent build/reader can never observe a half-written file, the
+# same guarantee D0-02/D0-03 give the wasm/gzip/html trio above. They are
+# small, static, and never change per-build (unlike app.wasm), but nothing
+# about this script's staging discipline is worth special-casing for that.
+# Copied out of internal/brand, which is where the artwork actually lives —
+# the server binary embeds the same files from there (see that package's doc
+# comment). Staging from one source rather than keeping a second copy under
+# web/static is what stops the tab icon and the publish plane's
+# /favicon.ico from silently becoming two different logos.
+for icon in favicon-32.png favicon-180.png favicon-512.png favicon.ico og-default.png; do
+	cp "$repo_root/internal/brand/$icon" "$scratch/$icon"
+done
+
 # --- 4. Stage into the serve directory, one atomic replace per file. ---
 mkdir -p "$serve_dir"
-for f in app.wasm app.wasm.gz wasm_exec.js index.html; do
+for f in app.wasm app.wasm.gz wasm_exec.js index.html \
+	favicon-32.png favicon-180.png favicon-512.png favicon.ico og-default.png; do
 	tmp_target="$serve_dir/.$f.tmp.$$"
 	cp "$scratch/$f" "$tmp_target"
 	mv "$tmp_target" "$serve_dir/$f"

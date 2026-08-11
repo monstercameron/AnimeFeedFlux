@@ -86,6 +86,11 @@ jobs:
         run: |
           short=$(git rev-parse --short HEAD)
           echo "sha_tag=sha-${short}" >> "$GITHUB_OUTPUT"
+          # RFC 3339 UTC, so the stamp sorts and parses. These feed the image's
+          # build-args below; without them the binary reports version=dev and
+          # commit=unknown, and "which build is running?" — the first question
+          # asked when production misbehaves — has no answer.
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "built sha-${short}"
 
       # linux/amd64 explicitly. The maintainer's machine is arm64 Windows; an
@@ -102,6 +107,16 @@ jobs:
             ${{ env.IMAGE }}:${{ steps.meta.outputs.sha_tag }}
             ${{ env.IMAGE }}:latest
             ${{ startsWith(github.ref, 'refs/tags/v') && format('{0}:{1}', env.IMAGE, github.ref_name) || '' }}
+          # The Dockerfile declares VERSION/COMMIT/BUILD_DATE and stamps them
+          # into the binary with -X. Without passing them here every production
+          # image reported `version=dev, commit=unknown` — so `aff version` and
+          # the About panel could not tell you which build was running, which is
+          # the first question asked when something is wrong in production and
+          # the one place a default is actively harmful.
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || steps.meta.outputs.sha_tag }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true

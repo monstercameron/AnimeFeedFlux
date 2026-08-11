@@ -258,11 +258,89 @@ jobs:
       - name: make validate
         run: make validate
 
+  wasm:
+    name: WASM build (web/)
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Most of web/ is behind the js/wasm build tag, so `go build ./...` on
+      # the host never compiles it — a break here passes the `go` job clean.
+      # `make web` runs GOOS=js GOARCH=wasm through web/build.sh and stages
+      # the bundle into web/dist/.
+      - name: make web
+        run: make web
+
+      # scripts/check-wasm-secrets.sh is being written this round (greps the
+      # built bundle for the session cookie name and storage sinks). It can
+      # only run once a bundle exists, which is here, right after the build.
+      # Guarded so its absence is a skip, not a failure.
+      - name: Check wasm bundle for leaked secrets
+        run: |
+          if [ -f scripts/check-wasm-secrets.sh ]; then
+            # No argument: the script defaults to web/dist/app.wasm, which the
+            # `make web` step above has just built. Passing a DIRECTORY makes it
+            # print usage and exit 2 (its loud-skip code) — the check would not
+            # run, and the step would fail for a reason unrelated to secrets.
+            sh scripts/check-wasm-secrets.sh
+          else
+            echo "::notice::scripts/check-wasm-secrets.sh not present yet — skipping"
+          fi
+
+  i18n:
+    name: i18n gate
+    needs: detect
+    if: needs.detect.outputs.has_go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # D6-20: gating, not reporting-only. The catalogue migration (D6 series)
+      # is done and `make i18n-lint` reports zero (see .github/i18n-baseline.txt),
+      # so a literal in web/ now fails this job for real.
+      - name: i18n lint
+        run: make i18n-lint
+
+      # D6-21: the ratchet baseline is seeded and committed at
+      # .github/i18n-baseline.txt (currently 0). This step is unconditional —
+      # a missing baseline is itself a failure (see i18nlint.Ratchet's doc
+      # comment), not a silent skip; a fresh checkout must not be able to
+      # bypass the gate by omitting the file.
+      - name: i18n ratchet
+        run: make i18n-ratchet
+
+  container:
+    name: Container checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # scripts/check-container.sh is being written this round. Runs where
+      # Docker is available — ubuntu-latest runners ship it preinstalled.
+      # Guarded so its absence is a skip, not a failure.
+      - name: check-container.sh
+        run: |
+          if [ -f scripts/check-container.sh ]; then
+            sh scripts/check-container.sh
+          else
+            echo "::notice::scripts/check-container.sh not present yet — skipping"
+          fi
+
   # A single required check to point branch protection at, so the required-check
   # list does not need editing every time a job is added or renamed.
   gate:
     name: CI gate
-    needs: [docs, hooks, go, feeds]
+    needs: [docs, hooks, go, feeds, wasm, i18n, container]
     if: always()
     runs-on: ubuntu-latest
     steps:

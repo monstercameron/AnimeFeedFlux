@@ -36,6 +36,22 @@ RUN --mount=type=cache,target=/go/pkg/mod \
             -X main.buildDate=${BUILD_DATE}" \
         -o /out/animefeedflux ./cmd/animefeedflux
 
+# The admin plane serves a compiled GWC/WASM bundle (internal/publish's
+# StaticHandler, config.DefaultAdminStaticDir = "web/dist") — this was never
+# wired into the image, so a container built from this Dockerfile alone would
+# fail NewStaticHandler's ReadDir at boot and never go healthy.
+# scripts/build-web.sh is "the canonical entry point" its own header
+# names (CI and deploy tooling call it, not web/build.sh directly), so it is
+# called here too rather than either re-implementing the build or bypassing
+# the fixed address every other caller uses. It execs web/build.sh, which
+# does the actual isolated-scratch-dir compile and atomic per-file replace
+# (TODOS.md D0-02/D0-03). Needs real gzip -k support, which some BusyBox
+# builds lack, hence GNU gzip below.
+RUN apk add --no-cache gzip
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    sh scripts/build-web.sh
+
 # --- runtime -------------------------------------------------------------
 FROM gcr.io/distroless/static:nonroot
 
@@ -50,6 +66,15 @@ FROM gcr.io/distroless/static:nonroot
 # the right ownership and copied across.
 COPY --from=build --chown=65532:65532 /out/animefeedflux /usr/local/bin/animefeedflux
 COPY --from=build --chown=65532:65532 /tmp /var/lib/animefeedflux
+
+# web/build.sh's default SERVE_DIR is "<repo>/web/dist"; here that is
+# /src/web/dist inside the build stage. Landing it at /web/dist in the
+# runtime image matters because config.DefaultAdminStaticDir is the
+# *relative* path "web/dist" and this image sets no WORKDIR (distroless's
+# default is "/"), so the unconfigured default resolves to exactly this
+# path. AFF_ADMIN_STATIC_DIR can still override it if the layout ever
+# changes; nothing here requires that env var to be set.
+COPY --from=build --chown=65532:65532 /src/web/dist /web/dist
 
 USER 65532:65532
 

@@ -31,6 +31,18 @@ desktop.ini
 *.key
 recovery-codes*
 
+# The local dev instance: its database, its logs, its built binaries — and
+# .devrun/env.sh, which carries AFF_SECRET_KEY and the provider key in
+# plaintext. Untracked today only by luck; RULE-2 ("no secret ever enters the
+# repo") is one `git add .` away from being broken, and the rule is not worth
+# leaving to whoever types that next. Added 2026-08-10 after a browser pass
+# needed real admin credentials against this directory.
+.devrun/
+
+# e2eweb's generated screenshots. The harness writes one per failed step; they
+# are evidence for the run that produced them, not source.
+e2eweb/artifacts/
+
 # Scratch
 scratch/
 *.tmp

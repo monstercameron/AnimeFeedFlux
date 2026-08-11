@@ -96,15 +96,23 @@ i18n-lint: ## Fail on user-visible string literals in web/ (§12.6, D6-20)
 	@if [ ! -d web ]; then echo "no web/ yet — nothing to lint"; exit 0; fi; \
 	go run ./cmd/affi18n lint web
 
+# Both directions of catalogue drift (D6-22, D6-23) are checked by web/i18n's
+# own Go tests, not by `affi18n check`. That subcommand reads a flat JSON
+# catalogue, and this project's catalogue is Go source — so it could never read
+# ours, and this target invoked it without the required --catalogue flag and
+# would simply have failed. The Go tests are also the better check here: they
+# resolve keys through the real bundle, so they catch a key that exists but
+# renders blank, which a JSON key-set comparison cannot see. `affi18n check`
+# stays in the tree for a future non-Go catalogue.
 i18n-check: ## Catalogue key drift, both directions (D6-22, D6-23)
 	@if [ ! -d web/i18n ]; then echo "no catalogue yet — nothing to check"; exit 0; fi; \
-	go run ./cmd/affi18n check web
+	go test ./web/i18n/ -run 'TestEveryDeclaredKeyResolves|TestNoOrphanCatalogueEntries|Resolve'
 
-# The ratchet is deliberately NOT in `all` yet. Phase D is mid-build and the
-# gate currently reports real literals; wiring it in before web/ is clean would
-# make `make all` red from the day it was added, which is how a gate gets
-# ignored — the same reasoning that kept CI's Go jobs skipping until A0 landed.
-# It goes into `all` and into CI once `make i18n-lint` reports zero (D6-21).
+# `make i18n-lint` now reports zero, so the CI `i18n` job runs both this and
+# i18n-lint unconditionally and gates on them (see .github/workflows/ci.yml).
+# Deliberately still NOT added to the local `all` target: `all` is fmt-check +
+# vet + test, the fast inner loop, and this target shells out to build+run a
+# second binary — CI is the enforcement point, `all` stays cheap.
 i18n-ratchet: ## Zero-literal ratchet; the count may never rise (D6-21)
 	go run ./cmd/affi18n ratchet --baseline=.github/i18n-baseline.txt web
 

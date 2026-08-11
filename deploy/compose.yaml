@@ -36,6 +36,14 @@ services:
       AFF_PUBLISH_ADDR: 0.0.0.0:9310   # inside the container only; see ports above
       AFF_ADMIN_ADDR: 0.0.0.0:9311
       AFF_BACKUP_DIR: /var/lib/animefeedflux/backups
+      # Where the Dockerfile stages the compiled GWC/WASM admin bundle
+      # (web/build.sh's default SERVE_DIR, copied to this exact path at
+      # image build time). This equals config.DefaultAdminStaticDir's
+      # resolution against the image's unset WORKDIR ("/" + "web/dist"), so
+      # it is redundant with the binary's own default today — it is set
+      # explicitly anyway so a future WORKDIR or default-path change in the
+      # image can never silently desync from what compose expects to find.
+      AFF_ADMIN_STATIC_DIR: /web/dist
 
     volumes:
       # A NAMED volume on local disk. WAL breaks on network filesystems, and
