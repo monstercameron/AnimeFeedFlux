@@ -132,6 +132,21 @@ func (s *Store) SampleSpendSince(ctx context.Context, feedID int64, since time.T
 // use: scheduled runs PLUS previews. They are stored apart because a sample
 // must never look like a publish (§11/§22 J3), not because a preview's dollars
 // are a different kind of dollar.
+//
+// # One place still disagrees
+//
+// The generate page's rail shows a 7-day spend PER FEED, and it does not come
+// from here. That page has no RPC carrying a cost figure — Feed and
+// SystemService both lack one — so it aggregates Run.EstCostUsd client-side
+// from RunService.History (web/pages/generate/render.go). That is runs only,
+// so a feed whose spend went on previews reads lower in the rail than it does
+// in any total, and the two will not reconcile.
+//
+// It cannot be closed from the client. Summing SampleService.ListSamples
+// would undercount for exactly the reason this ledger exists: sample rows are
+// deleted on expiry, discard and promotion, so the live list is not the
+// history. Closing it needs a per-feed spend figure on an RPC — a field on
+// Feed, or a SystemService method — reading TotalSpendSince server-side.
 func (s *Store) TotalSpendSince(ctx context.Context, feedID int64, since time.Time) (tokensIn, tokensOut int, costUSD float64, err error) {
 	runIn, runOut, runUSD, err := s.SpendSince(ctx, feedID, since)
 	if err != nil {
