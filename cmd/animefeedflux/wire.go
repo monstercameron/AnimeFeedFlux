@@ -572,6 +572,23 @@ func (g *genGate) Allowed(feedID int64) (bool, string) {
 	if err != nil {
 		return false, "feed_lookup_failed"
 	}
+	// The feed's OWN switch, re-read on every dispatch.
+	//
+	// loadSchedulableFeedRows filters `enabled = 1`, but only once, at boot —
+	// schedule.New takes a fixed job set. So a feed switched off in the admin
+	// UI (§12.3's enable toggle) stayed in the scheduler's map and kept
+	// generating, and kept spending, until the process restarted. Nothing
+	// downstream caught it either: the settings check above is the GLOBAL
+	// kill switch (§13), and genExecutor.ExecuteRun never re-reads this
+	// column. A delete was refused only by accident, because loadFeedRow
+	// filters deleted_at and the lookup above then fails.
+	//
+	// This does not fix the other half — a feed CREATED or rescheduled after
+	// boot is still invisible to the scheduler until a restart — but that
+	// half costs nothing, and this one bills.
+	if !row.Enabled {
+		return false, "feed_disabled"
+	}
 	fs, err := specFromRow(row)
 	if err != nil {
 		return false, "spec_parse_failed"

@@ -49,6 +49,48 @@ func TestGateFailsClosedOnAnUnknownFeed(t *testing.T) {
 	}
 }
 
+func TestGateRefusesAFeedSwitchedOffAfterBoot(t *testing.T) {
+	// The scheduler's job set is built once, at boot, from a query that
+	// filters `enabled = 1`. Switching a feed off in the admin UI therefore
+	// changes a column the scheduler never re-reads — so before this check
+	// existed the feed stayed in the map and kept generating, and kept
+	// spending, until the process restarted. The global kill switch above is
+	// a different control, and genExecutor.ExecuteRun never re-reads the
+	// column either, so the gate is the only place this can be caught.
+	st := openTestStore(t)
+	feedID := seedFeed(t, st, "trivia-daily", true)
+	cfg := wireTestConfig(t, "127.0.0.1:0", "127.0.0.1:0", true)
+	gate := &genGate{st: st, cfg: cfg, prices: budget.NewTable(), log: discardLogger()}
+
+	if allowed, reason := gate.Allowed(feedID); !allowed {
+		t.Fatalf("an enabled feed was refused before the switch was touched: %q", reason)
+	}
+
+	// Exactly what FeedService.SetEnabled writes.
+	if _, err := st.Writer().ExecContext(t.Context(),
+		`UPDATE feeds SET enabled = 0 WHERE id = ?`, feedID); err != nil {
+		t.Fatalf("disabling the feed: %v", err)
+	}
+
+	allowed, reason := gate.Allowed(feedID)
+	if allowed {
+		t.Fatal("a feed switched off in the UI was still allowed to generate — it would keep billing")
+	}
+	if reason != "feed_disabled" {
+		t.Errorf("reason = %q, want feed_disabled (it lands on the run row and the metric label)", reason)
+	}
+
+	// And switching it back on takes effect just as immediately, without a
+	// restart — otherwise the fix would trade one stale read for another.
+	if _, err := st.Writer().ExecContext(t.Context(),
+		`UPDATE feeds SET enabled = 1 WHERE id = ?`, feedID); err != nil {
+		t.Fatalf("re-enabling the feed: %v", err)
+	}
+	if allowed, reason := gate.Allowed(feedID); !allowed {
+		t.Errorf("a re-enabled feed stayed refused: %q", reason)
+	}
+}
+
 func TestGateEnforcesTheMonthlyCeilingIndependentlyOfTheDailyOne(t *testing.T) {
 	// A month of small, under-the-daily-cap spends is exactly the case the
 	// monthly ceiling exists for, and exactly the case a daily cap cannot
