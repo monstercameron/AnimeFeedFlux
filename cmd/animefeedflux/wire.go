@@ -614,16 +614,23 @@ func (g *genGate) Allowed(feedID int64) (bool, string) {
 	// what to do ("a reason to refuse the call, not a reason to let it
 	// through for free"); nothing was asking it.
 	//
-	// WARNS rather than refuses, deliberately and provisionally. Refusing is
-	// what Cost's doc argues for, but DefaultGlobalDailySpendCeilingUSD is
-	// 5.0, so a USD ceiling is set in the DEFAULT configuration — refusing
-	// here would stop generation outright on any install whose price table
-	// does not name the configured model, including a fresh one with an empty
-	// table. Choosing between "bill with no enforceable ceiling" and "generate
-	// nothing until prices are entered" is an operator's call, not this
-	// function's; until it is made, the misconfiguration is at least no longer
-	// silent. Logged per run on purpose: it is not noise, it is a ceiling that
-	// is not doing anything.
+	// WARNS rather than refuses, and that is a settled decision (2026-08-11),
+	// not an oversight to be tidied up later.
+	//
+	// Refusing is what Cost's doc argues for — an unknown price is "a reason
+	// to refuse the call, not a reason to let it through for free". It was
+	// weighed and rejected: DefaultGlobalDailySpendCeilingUSD is 5.0, so a USD
+	// ceiling exists in the DEFAULT configuration, and refusing here would
+	// stop generation outright on any install whose price table does not name
+	// the configured model — including a fresh one, whose table is empty.
+	// Trading "bills past a ceiling nobody can compute" for "generates nothing
+	// until prices are entered" is an operator's call, and the call was to
+	// keep generating and be told.
+	//
+	// So the residual risk is accepted and named: a misconfigured install CAN
+	// bill past its dollar ceiling, and the only thing standing between it and
+	// that is this line being read. Logged per run on purpose — it is not
+	// noise, it is a ceiling that is not doing anything.
 	if _, priced := g.prices.Lookup(fs.Model.Model); !priced {
 		if settings.GetGlobalDailySpendCeilingUsd() > 0 || g.monthlyCeilingUSD > 0 {
 			g.log.Warn("gate: model has no price entry, so every USD ceiling is inert for this feed — runs will bill and record $0.00",
