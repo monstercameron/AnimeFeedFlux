@@ -413,11 +413,14 @@ func (a genStoreAdapter) NewestPublished(ctx context.Context, feedID int64) (tim
 // CommitRun closes the SAME run row StartRun opened, choosing which store
 // method to call from run.Status (generate.Run's three terminal outcomes).
 //
-// Known gap, forced by store.go/runs.go being off-limits to this change:
-// SkipRun (internal/store/runs.go) has no tokens/cost parameters, so a run
-// skipped after spending tokens on failed novelty-retry attempts (§9 step 5)
-// records that spend as zero here. The estimate is still visible on the
-// attempt's own log line; only the runs-table rollup loses it.
+// All three outcomes record spend. This once carried a "known gap" notice
+// saying SkipRun took no tokens/cost, so a run skipped after spending on
+// failed novelty retries (§9 step 5) recorded zero — that gap is closed:
+// SkipRun takes a variadic RunSummary and the StatusSkipped branch below
+// passes it. The notice is removed rather than left standing, because a
+// stale one is worse than none here: it told anyone auditing spend that
+// skipped runs were unaccounted, which would send them looking for a hole
+// that is not there — or, worse, stop them looking at a real one.
 func (a genStoreAdapter) CommitRun(ctx context.Context, run generate.RunRecord, items []model.Item) error {
 	summary := store.RunSummary{
 		TokensIn:      run.TokensIn,
