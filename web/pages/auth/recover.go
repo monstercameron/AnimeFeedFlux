@@ -34,11 +34,10 @@ type RecoverPageProps struct {
 // keyRecoverSavedConfirm labels the "I've saved this" checkbox that gates
 // RecoverStepDone's "Go to sign in" button after a TOTP re-enrollment
 // (never after a plain password reset, which shows no shown-once secret).
-// Same missing-catalogue situation as backoff_display.go's
-// keyConnectionUnreachable/keyBackoffCleared — web/i18n is out of this
-// task's allowed paths, so this references a key the catalogue owner still
-// needs to add rather than a raw literal, following
-// web/pages/settings/wiring.go's identical precedent.
+// web/i18n declares it as KeyRecoverSavedConfirm and it resolves to real
+// text in every locale — the comment here previously said the catalogue
+// owner still needed to add it, which was true when written and has not
+// been since (A5-42).
 //
 // Why this exists at all: PLAN.md §4/§12.2 says a re-enrolled TOTP
 // secret's QR/otpauth URI is "shown once; never retrievable again" — the
@@ -65,6 +64,13 @@ func RecoverPage(props RecoverPageProps) ui.Node {
 	// why a KEY rather than a bool, and backoff_display.go's AuthErrorKey
 	// for the disconnected-vs-generic distinction it encodes.
 	errKey := ui.UseState("")
+	// errText holds an ALREADY-TRANSLATED local validation message.
+	//
+	// errKey carries a common.* key rendered with tc; the password-length
+	// messages live in the auth namespace and take {min}/{max} arguments, so
+	// they cannot travel as a bare common key. Translating at the point of
+	// failure keeps the server-error path below exactly as it was.
+	errText := ui.UseState("")
 	// backoffActive mirrors login.go's — tracks whether the code-entry
 	// step's backoff was announced as started, gating the completion
 	// announcement (ShouldAnnounceBackoffCleared).
@@ -198,11 +204,33 @@ func RecoverPage(props RecoverPageProps) ui.Node {
 
 	handleResetSubmit := ui.UseEvent(func(e ui.FormEvent) {
 		e.PreventDefault()
+		// Length is checked BEFORE the request, and the failure is shown.
+		//
+		// recover.passwordTooShort / recover.passwordTooLong existed in the
+		// catalogue with real text and were referenced by nothing, so a
+		// too-short password on /recover failed silently: the server refused
+		// it and the page said nothing (A5-33). The server remains the gate —
+		// this only stops a doomed round trip and explains why.
+		if n := len([]rune(form.Get().NewPassword)); n < recoverPasswordMinLength {
+			errKey.Set("")
+			errText.Set(t.T(afi18n.KeyRecoverPasswordTooShort,
+				gwci18n.Arguments{"min": recoverPasswordMinLength}))
+			announcer.Assertive(errText.Get())
+			return
+		} else if n > recoverPasswordMaxLength {
+			errKey.Set("")
+			errText.Set(t.T(afi18n.KeyRecoverPasswordTooLong,
+				gwci18n.Arguments{"max": recoverPasswordMaxLength}))
+			announcer.Assertive(errText.Get())
+			return
+		}
+
 		next, ok := form.Get().BeginSubmitReset()
 		if !ok {
 			return
 		}
 		errKey.Set("")
+		errText.Set("")
 		form.Set(next)
 
 		newPassword := next.NewPassword
@@ -291,7 +319,9 @@ func RecoverPage(props RecoverPageProps) ui.Node {
 	}, blocked)
 
 	var errorNode ui.Node
-	if errKey.Get() != "" {
+	if errText.Get() != "" {
+		errorNode = h.P(h.ID(errorID), h.Aria("live", "assertive"), h.ClassStr("af-form-error"), h.Text(errText.Get()))
+	} else if errKey.Get() != "" {
 		errorNode = h.P(h.ID(errorID), h.Aria("live", "assertive"), h.ClassStr("af-form-error"), tc.T(errKey.Get()))
 	} else {
 		errorNode = h.P(h.ID(errorID), h.ClassStr("af-form-error"))
@@ -446,3 +476,16 @@ func RecoverPage(props RecoverPageProps) ui.Node {
 		breakGlass,
 	)
 }
+
+// Password length bounds for /recover's client-side check.
+//
+// Duplicated from web/pages/settings/validate.go's PasswordMinLength/
+// PasswordMaxLength rather than imported: these are two sibling page
+// packages and neither owns the other, the same reason render.go's
+// newFeedDraft duplicates internal/rpc's DefaultFeed* constants. The server
+// is the real gate either way — this only decides when to stop a doomed
+// round trip.
+const (
+	recoverPasswordMinLength = 15
+	recoverPasswordMaxLength = 128
+)

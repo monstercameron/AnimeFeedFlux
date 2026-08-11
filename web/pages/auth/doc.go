@@ -139,14 +139,17 @@
 //     can't navigate away from the only screen that secret is ever shown
 //     on. A plain password reset (no shown-once secret) is unaffected.
 //
-// Two new common.* keys (keyConnectionUnreachable, keyBackoffCleared) and
-// one auth.* key (keyRecoverSavedConfirm) are referenced by this package
-// but not yet declared in web/i18n's catalogue — that package is out of
-// this task's allowed paths (the hard rule lists it explicitly), so these
-// follow web/pages/settings/wiring.go's identical precedent for a pending
-// key: gwci18n's documented D6-07 behavior ("a missing key renders the key
-// itself") covers the gap until the catalogue owner adds real text. The
-// affi18n lint gate stays at zero regardless — none of the three is a raw
-// literal; each is a named key reference, same shape every existing key
-// reference in this package already has.
+// Two common.* keys (keyConnectionUnreachable, keyBackoffCleared) and one
+// auth.* key (keyRecoverSavedConfirm) are referenced by this package and
+// declared in web/i18n as KeyCommonConnectionUnreachable,
+// KeyCommonBackoffCleared and KeyRecoverSavedConfirm. They resolve to real
+// text in every locale, which web/i18n's own TestEveryLocaleHasEveryKey and
+// TestEveryCallSiteKeyIsDefined both enforce.
+//
+// This paragraph used to say they were "not yet declared" and leaned on
+// gwci18n's D6-07 fallback ("a missing key renders the key itself") to cover
+// the gap. That was true when written and stopped being true when the
+// catalogue owner added them; it is corrected here rather than left, because
+// a comment claiming a key is missing sends the next reader looking for a
+// bug that was already fixed (A5-42).
 package auth

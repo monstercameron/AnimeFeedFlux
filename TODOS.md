@@ -403,9 +403,19 @@ an incident — which is exactly when it is switched on.
       SchemaFlux logged `No pricing information available; cost reported as unpriced`. §13 says
       estimates "come from an editable price table multiplied by recorded token counts" — with no
       rows, that product is zero, and §13's budget ceilings therefore never trip no matter what is
-      spent. /settings/provider now has an "Add rate" control (2026-08-10); this ticket is to
-      populate it for the models actually in use and to decide whether a run should REFUSE to
-      estimate rather than report zero, which is the more honest failure.
+      spent.
+      **The design half is DECIDED and DONE (2026-08-11): warn, do not refuse.** `genGate.Allowed` now
+      logs per run when a feed's model has no price entry AND a USD ceiling is configured, naming the
+      feed, the model and the inert ceilings. Refusing was weighed and rejected: `DefaultGlobalDaily
+      SpendCeilingUSD` is 5.0, so a ceiling exists out of the box, and refusing would stop generation
+      on any install whose table does not name the configured model — including a fresh one, whose
+      table is empty. The residual risk is accepted and named in the code: a misconfigured install CAN
+      bill past a dollar ceiling nobody can compute, and the warning being read is what stands between
+      it and that.
+      **REMAINS, and is an operator action, not a code change:** populate the table with real rates for
+      the models actually in use, via /settings/provider's "Add rate". Nobody but the operator knows
+      which models those are or what they currently cost, and a wrong rate is worse than none — it
+      makes a ceiling that trips at the wrong number instead of one that visibly does not trip.
 
 - [ ] `A4-42` **NEW, and an honest half-finish: provider profiles are stored, editable and shown, but
       NOTHING READS THEM at generation time.** /settings/provider now lets an operator add an
@@ -526,6 +536,47 @@ closing note).
       `auth.NewResetToken` calls `time.Now()` directly rather than an injected clock, unlike the rest
       of the package; `totp_used` accumulates a row per successful login and is not among the
       nightly prune's three tables.
+
+Second pass, widening past the credential path itself into what a session can
+reach and what untrusted input can reach:
+
+- [ ] `A8-40` **`SystemService.Backup` hands the entire credential database to anyone holding a live
+      session, with no password or TOTP re-proof.** It `VACUUM INTO`s the whole SQLite file and
+      returns it as bytes: `admin.password_hash` and its KDF params, the encrypted TOTP secret,
+      every `sessions.token_hash`, every `recovery_codes.code_hash`, and every stored provider
+      setting. `ChangePassword` and `RegenerateRecoveryCodes` both call `verifyCurrentCredentials`
+      first, precisely because §4 says a stolen-but-still-live session must not be enough on its own
+      — and this is the single most damaging read in the system, protected by strictly less than
+      either of them. Fix: put `Backup` behind the same `verifyCurrentCredentials` gate.
+      Second-order, worth deciding separately: the response travels the bridge into the WASM client,
+      so the whole hash database lands in browser memory. §4 works hard to keep the session token
+      out of WASM while the file every hash lives in goes straight through it.
+- [ ] `A8-41` **`sources.Fetcher` has no scheme allowlist, no private/link-local address block, and
+      follows redirects — server-side request forgery.** `fetchOnce` builds a request straight from
+      the target string and calls `f.Client.Do`, so nothing stops the fetch reaching
+      `http://169.254.169.254/` (the droplet metadata service) or `http://127.0.0.1:9311/` (the
+      admin bridge itself). Redirects are what make this more than an operator shooting themselves:
+      Go's default client follows up to ten, so a source URL the operator *does* trust can 302 the
+      fetcher anywhere, and the body flows into the grounding path and can surface in a published
+      feed. No construction site sets `http.Client.Timeout` either, so one slow upstream stalls a
+      run for as long as it likes.
+      **Latent, not live:** every production wiring site currently passes `noFetcher{}`
+      (`wire.go:1192`, `:1404`, `:1426`), so nothing fetches anything today. This is a
+      fix-before-grounded-feeds-ship item — the cost of adding a resolve-then-check dialer is far
+      lower now than after the feature is running.
+- [ ] `A8-42` **Fetched upstream text will reach the model context unfiltered — prompt injection.**
+      Same gate as `A8-41`: the moment grounded feeds are wired, an article body an attacker
+      controls sits in the same context window as the recipe's instructions, and the model's output
+      is published under this system's name. §8's error taxonomy and §7's contract checks constrain
+      the SHAPE of what comes back, not whether the instructions were followed by the operator or by
+      a paragraph in someone else's article. Decide the containment (delimiting, separate turns,
+      treating fetched text as data never instruction, validating the output against the source)
+      before the feature exists, not after.
+- [ ] `A8-43` **The admin plane has no in-application rate limit and no nginx one either.** `A9-12`
+      (per-IP token bucket, `429` with `Retry-After`) is still unticked and was scoped to the
+      publish plane; `A8-34` covers the missing nginx `limit_req` on the admin vhost. Between them,
+      the only thing bounding repeated `Login` attempts is the backoff tracker `A8-32` shows is a
+      single global bucket. The three are one problem and should be fixed as one.
 
 What holds, recorded so nobody re-derives it: argon2id at OWASP-plus cost with PHC-encoded params
 and a sanity ceiling computed FROM the defaults (so a future cost bump cannot lock the admin out);
@@ -991,8 +1042,13 @@ worse than a missing feature, because the screen says the setting is in effect.
       that page.
 - [x] `A5-32` **FIXED (dead matcher deleted).** `web/pages/settings/confirm.go`'s `ConfirmationMatches` is dead code and disagrees with
       the `web/ui.ConfirmMatches` actually wired to the modals (whitespace trimming).
-- [ ] `A5-33` **STILL OPEN.** `/recover` has i18n keys for password-too-short/too-long that are never rendered, so the
-      failure is silent.
+- [x] `A5-33` **FIXED 2026-08-11.** `/recover` had i18n keys for password-too-short/too-long, with real text in
+      every locale, referenced by nothing — so a too-short password failed silently: the server refused it
+      and the page said nothing. The length is now checked before the request, rendered in the form's error
+      slot and announced assertively. The server remains the gate; this stops a doomed round trip and says
+      why. Bounds are duplicated from `web/pages/settings/validate.go` rather than imported, for the same
+      reason `newFeedDraft` duplicates `internal/rpc`'s defaults — two sibling page packages, neither owning
+      the other.
 - [x] `A5-34` **FIXED (renders as a percentage via a new Formatters.Percent).** Novelty similarity is interpolated as a raw 0..1 float instead of the catalogue's own
       `FormatPercent` helper, whose doc comment exists for exactly this value.
 - [x] `A5-35` **PARTLY FIXED (export box is labelled and read-only; error detail still generic).** The `/settings/data` export textarea is unlabelled and not marked read-only despite looking
@@ -1014,8 +1070,12 @@ worse than a missing feature, because the screen says the setting is in effect.
       `cursor.JumpTo` directly — so there are now three direct mutations, not two. Recorded rather than
       quietly fixed: routing all three through the reducer is a state-handling change across both tab
       files, not a side errand of adding the control.
-- [ ] `A5-42` **STILL OPEN.** Stale doc comments in `web/pages/auth/` (`doc.go`, `backoff_display.go`, `recover.go`)
-      claim i18n keys are missing that are now defined and resolving.
+- [x] `A5-42` **FIXED 2026-08-11.** Stale doc comments in `web/pages/auth/` (`doc.go`, `backoff_display.go`,
+      `recover.go`) claimed `keyConnectionUnreachable`, `keyBackoffCleared` and `keyRecoverSavedConfirm` were
+      not yet in the catalogue and leaned on D6-07's "a missing key renders the key itself" to cover the gap.
+      All three are declared in `web/i18n` and resolve in every locale, which that package's own
+      `TestEveryLocaleHasEveryKey` and `TestEveryCallSiteKeyIsDefined` enforce. Corrected rather than left:
+      a comment claiming a key is missing sends the next reader after a bug that was already fixed.
 - [ ] `A5-50` **`settings.publishing.default_contact` has nowhere to go.** Split out of `A5-01`, which fixed
       every other write-only setting. This one cannot be wired as things stand: `feeds` has `author`,
       `copyright`, `og_image` and `ttl_minutes` columns and no `contact` column, and `Feed` carries no
@@ -2615,6 +2675,47 @@ no change at all. That is the payoff this section predicted, collected.
       VACUUM completes and computes it from the clock at that moment, so on a loaded machine the
       next target lands beyond the loop's budget and a non-advancing poll can never reach a target
       in the fake future. The poll advances too now. Eight consecutive runs green.)
+- [x] `T-04` Measure `web/`'s browser code at all. §17.2
+      (closed 2026-08-11. `scripts/coverage-wasm.sh` / `make cover-wasm`. 62 files carry
+      `//go:build js && wasm`, so a host build excludes them from their packages entirely — they were
+      never reported as 0%, they were absent, and the host number was measuring the untagged
+      leftovers. **Browser code is at 25.7%**: `web/wsconn` 4.1% (host says 100%), `web/shell` 5.6%
+      (host says 100%), `web/pages/settings` 15.5% (host says 81.7%), `web/pages/history` 25.9%,
+      `web/pages/generate` 28.4%, `web/pages/auth` 31.8%. Two Windows workarounds are load-bearing
+      and documented in the script: `go_js_wasm_exec` is a bash script so `-exec` needs a generated
+      `.cmd` shim, and the wasm process cannot generate its own report because Go's js syscall layer
+      has no `O_DIRECTORY` — raw counters via `-test.gocoverdir` plus `go tool covdata textfmt` on
+      the host sidesteps it.)
+- [x] `T-05` Fix the tests that only pass on the host. §17
+      (closed 2026-08-11 with `T-04`, which is what exposed them. One was real:
+      `web/ui`'s `TestInputWithoutIDStillWiresLabelToField` called `Input(...)` outside any component
+      and so reached `gwcui.UseId()` with no fiber — tolerated by the native stub, a
+      `GoUseId called outside component context` PANIC in the browser build the code actually ships
+      to. It renders through `ui.CreateElement` now and passes in both. The other three are honest
+      environment mismatches, skipped with reasons: `web/i18n`'s call-site scan walks the source tree
+      (no directory reads under js/wasm) and two `web/tokens` tests assert on what `css.Harvest()`
+      returns, which buffers nothing in a browser because rules go straight to the stylesheet.)
+- [ ] `T-06` Decide how the render layer gets tested, then get `web/` over 80%. §17.2
+      (opened 2026-08-11. **Blocked on a decision, not on effort.** Spiked it: rendering a panel
+      under wasm via `gwcui.RenderToString` panics with `GoUseFunc dom adapter is nil` — any
+      component wiring an event handler needs a DOM adapter, GWC installs one only from
+      `ensureInitialized()` against a real `document`, node has none, GWC exposes no seam to install a
+      test adapter (it lives behind `internal/runtime`), and jsdom is not present here. Two routes:
+      (a) a jsdom-class node harness that boots GWC's real runtime — new infrastructure before a
+      single assertion; (b) split the page packages so the pure props-to-node render functions lose
+      the `js && wasm` tag and become host-testable with `RenderToString`, which is exactly how
+      `web/ui` reaches 84% today with no infrastructure at all — but that is a refactor across 62
+      files. (b) is the better end state; (a) is reversible. ~3,500 uncovered statements either way.)
+- [ ] `T-07` Bring the 50 remaining host files over 80% individually. §17.2
+      (opened 2026-08-11. The repository total is 81.9%, but 50 of 185 measured files are below 80%.
+      Largest: `cmd/animefeedflux/wire.go` 63.7% (203 uncovered), `internal/rpc/item.go` 76.4% (142),
+      `internal/rpc/feed.go` 77.6% (118), `cmd/aff/system_cmd.go` 71.1% (88), `internal/rpc/auth.go`
+      79.9% (86), `internal/e2e/app.go` 76.1% (67), `internal/flowtest/harness.go` 62.6% (64). All
+      are feasible with ordinary tests — no blocker, just work. Four files are genuinely not worth
+      it and should be excluded rather than chased: `cmd/aff/term_windows.go` (needs a real console),
+      `web/pages/auth/devfill_off.go` and `web/ui/kebab_anchor_host.go` (build-tag stubs whose whole
+      body is the other build's absence), and the platform-gated `diskspace_*`/`term_*` pair that
+      cannot compile on the machine running the tests.)
 
 ## DF — Flow sanity walkthroughs, through the UI (§22, §17.5)
 

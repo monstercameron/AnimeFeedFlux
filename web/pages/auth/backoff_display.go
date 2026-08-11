@@ -63,13 +63,10 @@ func BackoffSecondsCeil(d time.Duration) int {
 }
 
 // keyConnectionUnreachable is a common.* i18n key this package references
-// but does not itself declare — web/i18n is out of this task's allowed
-// paths (the hard rule lists it explicitly), so this follows
-// web/pages/settings/wiring.go's identical precedent for a key the
-// catalogue owner still needs to add: until it exists, gwci18n's
-// documented D6-07 behavior ("a missing key renders the key itself")
-// covers the gap, same as it already does for settings.security.signOut's
-// two pending keys.
+// and web/i18n declares (KeyCommonConnectionUnreachable). It resolves to
+// real text in every locale; the D6-07 "a missing key renders the key
+// itself" fallback this comment once relied on is no longer load-bearing
+// here (A5-42).
 //
 // It exists to fix a real gap: §12.1's "one generic error string" rule
 // (D1-02) exists to hide CREDENTIAL causes — wrong password vs wrong TOTP
