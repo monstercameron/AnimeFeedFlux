@@ -590,7 +590,7 @@ gate on `AFF_DEV_INSECURE_AUTH`, and the nginx vhost that fronts all of it. Anal
 run. What follows is what does NOT hold; the primitives themselves are in good shape (see the
 closing note).
 
-- [ ] `A8-31` **An elevated recovery session becomes a FULL session across a process restart.**
+- [x] `A8-31` **FIXED 2026-08-11.** — original report: **An elevated recovery session becomes a FULL session across a process restart.**
       `interceptor.go`'s `authorize` decides scope purely from the in-memory `elevatedTracker`, then
       WRITES that decision onto `sessions.scope` on every call. After a restart the tracker is empty,
       so `isElevated` returns false, `wantScope` is `full`, the persisted `elevated` value is
@@ -609,6 +609,19 @@ closing note).
       This requires an attacker to already hold a valid recovery-code session, so it is a scope
       containment failure rather than an authentication bypass — but scope containment is the whole
       of BF-32.
+      Fixed on both halves, because either alone leaves a hole. The PERSISTED scope is now
+      authoritative in `authorize`: a row saying `elevated` keeps the session elevated whatever the
+      in-memory tracker says, and scope is only ever narrowed here, never widened — a session leaves
+      elevated scope by expiring, not by being re-read. And `RecoverWithCode` writes the scope when it
+      MINTS the session, because the row previously carried its creation default until the first
+      authorized call, so a recovery session that made no call before a restart still came back as
+      `full`. Found that second half by writing the test first and watching it fail for the wrong reason.
+      `store.SessionScope` — the reader with zero non-test callers that made the column write-only — now
+      has one, so migrations/0005 delivers the guarantee it was added for.
+      Tested end to end through a second `AuthServer` over the same store, which is exactly a restart:
+      `RegenerateRecoveryCodes` is refused with PermissionDenied, the row still reads `elevated`, and
+      `ChangePassword` is still REACHABLE — a fix that locked a recovery session out of the one thing
+      recovery exists to do would strand the admin mid-flow.
 - [ ] `A8-32` **Nothing in the process ever learns the client's IP, so per-IP login backoff is one
       global bucket.** `clientIP()` reads gRPC's peer address; behind the deployed nginx
       (`deploy/nginx/admin.anime.earlcameron.com.conf`) that is the proxy, and the
@@ -1911,6 +1924,48 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [x] `C0-05` **Pre-create the data directory owned by the non-root user** — named-volume ownership. §15.1
 - [x] `C0-06` `.dockerignore` excluding `.git`, local databases, and backups. §15.1
 - [x] `C0-07` Build cache mounts so rebuilds are cheap. §15.1
+- [ ] `C0-20` **`.dockerignore`'s `*.db` does not match `.devrun/aff.db`, and `.devrun/` is not
+      excluded at all.** Docker's ignore patterns are `filepath.Match`-style: `*` does not cross a
+      `/`, and a pattern is NOT implicitly applied to subdirectories the way `.gitignore` applies
+      one. So `*.db` excludes only top-level databases, and `.devrun/` — which holds
+      `AFF_SECRET_KEY`, the dev admin password, the dev TOTP secret and a live `aff.db` — is
+      uploaded with the build context and lands in the build stage via `COPY . .`.
+      Scope it honestly: it does NOT reach the published image, because the runtime stage copies
+      only three explicit paths out of the build stage. The exposure is the build context and any
+      exported build cache (GitHub Actions cache backends export build layers to a registry), which
+      is still exactly the leak the file's own header says it exists to prevent (RULE-2).
+      Fix: add `.devrun/` and change the database patterns to `**/*.db`, `**/*.db-shm`,
+      `**/*.db-wal`. Same reasoning applies to `backups/` and `bin/`, which have the same
+      top-level-only problem.
+- [ ] `C0-21` **The runtime image's data directory is seeded from the build stage's `/tmp`.**
+      `COPY --from=build --chown=65532:65532 /tmp /var/lib/animefeedflux` is a way to get an
+      empty directory with the right ownership into a distroless image that has no shell to `mkdir`
+      with — but `/tmp` in that stage is not empty. `apk add gzip`, `go build` and
+      `scripts/build-web.sh` all use it. Whatever they leave behind is copied into the image as the
+      initial contents of the data directory, and Docker initialises an empty named volume FROM
+      that path — so the junk is also what a fresh volume starts life containing.
+      Fix: stage a genuinely empty directory explicitly in the build stage
+      (`RUN mkdir -p /empty && chown 65532:65532 /empty`) and copy that, so the property is stated
+      rather than inherited from whatever the toolchain happened to leave.
+- [ ] `C0-22` **The image ships an unstripped 34 MB WASM bundle.** The Go server binary is built
+      here with `-ldflags "-s -w"`, but the admin bundle is produced by `scripts/build-web.sh`,
+      which passes neither (`A8-49`). The image therefore carries the larger artifact of the two
+      un-optimised while the smaller one is stripped. Fixing `A8-49` fixes this at the same time —
+      noted here so the container side of it is not missed when that ticket is picked up.
+- [ ] `C0-23` **DECISION, not a task: does this run under Docker on the droplet at all?** The box is
+      2 GB, runs nginx and systemd units for the neighbouring services, and has no Docker installed
+      (`C1-14` is open precisely because installing it is still to be done). Adding the daemon costs
+      RSS and disk on a box that is already shared, and `mem_limit: 512m` has to fit alongside
+      whatever else is resident.
+      The Dockerfile's own header states the case for it honestly — "a static binary on the host
+      would already be sandboxed by systemd, but it would still sit next to a shell" — and that is
+      a real difference, not a rationalisation. The case against is that every neighbour on this
+      droplet already deploys as a systemd unit, so Docker here means running two deployment models
+      on one small box.
+      This is Cam's call and is recorded so it is made deliberately rather than by default. Whatever
+      is chosen, `C0-08` below should still be run: the image building and starting is worth knowing
+      independently of whether it is what production uses.
+
 - [ ] `C0-08` **Build locally with `--platform linux/amd64`** and confirm it runs. §15.2
 - [ ] `C0-09` Confirm a native arm64 build fails on an amd64 host — know the error signature. §15.2
 - [x] `C0-10` `compose.yaml`: publish to `127.0.0.1` only. §15.4, §19

@@ -209,15 +209,22 @@ func TestElevatedSessionScopeIsPersistedOnTheSessionRow(t *testing.T) {
 		t.Fatalf("lookup session id: %v", err)
 	}
 
-	// Before any authorize() call the row still shows the schema default —
-	// the tracker knows this session is elevated, but nothing has written
-	// that onto the row yet.
+	// The row says elevated BEFORE any authorize() call.
+	//
+	// This assertion was the other way round — "the tracker knows this session
+	// is elevated, but nothing has written that onto the row yet" — which was
+	// true and was the bug. A session that made no call before a restart came
+	// back with the schema default of `full`, and authorize, deriving scope
+	// from an empty tracker, then confirmed it. RecoverWithCode now persists
+	// the scope when it mints the session, so the row is authoritative from
+	// the moment the session exists (A8-31).
 	before, err := st.SessionScope(t.Context(), id)
 	if err != nil {
 		t.Fatalf("SessionScope before authorize: %v", err)
 	}
-	if before != store.SessionScopeFull {
-		t.Errorf("scope before any authorize() call = %q, want %q (the schema default)", before, store.SessionScopeFull)
+	if before != store.SessionScopeElevated {
+		t.Errorf("scope before any authorize() call = %q, want %q — a session that makes no call "+
+			"before a restart would come back with full privileges", before, store.SessionScopeElevated)
 	}
 
 	if _, err := srv.authorize(ContextWithSessionToken(t.Context(), token), affv1.AuthService_ChangePassword_FullMethodName); err != nil {

@@ -423,6 +423,18 @@ func (s *AuthServer) RecoverWithCode(ctx context.Context, req *affv1.AuthService
 		return nil, status.Error(codes.Internal, "recovery failed")
 	}
 	s.elevated.mark(auth.HashToken(rawToken), now.Add(elevatedSessionTTL))
+	// Persisted at creation, not just tracked in memory.
+	//
+	// The in-memory mark above is lost on a restart, and until this write
+	// existed the row carried its creation default of `full` — so a recovery
+	// session that had not yet made a call came back after a restart with the
+	// scope of an ordinary login, reachable across every RPC in the system
+	// (A8-31). The row is what interceptor.go's authorize now treats as
+	// authoritative, so it has to say `elevated` from the moment the session
+	// exists rather than from its first authorized call.
+	if err := s.store.SetSessionScope(ctx, id, store.SessionScopeElevated); err != nil {
+		return nil, status.Error(codes.Internal, "recovery failed")
+	}
 
 	remaining, err := s.store.CountUnusedRecoveryCodes(ctx)
 	if err != nil {

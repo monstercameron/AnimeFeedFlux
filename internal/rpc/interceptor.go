@@ -201,13 +201,49 @@ func (s *AuthServer) authorize(ctx context.Context, fullMethod string) (context.
 	// than something that exists only in this process's memory, and so a
 	// default-deny check can be made against it centrally, here, rather
 	// than trusting every future handler to remember to ask the tracker.
+	// The PERSISTED scope is authoritative, and a session can only ever be
+	// narrowed here — never widened.
+	//
+	// This block used to derive scope purely from the in-memory tracker and
+	// then write that decision onto the row. After a process restart the
+	// tracker is empty, so isElevated returned false, wantScope became `full`,
+	// and the persisted `elevated` was OVERWRITTEN with `full` — after which
+	// the default-deny check below passed. A session opened by RecoverWithCode,
+	// scoped by §12.2 to ChangePassword and ReenrollTOTP, could then reach
+	// every RPC in the system for the rest of its 10-minute life, including
+	// RegenerateRecoveryCodes and every feed mutation (A8-31).
+	//
+	// elevatedTracker's own doc claims a restart defaults to "not elevated
+	// (i.e. not trusted with anything extra)". In that code path "not
+	// elevated" meant FULL PRIVILEGES, so the failure direction was the exact
+	// opposite of what was written — which is what made it hard to see.
+	//
+	// migrations/0005 exists so scope is "something the session carries rather
+	// than something that exists only in this process's memory", and
+	// store.SessionScope — the reader — had no callers at all, so the column
+	// was write-only and the migration delivered none of that. Reading it is
+	// the fix.
 	elevated := s.elevated.isElevated(hash, now)
+	stored, err := s.store.SessionScope(ctx, id)
+	if err != nil {
+		return ctx, status.Error(codes.Internal, "reading session scope")
+	}
+	if stored == store.SessionScopeElevated {
+		// The row says this session was opened by a recovery code. A restart
+		// losing the tracker entry must not promote it.
+		elevated = true
+	}
+
 	wantScope := store.SessionScopeFull
 	if elevated {
 		wantScope = store.SessionScopeElevated
 	}
-	if err := s.store.SetSessionScope(ctx, id, wantScope); err != nil {
-		return ctx, status.Error(codes.Internal, "updating session scope")
+	// Only written when it actually changes, and never from elevated to full:
+	// a session leaves elevated scope by expiring, not by being re-read.
+	if stored != wantScope && stored != store.SessionScopeElevated {
+		if err := s.store.SetSessionScope(ctx, id, wantScope); err != nil {
+			return ctx, status.Error(codes.Internal, "updating session scope")
+		}
 	}
 
 	// Default deny: fullMethod must be explicitly present in
