@@ -1,7 +1,40 @@
 # Trivia spoiler hiding — verified defect and open options
 
 Status: **open decision**. §5.5 states the constraint; this document is the evidence and the
-options. Nothing here has been adopted — do not treat any option below as chosen.
+options. **No option below has been formally adopted as the design decision** — but see the
+2026-08-10 update immediately below: code now exists, and it does not implement any single option
+from this document coherently. Read that update before relying on anything else here being current.
+
+## 2026-08-10 update: code now exists, and disagrees with itself
+
+This document's "What was NOT changed" section (bottom) originally said "No Go code was touched
+(none exists to touch, per `CLAUDE.md`)." That is no longer true — the repo has since built the
+generation and rendering pipeline — and this section records what was found on an audit pass through
+`internal/render`, so a future reader does not trust the stale claim below it.
+
+**Three places now disagree with each other, and none went through the decision this document exists
+to support:**
+
+1. **`internal/render/rss.go`'s `itemBodyWithAnswer`** — what RSS `content:encoded`, Atom `content`,
+   and JSON Feed `content_html` actually ship (all three renderers call this one helper, per its own
+   doc comment) — appends `<hr class="spoiler-break"/><p><strong>Answer:</strong> ...</p>` after the
+   body. This is closest to **Option 1** below (whitespace/scroll distance), which this document's
+   own table rates "weak guarantee."
+2. **`internal/render/permalink.go`'s `Permalink`** — a *different* surface, the `/items/{item_key}`
+   page — wraps the answer in `<details><summary>Reveal the answer</summary>...</details>`. This is
+   not one of the four options below at all. It is also, specifically, the exact tag pair this
+   document's own evidence (§ "The finding," directly below) proves is silently unwrapped by
+   ArticleFlux's sanitizer, leaving the answer as plain visible text with no toggle — the same defect
+   class this whole document exists to warn against, now shipped on a second surface without anyone
+   checking it against the evidence already gathered here.
+3. **This document** still says no option has been adopted.
+
+None of the three is "wrong" in isolation — a `<details>` element genuinely does hide content from
+an unfurler that only reads `<meta>` tags (permalink.go's own comment makes exactly that narrower,
+accurate claim) — but the combination means there is no single, deliberate, cross-checked answer to
+"how is the trivia answer hidden," just two different implementations that happened to get written
+for two different renderers, one of which reuses a mechanism already shown broken elsewhere in this
+same file. See TODOS.md `A2-16` for the task-level note. Reported for a decision, not fixed here.
 
 ## The finding
 
@@ -154,6 +187,13 @@ as a bug to route around.
 
 ## What was NOT changed
 
-No Go code was touched (none exists to touch, per `CLAUDE.md`). No option above has been selected.
+**As originally written (superseded — see the 2026-08-10 update at the top of this document):** no
+Go code was touched (none exists to touch, per `CLAUDE.md`). No option above has been selected.
 PLAN.md §5.5 now records the constraint and points here rather than silently keeping the original
 `<details>`-based assumption.
+
+**Current status, 2026-08-10:** Go code now exists and implements two different, uncoordinated
+mechanisms (see the top of this document) — but neither was arrived at by selecting one of the four
+options above, and no option above is formally adopted as of this writing. This audit pass corrected
+the document to match what the code actually does; it did not decide the open question, which is
+still Cam's call per the framing already in this document and in PLAN.md §5.5/§7.

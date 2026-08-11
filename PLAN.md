@@ -68,9 +68,9 @@ sequenceDiagram
     participant PUB as Publish plane
     participant SL as Slack / readers
 
-    Note over Cam,SL: Phase 1 — Login, on the IP-allowlisted admin host
+    Note over Cam,SL: Phase 1 — Login, on the IP-allowlisted admin host.<br/>Corrected 2026-08-10: the cookie is NOT delivered on this RPC response —<br/>see the ticket note below and PLAN.md §4a.
     Cam->>UI: Open /login, submit password
-    UI->>BR: AuthService.Login over WSS
+    UI->>BR: AuthService.Login over WSS (anonymous socket)
     BR->>BR: Check Origin, validate upgrade
     BR->>RPC: Forward RPC
     RPC->>AU: Verify argon2id hash, constant time
@@ -83,8 +83,12 @@ sequenceDiagram
     BR->>RPC: Forward RPC
     RPC->>AU: Verify TOTP, reject replayed step
     AU->>DB: Write session and auth_event
-    RPC-->>UI: Host-prefixed session cookie, HttpOnly Secure SameSite=Strict
-    UI-->>Cam: Land on /generate
+    RPC-->>UI: x-aff-login-ticket gRPC header — single-use, 20s TTL,<br/>NEVER the raw session token (§4a)
+    UI->>UI: Stash ticket in sessionStorage, force a full page reload
+    UI->>BR: Reconnect: new WebSocket upgrade, ?ticket=... on the URL
+    BR->>BR: Redeem ticket (single-use), check Origin again
+    BR-->>UI: 101 Switching Protocols, Set-Cookie spliced into the raw<br/>upgrade response (Host-prefixed, HttpOnly, Secure, SameSite=Strict)
+    UI-->>Cam: Land on /generate, now on the ticket-authenticated socket
 
     Note over Cam,SL: Phase 2 — Author and sample. Nothing is published here.
     Cam->>UI: Edit recipe: prompt, schedule, timezone, budgets
@@ -303,7 +307,10 @@ ever required, that is the point to revisit — not before.
   argon2id is correct here and the distinction matters: argon2id exists to make *low-entropy human
   passwords* expensive to guess, and there is no brute-forceable space in 256 random bits.
 
-  Delivered as `__Host-session`, `Secure; HttpOnly; SameSite=Strict; Path=/`, and **no `Domain`
+  Delivered as `__Host-aff_session` (corrected 2026-08-10 — this section had said `__Host-session`
+  since the auth code first landed; `internal/auth/session.go`'s `cookieName` const has always been
+  `__Host-aff_session`, and `scripts/check-wasm-secrets.sh` derives its scan target from that same
+  constant, not from this prose), `Secure; HttpOnly; SameSite=Strict; Path=/`, and **no `Domain`
   attribute ever** — the `__Host-` prefix is only honoured when all three hold, which is what makes
   the browser enforce the scoping rather than trusting us to. Rotated on login and on privilege
   change.
@@ -330,6 +337,51 @@ ever required, that is the point to revisit — not before.
   the socket is still happily serving RPCs at 23:00 because nothing re-checked. On close the client
   reconnects, the upgrade fails 401, and the login screen appears — which is the correct visible
   outcome.
+
+- **§4a — Login tickets: how the first cookie gets set at all (added 2026-08-10, documenting existing
+  code — `internal/bridge/ticket.go`, `internal/rpc/auth.go`, `web/wsconn/ticket.go`).** `AuthService`
+  lives entirely behind the bridge (there is no HTTP login endpoint — removed on purpose, "one
+  transport, no HTTP side door"), which creates a bootstrapping problem: the *first* WebSocket upgrade
+  is necessarily anonymous (no cookie exists yet), so `Login`/`RecoverWithCode` complete over that
+  anonymous socket — but the raw session token can never be returned on it, because that response is
+  read by the WASM gRPC client, and landing the real token in WASM memory is exactly the exposure §4
+  forbids ("the token never touches JavaScript or WASM").
+
+  The fix is a second, disposable credential: on success, `Login`/`RecoverWithCode` mint a **login
+  ticket** — 256 bits from the OS CSPRNG, hashed at rest in an in-memory `bridge.TicketStore` (not
+  persisted; losing every outstanding ticket on restart is the safe direction to fail), single-use,
+  and expiring in **20 seconds** (`bridge.DefaultTicketTTL` — sized to survive one reconnect, not to be
+  a second, weaker session token). It is returned as a gRPC response header
+  (`x-aff-login-ticket`/`SessionTicketHeader`), never in the response body, and never the raw session
+  token itself.
+
+  The client (`web/wsconn/ticket.go`) stashes the ticket in `sessionStorage` (not `localStorage` —
+  it has no business surviving past the tab that produced it) and forces a full page reload rather
+  than redeeming it in place; `web/shell.Mount`'s boot dial then reconnects with `?ticket=...` on the
+  WebSocket URL. **The upgrade handling that ticket is the only place the `__Host-` session cookie can
+  ever be set on this connection** — the 101 Switching Protocols response is the only response an
+  upgrade ever gets, so `Set-Cookie` cannot go through the ordinary `http.ResponseWriter`/`SetCookie`
+  path (verified against gorilla/websocket's `Upgrade`, which hijacks the connection and hand-writes
+  the 101 response as raw bytes, never consulting `w.Header()`); it is instead spliced into the raw
+  upgrade response bytes by a header-injecting hijacked `net.Conn` (`internal/bridge/hijack.go`).
+
+  **A verified dead end that shaped this design, worth recording so it is not attempted again:** an
+  earlier version dialed a short-lived side connection purely to redeem the ticket and set the cookie,
+  then closed it and reloaded, expecting the reload's ordinary same-origin dial to carry the cookie a
+  browser normally attaches automatically. That does not work — verified directly against Chromium
+  (Playwright/CDP) and an isolated minimal Node WebSocket server: Chromium's WebSocket client does not
+  apply `Set-Cookie` from a WebSocket upgrade response to its cookie jar at all, on any origin. So the
+  ticket-carrying reconnect **is** the authenticated connection from the moment it exists; there is no
+  simpler two-step alternative.
+
+  **Known residual cost, stated plainly rather than left implicit:** the cookie set on that 101
+  response is real and correctly formed, but because Chromium never stores it, a later plain page
+  refresh has no cookie and no stashed ticket to present — it dials anonymously and the operator is
+  logged out. There is currently no durable, ordinary-HTTP-reload path to a still-authenticated
+  session under "everything over WebSocket, no HTTP side door"; only the one just-completed login
+  flow's own reload lands authenticated. Fixing that would require a plain HTTP endpoint outside the
+  bridge capable of carrying a normal `Set-Cookie` response — precisely what "no HTTP side door" rules
+  out — so this is an open tension between two of this section's own goals, not a bug to fix quietly.
 
 - **Password reset and any future email-verification tokens use the same opaque-token
   construction**, never a JWT: 256 random bits, `SHA-256` in the database, single-use, expiring, and
@@ -529,10 +581,23 @@ verification step rather than an assumption.
 
 ### 5.6 Verification
 
-`make validate` renders the golden files and runs them through the W3C / RSS Advisory Board feed
-validator; CI asserts zero errors *and* zero warnings for RSS, Atom, and JSON Feed. Goldens include
-the ugly cases: ampersands, `<` in titles, CJK, emoji, `]]>` in body HTML, a 500-char summary, an
-item with no link.
+`make validate` renders the golden files and checks them against the RSS/Atom/JSON Feed profile
+requirements this section states; CI asserts zero errors *and* zero warnings for RSS, Atom, and JSON
+Feed. Goldens include the ugly cases: ampersands, `<` in titles, CJK, emoji, `]]>` in body HTML, a
+500-char summary, an item with no link.
+
+**Corrected 2026-08-10 (audit pass): this is not literally the hosted W3C / RSS Advisory Board
+validator, and never has been in the implementation.** Earlier text here read as if `make validate`
+called the real third-party service. What it actually calls is `cmd/affvalidate`, which runs
+`internal/feedvalidate` — an offline, in-repo re-implementation of the subset of the RSS/Atom/JSON
+Feed profile rules this project depends on, plus the §5.5 Slack-compatibility rules. This is a
+deliberate substitution, documented in both packages' own doc comments: depending CI on a hosted
+service's uptime, rate limits, and network egress is a real cost for a personal project's CI runner,
+and `internal/feedvalidate` is explicit that "passing here does not mean the hosted validator would
+also pass" — a release candidate should still be run through the real W3C / RSS Advisory Board
+validator by hand before a release, which is what the offline check cannot substitute for. `A3-08`
+(TODOS.md) asking to "document which validator version CI pins" no longer has an answer to give:
+there is no hosted-service version in this path to pin, since nothing external is called.
 
 A dedicated **Slack-compatibility test** asserts: strictly descending unique `pubDate`s; every item
 dated and parseable; `description` plain text under the cap; no answer text in `description` or
@@ -689,6 +754,21 @@ here rather than discovered during A5.
   LLM layer", confined to one operation.
 - Minor: there is no per-call temperature knob, only Mode and Speed tiers. The
   recipe's temperature field is accepted and documented as a no-op until it is.
+
+- **A top-level array schema is rejected outright, so the generated type must be an OBJECT.**
+  Found 2026-08-10 by the first real generation run (`A4-30`), not by any test:
+  `Generating[[]GeneratedItem]` derives its JSON schema from the type parameter, so it asked for
+  `"type": "array"`, and OpenAI's structured-output contract requires an object at the root —
+  `invalid_json_schema: schema must be a JSON Schema of 'type: "object"', got 'type: "array"'`.
+  **Generation had therefore never once worked against a real provider.** `internal/llm` now
+  generates a `generatedBatch{ Items []GeneratedItem }` wrapper and unwraps it, and the steering
+  text names the `items` field so the schema and the prose agree about the shape being asked for.
+  Nothing in the default suite could have caught this: `FakeProvider` replays canned JSON and never
+  builds a schema, so every test exercised the decode path and none of the contract the provider
+  actually enforces. This is the concrete argument for `A4-30` existing at all.
+- **Effort is the Speed tier, and it is now wired.** `internal/llm` sets `Smart()`/`Fast()`/`Quick()`
+  from `Settings.Provider.effort`; it previously hardcoded `Strict()` and no tier at all, so the
+  "Mode and Speed tiers" this section named as the only available knobs were half unused.
 
 Three dependency facts, taken from SchemaFlux's own README rather than assumed:
 
@@ -859,7 +939,16 @@ what would actually happen.
   `PromoteSample`, `PublishCorrection`. **There is no hard delete** — see §12.4.
 - `RunService`: `History`, `Get`, `Watch` (server-stream of live progress), `Delete`.
 - `SystemService`: `Stats`, `SetGenerationEnabled`, `GetSettings`, `UpdateSettings`, `Version`,
-  `Backup`.
+  `Backup`, `ListModels`, `CostHistory`.
+  - `ListModels` asks the provider which models this deployment's key can use, **server-side** —
+    the key never reaches the browser (§4), which is why this is an RPC rather than the admin app
+    calling the provider itself. It never fails the request: no key, an unreachable provider or a
+    rate limit come back as `unavailable` with a reason, and the caller falls back to a text field.
+    The last good list is cached and re-served on a later failure, so one slow call cannot empty a
+    working menu.
+  - `CostHistory` returns daily spend buckets from `runs.est_cost_usd`, oldest first, with empty
+    days present and zeroed rather than omitted — a gap in generation is the thing worth seeing
+    (§15), and a sparse series hides it by drawing straight across it.
 
 Conventions: every mutation takes an `expected_version` for optimistic concurrency (two browser tabs
 must not silently clobber a recipe — a lesson already paid for in CashFlux); list RPCs paginate with
@@ -908,6 +997,32 @@ Five pages. Two unauthenticated, three behind the session.
 Client-side routing in WASM needs a correct `<base href>` in the shell — without it deep links and
 refreshes break, which has bitten the other Flux apps. The shell is the only HTML in the project.
 The WASM bundle is served pre-compressed (`.wasm.gz`) with the right `Content-Encoding`.
+
+**Chrome (documented 2026-08-10, implemented with no prior plan entry):** `web/shell/header.go`
+mounts a top bar above every route's page body (ahead of the DISCONNECTED banner and expiry modal —
+see `renderShellWrapper` in `web/shell/pages.go`), carrying the brand lockup (a link to `/generate`),
+the three `AUTH` destinations from a fixed three-item array (`/generate`, `/history`, `/settings` —
+no nested navigation, no hamburger, no breadcrumb; three links do not need wayfinding), and a
+sign-out control with its own idle/in-flight/error states. This was real, tested work with nothing in
+`PLAN.md` or `TODOS.md`'s `D6-09` describing it (that task predates the header entirely — its own
+subject was banner/expiry-modal/guard text, not chrome), so it is recorded here now instead of
+staying undocumented indefinitely.
+
+**Known defects, same audit:** two, both in `header.go`, both present on every authenticated page
+load since the header mounts on every route.
+
+1. The header references 9 `shell.header.*` catalogue keys (see that file's own doc comment for the
+   full list), and 4 — `header.brand.label`, `header.brand.homeLabel`, `header.signOut.busy`,
+   `header.signOut.error` — are not in `web/i18n/keys_shell.go`. The first two back the brand
+   lockup's `aria-label` (not its visible text, which is a separate defect below): today a screen
+   reader announces the raw key string on the home link, not "AnimeFeedFlux Admin". See `TODOS.md`
+   `D6-22`'s note for the full 21-key referenced-but-undefined list across `shell` and `settings`.
+2. The lockup's visible wordmark (`renderHeaderBrand`, three `h.Span(..., h.Text("Anime"/"Feed"/
+   "Flux"))` calls) is hardcoded English, not routed through i18n at all — `go run ./cmd/affi18n lint
+   web` reports exactly these 3 findings (`text-call: "Anime"|"Feed"|"Flux"`) as of 2026-08-10,
+   contradicting `TODOS.md` `D6-20`/`D6-21`'s "0 literals in web" close-out, which predates this file.
+   See `TODOS.md` `D6-20`'s note for whether this is a defect to fix or a deliberate brand-name
+   exemption `D6-19` should have named but didn't.
 
 ### 12.1 Login (`/login`)
 
@@ -1052,10 +1167,32 @@ and the admin view never disagree.
 - **Security** — change password (current password + TOTP), re-enroll TOTP, regenerate recovery
   codes with remaining count, active sessions with device/IP/last-seen and individual or global
   revoke.
-- **Provider** — active provider, default model for new feeds, embedding model, key presence
-  (status only — never displayed, never sent to the client, never editable here; it lives in the
-  environment per §4), and the editable **price table** used for cost estimates, since published
-  prices change and a stale table silently makes every cost number wrong.
+- **Provider** — four groups, in the order an operator needs them:
+  - **Connection.** Which endpoint is in use, and the operator-configured list of alternatives.
+    Any OpenAI-compatible endpoint is allowed (a local model server, a gateway, a reseller), each
+    recorded as a *profile*: a name, a base URL, and **the NAME of the environment variable holding
+    its key — never the key**. §4 keeps key material in the environment only, so a profile is safe
+    to store in SQLite, safe to send to a browser, and safe in a backup, which none of those would
+    be if it held a secret. The server reports whether each named variable is actually set, so a
+    misconfiguration is visible without the value ever leaving the process.
+  - **Model and effort.** The default model for new feeds and the embedding model, both chosen from
+    the provider's own list rather than typed — a mistyped model id is a per-feed outage waiting to
+    happen, since §8 classifies "model not found" as a recipe-scoped Fatal that disables that feed.
+    Plus **effort**, which maps onto SchemaFlux's Speed tier (`smart` / `fast` / `quick`) — the only
+    such knob its public API exposes (§8.1) — named for the tiers themselves rather than an invented
+    scale this codebase would then have to translate.
+  - **Rates.** The editable price table, since published prices change and a stale table silently
+    makes every cost number wrong. Rows are addable; an empty table is why a run can report
+    `$0.0000` while genuinely spending money, so the panel says what the table is for.
+  - **Spend.** Daily cost over a selectable window (7/30/90 days), as a column chart with the window
+    total stated at full size above it. Columns, not a line: daily spend is a set of discrete totals,
+    and a line implies a value existed between Tuesday and Wednesday. Days with no runs are drawn as
+    empty slots rather than skipped, because a gap is exactly what someone reads this to find.
+    Read-only — it explains the settings above it rather than being one of them.
+
+    Key presence is still status-only: never displayed, never sent to the client, never editable
+    here.
+
 - **Generation** — global kill switch, global daily token and spend ceiling, default per-feed
   budgets, retention and feed-window defaults, staleness threshold.
 - **Publishing** — public base URL, feed author and contact, copyright line, default TTL and
@@ -1121,8 +1258,25 @@ a `css.Rule` value passed as a JSX-like child renders as literal text instead of
   a distinct status, visible on the dashboard rather than silent.
 - A **global** daily spend ceiling on top of per-feed caps, because the failure mode is N feeds each
   individually within budget.
+- **A separate, optional monthly USD ceiling, added and documented here 2026-08-10 (audit pass —
+  previously implemented but absent from this section).** `internal/budget.Limits.MonthlyUSDCeiling`
+  is checked independently of the daily caps above it (`internal/budget.CheckRequest`), against
+  month-to-date spend from `internal/budget.MonthStart` (calendar-month, UTC — matching a provider's
+  invoice cycle rather than a rolling 30-day window, and UTC to match the existing daily-boundary
+  convention rather than any one feed's timezone). It exists because a month is not "31 days at the
+  daily cap" — that would allow 31× the intended monthly figure — and because it must bind even on a
+  day the daily cap has not yet been touched, which a daily-only design cannot do. Configured via
+  `AFF_MONTHLY_SPEND_CEILING_USD` (§16); zero means no monthly ceiling. An optional `MonthlyWarnPct`
+  additionally flags (never denies) the call that first crosses that fraction of the ceiling, so an
+  operator gets a heads-up before generation goes dark for the rest of the month. **Currently wired
+  for scheduled generation only** — `cmd/animefeedflux/wire.go`'s `genGate.Allowed` sets it;
+  `sampleBudget.CheckSample` (the interactive `SampleService` path) does not, so sampling is
+  presently unbounded by this ceiling regardless of its configured value. See the next bullet, which
+  this exception directly contradicts for the monthly dimension — flagged in TODOS.md `A8-08`, not
+  fixed here.
 - Sampling draws from the same budget as scheduled generation — otherwise the safety net has a hole
-  exactly where the interactive, easy-to-repeat action is.
+  exactly where the interactive, easy-to-repeat action is. **True for the daily caps, not yet true for
+  the monthly ceiling above** (TODOS.md `A8-08`, `DOD-7`).
 - Global kill switch (`SetGenerationEnabled`, plus `AFF_GENERATION_ENABLED=0` for a cold start):
   existing feeds keep serving, nothing generates.
 - Scheduler is single-flight per feed via a DB run lock with heartbeat, so a slow run cannot stack.
@@ -1199,6 +1353,15 @@ minutes), so the schedule is still exact-ish and reproducible but the load is sm
 once, with a separate global semaphore on provider calls so sampling and scheduled runs cannot
 collectively exceed the provider's rate limit. Overflow queues rather than failing; a run waiting on
 a slot is a visible state, not a silent delay.
+
+The provider semaphore's own default (`AFF_PROVIDER_MAX_INFLIGHT`, `internal/config`'s
+`DefaultProviderMaxInflight`) is **4, deliberately larger than the 3-run worker pool** — recorded
+here since the constant carries no reasoning in code (added 2026-08-10, backfilled from A7-07/§13):
+the pool caps scheduled generation, but the same semaphore is also drawn from by interactive
+`Sample`/`SampleStream` calls (§13 — "sampling draws from the same budget as scheduled generation"),
+so sizing it to exactly the scheduled-run cap would make every sample block behind three in-flight
+scheduled runs. The +1 gives sampling room to proceed without raising how many concurrent
+generations the scheduler itself will ever start.
 
 **Isolation.** One misbehaving feed must not starve the rest. Every run has a hard wall-clock
 timeout; a feed that fails N consecutive runs is auto-disabled with a loud reason rather than
@@ -1539,6 +1702,8 @@ Environment only — no config file, and no secrets on disk beyond the host `env
 | `AFF_OTEL_ENABLED` | no | default `0` — instrumentation always runs, only export is gated (§15.0a) |
 | `AFF_OTEL_EXPORTER` | no | `otlp` \| `stdout`, default `otlp` when enabled |
 | `AFF_TRACE_SAMPLE_RATIO` | no | publish-request sampling, default `0.05`; runs always sample |
+| `AFF_MONTHLY_SPEND_CEILING_USD` | no | calendar-month provider-spend ceiling, default `0` (unlimited — zero deliberately does not mean "no budget," see `internal/config.MonthlySpendCeilingUSD`'s doc comment); enforced as a real gate at `cmd/animefeedflux/wire.go`'s `genGate` |
+| `AFF_STALE_GRACE_FACTOR` | no | multiplier on a feed's schedule interval before it's reported stale, default `2.0` (`internal/ops.DefaultStaleGrace`); resolved once by `ops.ResolveStaleGrace()` and shared by `/healthz`, the nightly Slack webhook, and `aff doctor` as of the 2026-08-10 `wire.go:1259` change (TODOS.md C4-08) — added here because it was live in three call paths with no row in this table |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | standard OTel variable, honoured as-is |
 | `OTEL_EXPORTER_OTLP_HEADERS` | no | standard; carries the backend's auth token — a secret |
 | `OTEL_SERVICE_NAME` | no | defaults to `animefeedflux` |

@@ -181,8 +181,15 @@ top-level definition-of-done checks (§19):
   itself), plus `DOD-5` and `DOD-7`, which additionally need a **wording decision** independent of
   infrastructure (§19.5's literal "audit over the full item table" is unachievable under the current
   schema — the system enforces link integrity synchronously at generation time and never persisted a
-  retrospective candidate-set snapshot to audit later; §19.7 names "the configured ceiling" as if a
-  monthly spend limit exists, and only a *daily* one is configured anywhere in `internal/budget`).
+  retrospective candidate-set snapshot to audit later; §19.7 names "the configured ceiling" — **update,
+  later 2026-08-10: a real monthly ceiling now exists and is wired.** `AFF_MONTHLY_SPEND_CEILING_USD`
+  (`internal/config.Config.MonthlySpendCeilingUSD`) feeds `cmd/animefeedflux/wire.go`'s `genGate`,
+  which every scheduled run passes through, and sets `budget.Limits.MonthlyUSDCeiling` for real —
+  see `docs/definition-of-done.md`'s DOD-7 section and `TODOS.md` DOD-7 for the corrected read. The
+  gap narrowed to: `sampleBudget.CheckSample` (interactive sampling) still builds its own
+  `budget.Limits{}` without a monthly ceiling, and the production env file has no example of the new
+  variable to set — not a "no monthly concept exists" problem anymore, a "one of two budget call
+  sites, and one deploy-config line" problem).
 
 **The honest fraction:** of the seven blocked items, six share one root cause — nothing has ever been
 deployed (`CHANGELOG.md`: "none of it is running anywhere... no staging host, no production deploy";

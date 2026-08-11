@@ -4,6 +4,32 @@ Audited against the tree on 2026-08-10. Nothing here is ticked from memory — e
 the file, test, or TODOS.md task it rests on. Re-run the audit whenever a `C5-*` or `U2-*` task
 changes state; this document goes stale as fast as `TODOS.md` does.
 
+**Update, same day (2026-08-10), with the dev server running and seeded (`.devrun/aff.db`, three
+seed-data feeds: `character-spotlight-weekly`, `daily-anime-trivia`, `weekly-anime-news`):**
+
+- **`DOD-8` performed for real, drill passes.** `aff backup --db .devrun/aff.db` (274,432 bytes,
+  `integrity: ok`), `aff verify` on the snapshot (`ok`), `aff restore --to
+  .devrun/drill/scratch.db --yes` (`verified: true`), then a second server instance built and run
+  against the restored file on isolated scratch ports (`28081`/`28082`, `AFF_GENERATION_ENABLED=false`
+  so nothing could mutate state during the check). All nine rendered documents (3 feeds × RSS/Atom/
+  JSON), fetched from the *live* dev instance immediately before the backup and again from the
+  *restored* instance after, are identical once the only two fields that are supposed to differ are
+  normalized away: the base URL (`8081` vs the scratch instance's `28081` — an env config difference,
+  not data loss) and the per-render `lastBuildDate`/`updated` timestamp (regenerated on every render by
+  design). Every item, guid, title, and body byte matched. The scratch instance was torn down
+  afterward (`Stop-Process` by the port-108080 PID it was actually listening on); the live dev
+  instance's `/healthz` cache-entry count was confirmed unchanged before and after. **Ticked.**
+- **`DOD-2` exercised against real bytes, zero findings — but still correctly unticked.** `affvalidate`
+  built and run against all 11 golden documents (`make validate`'s target) — 11/11 `ok`. Separately,
+  the three *live, seeded* feeds' rendered bytes were fetched over HTTP from the running dev instance
+  and validated in all three formats (9 documents) — 9/9 `ok`, zero errors, zero warnings. This
+  proves the render pipeline and the validator agree cleanly on real HTTP output, not just synthetic
+  goldens. It does **not** satisfy `DOD-2` as written: the three feeds validated are dev/seed-data
+  feeds (`character-spotlight-weekly`, `daily-anime-trivia`, `weekly-anime-news`), not the three named
+  launch feeds (`U0-05`…`U0-07`: `anime-trivia-daily`, `anime-fact-daily`, `anime-news-daily`), which
+  still do not exist. Left unticked for that reason — the validator mechanics are proven clean; the
+  literal launch feeds are not yet the thing under test.
+
 ## The headline finding
 
 **Seven of the nine items are gated on things that have never happened, and six of those seven share
@@ -84,8 +110,20 @@ document's edit scope:
   retrospective audit is genuinely wanted over prevention. This is a real feature, not free, and adds
   a write on every grounded item for a guarantee the synchronous check already gives for free.
 
-Recommendation: (a). Storing a full candidate URL list per item to audit a guarantee that is already
-enforced synchronously is schema weight without a corresponding new guarantee.
+**Recommendation, sharpened: (a), and don't revisit it.** Re-examined 2026-08-10 with no new facts
+changing the calculus — `internal/store` still has no candidate-set column, and the enforcement path
+(`CheckLink`) is unchanged. (b) is not a small addition: it means writing the full fetched candidate
+set (every URL considered, not just the one chosen) to the database on every grounded item, forever,
+to reconstruct after the fact a guarantee `CheckLink` already gives synchronously and unconditionally
+— there is no code path that reaches the `items` table with a non-candidate link, so a retrospective
+audit under (b) can only ever confirm what generation-time enforcement already guaranteed by
+construction, never catch something enforcement missed. That is pure storage and query cost for a
+second, weaker copy of the same proof. Choose (a): amend §19.5 to state the check as "no item ever
+exists whose link is absent from that run's candidate set — proven by `CheckLink`'s test suite
+(`TestCheckLink_RejectsURLAbsentFromCandidateSet`,
+`TestRun_Grounded_LinkNotInCandidates_DroppedAndCounted`) plus the absence of any code path that
+commits an item without passing it," and drop "audit over the full item table" from the wording. This
+is a documentation edit, not new scope, and the bar itself (zero invented URLs) does not move.
 
 **Unblocked by:** Cam deciding (a) vs (b) and PLAN.md being amended accordingly — not by deployment.
 Once decided, exercising the enforcement against a real live grounded generation run (ANN +
@@ -164,6 +202,13 @@ consecutive days.
 
 #### `DOD-4` — 30 consecutive days of production trivia, no near-duplicate pairs
 
+**⏱ This is the fact that dominates everything else in this document.** `DOD-4` requires **thirty
+consecutive days of successful production operation**, full stop. No engineering speed changes that
+number — it is wall-clock time, not backlog. The clock cannot start until a deployment exists at all
+(`C5-07`), and once it starts, thirty days pass at thirty days regardless of how fast every other item
+on this list gets closed. Treat `DOD-4` as the long pole for the whole checklist: everything else here
+can in principle be finished same-day once deployed; this one cannot, by construction.
+
 **Check (§19.4):** thirty consecutive days of *production* trivia contain no near-duplicate pairs
 above the novelty threshold — explicitly not provable by the A5 canned-corpus harness, because that
 only proves the mechanism works, not that a live model won't repeat itself.
@@ -192,26 +237,67 @@ by hand once a month — not a second enforced limit.
 
 §19.7's "the configured ceiling" reads as if a monthly number is configured somewhere; none is. This
 is the same category of issue as `DOD-5`: not a wrong bar, but a check-method mismatch with what the
-system actually enforces. Recommend amending §19.7 to say what's real: *daily* spend stays under the
-configured daily ceilings (already enforced, §13), reviewed monthly by summing `runs.est_cost_usd`
-per feed (`U1-04`) — i.e., the enforcement is daily, the review cadence is monthly, and there is no
-separate monthly limit to build.
+system actually enforces.
 
-**Unblocked by:** the deployment, then one calendar month of real production runs to review — plus,
-independently, Cam confirming the §19.7 wording fix above (or asking for an actual monthly ceiling to
-be built, which is new scope, not a documentation fix).
+**Re-checked 2026-08-10: the premise changed, the conclusion didn't** — at the time. `internal/budget/budget.go`
+had a real `MonthlyUSDCeiling`/`MonthlyWarnPct`/`Request.MonthlySpend` mechanism — calendar month,
+UTC (`monthStart`), checked independently of the daily caps so mid-month spend can't silently cross
+the monthly line while every daily cap still allows (`TestCheck_MonthlyCeilingBindsIndependentlyOfDailyCap`).
+A monthly ceiling could exist, but nothing wired it into a running call site.
 
-## Tally
+**Re-checked again 2026-08-10, later same day: now it does, for the path that matters.** A new env
+var `AFF_MONTHLY_SPEND_CEILING_USD` (`internal/config.Config.MonthlySpendCeilingUSD`, `nonNegativeFloat`,
+default `0` = unlimited) landed and `cmd/animefeedflux/wire.go`'s `genGate` — the gate every scheduled
+run passes through (`wire.go:880` constructs it with `monthlyCeilingUSD: cfg.MonthlySpendCeilingUSD`)
+— now sets `MonthlyUSDCeiling: g.monthlyCeilingUSD` in the `budget.Limits{}` it builds (`wire.go:499`)
+and populates `budget.Request{MonthlySpend: monthSpend}` from a real `SpendSince(0, budget.MonthStart(now))`
+query, gated behind `if g.monthlyCeilingUSD > 0` so an unlimited deployment doesn't pay for the extra
+scan on every run (`wire.go:504-513`). **This is the scheduled-run path — the one §19.7 is actually
+about** (a feed generating on its own cron, unattended, is exactly the "silent bleed" scenario a
+monthly ceiling protects against). The mechanism is reachable in production today, not just tested in
+isolation.
 
-- **Satisfied: 0.**
-- **Satisfiable now but unverified: 2** — `DOD-8` (restore drill, purely local), `DOD-2` (create the
-  three feeds locally and validate real output; does not strictly require "live").
+**What is still true, narrower than before:** `sampleBudget.CheckSample` (`wire.go:753-794`, the
+interactive-sampling budget check) builds its own `budget.Limits{}` (`wire.go:785`) and does **not**
+set `MonthlyUSDCeiling` or populate `MonthlySpend` — a sampling burst cannot be capped by the monthly
+ceiling the way a scheduled run can, only by the daily caps both paths already share. And whether the
+scheduled-run ceiling actually *binds* in production is still an operator decision: `MonthlyUSDCeiling`
+defaults to `0` (unlimited, per `TestCheck_UnsetMonthlyCeilingIsUnlimited`), so §19.7 is satisfiable
+today by *code*, but only meets its own bar once `AFF_MONTHLY_SPEND_CEILING_USD` is actually set on
+the deployed box **and** PLAN.md §16 documents the variable (added this pass) so an operator setting
+up production knows it exists.
+
+Recommend amending §19.7 to say what's real *today*: a real monthly USD ceiling exists and binds
+scheduled runs when `AFF_MONTHLY_SPEND_CEILING_USD` is set (unlimited by default); daily ceilings are
+enforced unconditionally for both scheduled runs and sampling (§13); sampling has no monthly cap of
+its own. That is a materially different, and better, state than either earlier note in this section
+recorded — worth Cam's eyes because it changes what "done" requires: not new code, but a deploy-time
+configuration decision (what monthly figure to set) plus documenting it, which is now done in
+PLAN.md §16.
+
+**Unblocked by:** the deployment, then one calendar month of real production runs to review, plus
+setting `AFF_MONTHLY_SPEND_CEILING_USD` to a real figure on the production env file (`deploy/animefeedflux.env.example`
+should probably gain a commented-out example of this variable — not done here, outside this pass's
+`docs/`-and-`TODOS.md` edit scope). Independently, Cam confirming the §19.7 wording amendment above,
+and deciding whether `sampleBudget` should gain the same monthly check `genGate` now has (small,
+scoped, new Go scope — not performed here).
+
+## Tally (updated 2026-08-10, after actually running the two local checks)
+
+- **Satisfied: 1** — `DOD-8` (restore drill performed for real against seeded data; see update above).
+- **Satisfiable now but unverified as literally written: 1** — `DOD-2` (validator mechanics proven
+  clean against both goldens and real live-fetched bytes; still needs the actual named launch feeds,
+  `U0-05`…`U0-07`, to exist before the box can be ticked).
 - **Blocked: 7** — `DOD-1`, `DOD-3`, `DOD-4`, `DOD-6`, `DOD-9` on the single production deployment
   (`C5-01`…`C5-09`) plus, for `DOD-3`/`DOD-4`, elapsed time afterward (7 and 30 days respectively);
-  `DOD-5` and `DOD-7` additionally need a wording decision on the check method itself, independent of
+  `DOD-5` and `DOD-7` additionally need a wording decision on the check method itself (recommendations
+  sharpened above — (a) for `DOD-5`, amend §19.7 to name daily enforcement for `DOD-7`), independent of
   infrastructure.
 
 **Single cheapest action that unblocks the most:** the first production deployment (`C5-01`…`C5-07`).
-It is the one event standing between "blocked" and "in progress" for six of the seven blocked items.
-Everything else — the two local drills and the two wording decisions — can and should happen before
-or alongside it, since none of them wait on it.
+It is the one event standing between "blocked" and "in progress" for six of the seven still-blocked
+items. **The one exception inside that six that deployment does *not* immediately close is `DOD-4`:**
+deployment starts its 30-day clock but cannot shorten it — see the callout under `DOD-4` above. Every
+other remaining item — the two wording decisions and, once `U0-05`…`U0-07` exist, re-running `DOD-2`
+against the real launch feeds — can and should happen before or alongside the deployment, since none
+of them wait on it.

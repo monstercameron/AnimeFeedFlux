@@ -13,6 +13,208 @@ Newest entries at the top.
 
 ---
 
+## 2026-08-10 — Two hours of "broken UI" that was neither broken nor UI
+
+The `/generate` rebuild was working. The browser said otherwise, and it took an embarrassingly long
+time to stop believing the browser.
+
+**Trap one: the dev server serves a snapshot, not a directory.** `internal/publish.NewStaticHandler`
+reads every asset into memory at construction. That is a deliberate, good decision for a production
+server — no per-request stat, no partially-written `.wasm` served mid-build — and it means a running
+dev server keeps serving the bundle as it was *at its own start time*. Rebuilding changed the file
+on disk and nothing in the browser. Several rounds of "the fix did not take" were the fix never
+being loaded.
+
+**Trap two: `pkill` does not kill Windows processes from git-bash.** It exits 0 having killed
+nothing. So the restart script's kill was a no-op, the old server kept port 8082, the new server
+failed to bind — and the script's own health check then passed, against the old server. A restart
+that reports success while changing nothing is worse than one that fails loudly.
+
+Both are now handled by `.devrun/restart.sh`, which rebuilds, kills through PowerShell, waits for
+the process to actually be gone, and starts the replacement. Its comment explains why each step is
+there, because both traps are invisible and both present as application bugs.
+
+**What the detour did surface, on the way, was a real bug of exactly the shape being chased.** Every
+`fetch.UseResource` loader on `/generate` ran once at mount, and on a hard load the mount happens
+while the session state is still `appstate.Anon` — the WebSocket has not finished its handshake, so
+the calls fail against a socket that cannot carry them, and nothing re-runs them. The page had been
+loading no feeds, no settings and no model list whenever it was opened directly rather than
+navigated to. The first attempt to fix it keyed a re-fetch on `connected := state != Disconnected`,
+which is a bug in the same family: `Anon` is the zero value, so that boolean is *already true*
+before there is any session and therefore never changes when one appears. The effect is now keyed on
+the session state itself.
+
+Worth noting what caught the smallest defect in the batch: a missing i18n key for the temperature
+field's placeholder was found by `web/i18n/callsite_test.go` — the test written a few sessions ago
+after shipping a raw `common.connectionUnreachable` key to the screen. It has now paid for itself
+twice.
+
+## 2026-08-10 — New brand, and the second half of a bug we thought we'd fixed
+
+### The dark theme was never on
+
+Earlier today's entry records finding that `tokens.Emit()` had zero callers, so every
+`var(--color-…)` resolved to nothing and the app rendered as browser defaults. That was fixed, and
+it was only half the bug. The dark palette lives under `:root[data-theme="dark"]`, and **nothing in
+this application had ever called `ui.SetTheme`** — the attribute that selector needs was never set
+on any element, ever. So `DarkTheme()`, its WCAG-corrected swatches and its own passing unit tests
+were unreachable for every operator, including one whose OS is set to dark.
+
+It was caught the same way as the first half, which is the part worth remembering: a screenshot in
+dark mode came back **byte-identical** to one in light mode. Neither half of this bug is visible
+from the Go side — both are "the code is correct and reaches nobody" — and in both cases the tests
+passed throughout, because they assert on the rules the token layer *generates*, which is true
+whether or not anything selects them. Two instances in one day of the same failure shape (built,
+tested, unreachable) is a pattern, not a coincidence; it is the same one `D0-13`'s note records for
+`web/ui.Toast` and friends.
+
+The fix (`web/shell/theme.go`) is three-state — `Match system` (default), `Light`, `Dark` — rather
+than a two-state toggle. A toggle has to guess an initial value, gets it wrong for half of all
+users, and silently stops tracking the OS for all of them; "system" is the only state that can
+express *I have not chosen*. It applies before the first render rather than from a component
+effect, because a component effect paints one frame of light theme first, which on a login screen
+in a dark room is a white flash.
+
+The control went in the header rather than in Settings, and the argument that settled it is
+structural, not aesthetic: `/settings` is behind the session, and `/login` is where an operator
+working at night meets this application first. A theme control you cannot reach until after you
+have signed in arrives one screen too late.
+
+### The mark could not be a vector, so the wordmark could not be an image
+
+The new brand is a kitsune crest — a fox over three broadcast arcs, in a hex shield. Cam supplied
+it as three 1536×1024 renders on a flat grey card: no alpha, no vector.
+
+Keying the grey out took three attempts, and the failures are the useful part. A single border-median
+grey is not good enough — the backdrop carries a vignette that darkens it by ~0.05 toward the edges,
+which is larger than any sane luminance floor, so a constant reference keys the entire frame as
+subject. A trimmed per-channel degree-4 polynomial fit over the achromatic pixels solves that.
+
+The glow was the real problem. It is wide, soft, and only half-hued at its edges, so keying it
+yields a grey smudge if you keep the neutral part and a blue one if you unpremultiply anyway —
+both of which look like a dirty rectangle on any surface that is not the source's own grey card.
+**The glow is not extracted.** It is a `drop-shadow` reading the accent token instead, which is
+strictly better: it follows the theme rather than being one fixed colour and radius everywhere.
+
+The lockup could not be salvaged at all, and that turned out to be a design decision rather than a
+setback. Its wordmark is dark navy sitting *inside* a bright blue bloom — loosen the key and the
+mark ships inside a cloud twice its size; tighten it and the text dissolves before the cloud does.
+And it is dark navy, so it would be invisible on the dark theme even if it had extracted perfectly.
+So the wordmark stays HTML text beside the crest: crisp at any size, and it follows `color` into
+dark mode. `web/shell/header.go` was already doing this for an unrelated reason (a GWC v5.0.1
+reconciler gap around SVG `<text>`), which is a nice accident.
+
+### Two smaller things the screenshots turned up
+
+`/login` was rendering the brand lockup twice — once in the header, once in the auth card, 200px
+apart — despite `header.go`'s own doc comment stating that ANON shows "the mark alone". The comment
+described intent nobody had implemented.
+
+And `h.Show(false, node)` does not remove a node. It clones it with `hidden` set and relies on the
+UA sheet's `[hidden] { display: none }` — a single type-less selector that **any** class rule
+setting `display` outranks. `.af-header__rule` is exactly that shape. This is a whole class of
+silent bug (the hidden thing is visible) waiting on every future `css.Display.*` rule in the app,
+closed with one global `!important`.
+
+---
+
+## 2026-08-10 — Documentation-backfill pass over serving/auth/transport/ops: PLAN.md was two designs behind on login
+
+Three findings from a doc-vs-code audit scoped to `internal/publish`, `internal/auth`,
+`internal/bridge`, `internal/rpc`, `internal/ops`, `internal/obs`, `internal/config`,
+`cmd/animefeedflux`, `cmd/aff`. No Go was touched.
+
+**PLAN.md's §2.1 sequence diagram and §4 described a login flow the code no longer implements.**
+The diagram had `AuthService.Login`'s RPC response itself carrying the `__Host-` session cookie back
+over the already-open anonymous socket. The real, deliberately-built mechanism (`internal/bridge/
+ticket.go`, `web/wsconn/ticket.go`) is materially different: `Login` returns a single-use, 20-second
+login ticket in a gRPC response *header* (never the raw session token — landing that in WASM memory
+is exactly what §4 forbids), the client stashes it in `sessionStorage` and forces a full page
+reload, and the cookie is set only on the 101 Switching Protocols response of the *reconnect* that
+presents the ticket — spliced into the raw upgrade bytes via a hijacked `net.Conn`, because
+`Set-Cookie` cannot go through `http.ResponseWriter` once `gorilla/websocket` has hijacked the
+connection. §4 had no §4a describing any of this at all. Added one, backfilling the mechanism, the
+verified dead end that ruled out a simpler design (Chromium does not apply `Set-Cookie` from a
+WebSocket upgrade response to its cookie jar — confirmed against both the live server and an
+isolated Node WS server), and the residual cost the code comments already admit: a plain page
+refresh after login has no cookie and no ticket to present, so it silently drops to anonymous —
+"one transport, no HTTP side door" and "durable session across a plain refresh" are in tension here,
+not resolved.
+
+**Two TODOS.md notes describing production gaps had already been closed by other work and nobody
+re-ticked them.** `C4-15` (per-feed error counts on `/healthz`) was still `[ ]` with a note saying
+the wiring "requires editing `cmd/animefeedflux/wire.go` (owned by another agent, not edited here)"
+— but that wiring is in the tree: `wire.go`'s `HealthFeeds` closure already calls
+`ops.LiveFeedErrorCounts` and populates `FeedHealthInput.ErrorCount` for real, reachable from
+`runAll`. Ticked, with the evidence. `B3-11`'s note said "PLAN.md A7's scheduler (mapping a stored
+`FeedSpec` into a live `generate.Spec`) does not exist yet" — also stale: `wire.go`'s
+`generateSpecFrom` + `wireRunExecutor.ExecuteRun` do exactly that mapping for `RunNow`, wired into
+`rpc.NewFeedServer` at `wire.go:1055`. The task was already correctly ticked; only the explanatory
+note was wrong, so it was corrected in place rather than left implying the CLI e2e test's
+fixed-spec stand-in is covering for a real gap that no longer exists.
+
+**One undocumented magic number recorded:** `AFF_PROVIDER_MAX_INFLIGHT` defaults to 4 against a
+3-run worker pool (`AFF_MAX_CONCURRENT_RUNS`), and the code carried no comment saying why they
+differ. Reasoning backfilled into PLAN.md §14.3: the same semaphore also gates interactive
+`Sample`/`SampleStream` calls, so sizing it to exactly the scheduled-run cap would make every sample
+block behind three in-flight scheduled runs.
+
+**Security properties named in the task brief were checked against code, not assumed:** the pepper
+comes from `AFF_PASSWORD_PEPPER` via `internal/config`, never the DB (`Pepper()`'s zero-pepper no-op
+is the fallback for "not configured", not a footgun); salt is 16
+fresh CSPRNG bytes per credential (`password.go`'s `rand.Read`), never derived from id/email/a
+constant; no code path reads `password_changed_at` to force a rotation — confirmed by its absence,
+not by a comment saying so; the `__Host-session` cookie construction (`internal/auth/session.go`'s
+`NewSessionCookie`/`ExpiredSessionCookie`) never sets `Domain`. All hold as designed; recorded with
+their evidence rather than left as "everyone believes it, nobody checked."
+
+## 2026-08-10 — The `/healthz` gap this file already flagged got closed the same day
+
+The entry directly below records the deliberate decision to leave `internal/publish`'s
+`DefaultHealthGrace` unwired to `AFF_STALE_GRACE_FACTOR`, because that package and `wire.go` were
+"owned by another agent's in-flight change" at the time. That constraint lifted later the same day:
+`cmd/animefeedflux/wire.go:1259` now sets `HealthGrace: ops.ResolveStaleGrace()` in the
+`publish.Deps{...}` literal `buildPublishHandlerWithInvalidator` builds, so `/healthz`, the nightly
+Slack webhook, and `aff doctor` all resolve the same grace factor from the same env var. The
+divergence risk the entry below warns about — an operator staring at a "healthy" `/healthz` while a
+stale-feed alert has already fired on a different threshold — no longer exists in the tree.
+`TODOS.md` C4-08 carries the current "GAP CLOSED" note; `CHANGELOG.md`'s entry was corrected in
+place rather than left asserting the old gap. This entry exists so the reasoning below (why the gap
+was left open on purpose, not by oversight) isn't misread as still-current without a pointer forward.
+
+## 2026-08-10 — Making the staleness grace factor configurable without letting `/healthz` and the Slack webhook disagree
+
+`TODOS.md` C4-08/C4-15 asked for the staleness grace factor (how many multiples of a feed's own
+cadence it may go quiet before being called stale) to be configurable rather than a hardcoded `2.0`,
+since `C3-11` (the real observed Slack poll interval) is still unresolved and `2.0` is a documented
+guess. `internal/publish/health.go`'s own doc comment already states the constraint this has to
+respect: "the webhook and `/healthz` can never disagree about what 'stale' means" — both currently
+default to the identical `2.0` (`ops`'s `SchedulerConfig`/`DoctorConfig` default and `publish`'s
+`DefaultHealthGrace`), and that parity is load-bearing, not incidental (`health_test.go` asserts the
+two constants match).
+
+The nearly-shipped-wrong version of this change made `ops.NewScheduler`'s zero-value `Grace` default
+read `AFF_STALE_GRACE_FACTOR` **without** doing anything about `/healthz`'s hardcoded default. That
+looks like a clean, self-contained improvement in isolation — it is genuinely reachable, tested, and
+live (neither `wire.go`'s `runAll` nor `cmd/aff/doctor_cmd.go` sets `Grace`/`StaleGrace` explicitly,
+so the env var takes effect today for the nightly webhook and `aff doctor`) — but it silently breaks
+the exact invariant `health.go`'s comment calls out: set the env var in production and the Slack
+alert's threshold moves while `/healthz`'s stays at `2.0`, so an operator staring at a "healthy"
+`/healthz` page could be one wire.go deploy behind an alert that already fired, or vice versa. That
+is a worse failure than either surface being wrong on its own, because it looks internally consistent
+from either surface alone and only shows up as a cross-surface contradiction nobody is checking for.
+
+Landed instead: `internal/ops/cli.go` exposes `StaleGraceEnv`/`ResolveStaleGrace()` as the one place
+that knows the env var name and the parse/validate/fallback logic, used by both `NewScheduler` and
+`NewDoctorConfig`'s defaults (so the webhook and `aff doctor` are configurable and reachable today),
+but `internal/publish`'s `DefaultHealthGrace` was deliberately left untouched — that package is owned
+by another agent's in-flight change per this task's constraints, and `cmd/animefeedflux/wire.go`
+(the only place that could pass the same resolved value into `Deps.HealthGrace`) is off-limits here
+too. The gap is documented loudly in both `TODOS.md` (C4-08's entry) and a `CHANGELOG.md` note rather
+than closed by quietly accepting the divergence risk: setting `AFF_STALE_GRACE_FACTOR` today is only
+"fully" safe once `wire.go` adds one line (`HealthGrace: ops.ResolveStaleGrace()`) — until then, an
+operator who sets it should know `/healthz` hasn't caught up.
+
 ## 2026-08-10 — The server ran for the first time, and nothing could log in
 
 First boot of `cmd/animefeedflux`, and both ways into the admin plane were dead — the CLI at the
