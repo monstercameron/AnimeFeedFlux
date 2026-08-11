@@ -202,6 +202,11 @@ func specFromRow(row feedRow) (feedspec.Spec, error) {
 type liveBaseURL struct {
 	mu  sync.RWMutex
 	val string
+	// cacheControl is settings.publishing.default_cache_control, held beside
+	// the base URL because they arrive in the same settings row and are
+	// consumed by the same handler. Empty means "operator has not set one",
+	// which publish resolves to its own default.
+	cacheControl string
 }
 
 func (b *liveBaseURL) get() string {
@@ -214,6 +219,18 @@ func (b *liveBaseURL) set(v string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.val = strings.TrimRight(strings.TrimSpace(v), "/")
+}
+
+func (b *liveBaseURL) getCacheControl() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.cacheControl
+}
+
+func (b *liveBaseURL) setCacheControl(v string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.cacheControl = strings.TrimSpace(v)
 }
 
 // loadPublishingAtBoot seeds the live base URL from the stored setting so a
@@ -232,6 +249,7 @@ func loadPublishingAtBoot(ctx context.Context, r store.Reader, b *liveBaseURL) e
 		return fmt.Errorf("wire: parsing publishing settings: %w", err)
 	}
 	b.set(p.GetPublicBaseUrl())
+	b.setCacheControl(p.GetDefaultCacheControl())
 	return nil
 }
 
@@ -241,6 +259,14 @@ func baseURLFn(b *liveBaseURL) func() string {
 		return nil
 	}
 	return b.get
+}
+
+// cacheControlFn adapts a possibly-nil holder to publish.Deps.CacheControlFn.
+func cacheControlFn(b *liveBaseURL) func() string {
+	if b == nil {
+		return nil
+	}
+	return b.getCacheControl
 }
 
 // loadPriceTableAtBoot applies the stored rates before the first scheduled
@@ -1386,6 +1412,10 @@ func buildControlPlane(
 		rpc.WithPublishingSink(func(p *affv1.Settings_Publishing) {
 			if baseURL != nil {
 				baseURL.set(p.GetPublicBaseUrl())
+				// default_cache_control was stored, displayed, and read by
+				// nothing — the publish plane hardcoded max-age=900, so the
+				// control reported "Saved." and changed no header (A5-01).
+				baseURL.setCacheControl(p.GetDefaultCacheControl())
 			}
 		}),
 		rpc.WithDefaultGenerationEnabled(cfg.GenerationEnabled))
@@ -1597,10 +1627,11 @@ func buildPublishHandlerWithInvalidator(st *store.Store, cfg *config.Config, ver
 		BaseURL: cfg.PublicBaseURL.String(),
 		// nil in tests that do not exercise the settings path; the boot-time
 		// BaseURL above is then the only source, exactly as before.
-		BaseURLFn: baseURLFn(baseURL),
-		Generator: "AnimeFeedFlux " + version,
-		DocsURL:   docsURL,
-		TagYear:   tagYear,
+		BaseURLFn:      baseURLFn(baseURL),
+		CacheControlFn: cacheControlFn(baseURL),
+		Generator:      "AnimeFeedFlux " + version,
+		DocsURL:        docsURL,
+		TagYear:        tagYear,
 	}
 
 	handler, inv := publish.NewServerAndInvalidator(deps)

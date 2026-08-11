@@ -77,6 +77,18 @@ type Deps struct {
 	// without a restart. The implementation behind it is expected to be a
 	// cheap in-memory read, not a database query per request.
 	BaseURLFn func() string
+	// CacheControlFn supplies the Cache-Control header for every cached
+	// response, from settings.publishing.default_cache_control (§12.5).
+	//
+	// Read per request, like BaseURLFn, so an operator changing it does not
+	// have to restart — and NOT baked into Entry, which would freeze the
+	// header into the cached body and leave every already-cached document
+	// serving the old value until something happened to invalidate it.
+	//
+	// nil, or a function returning "", falls back to defaultCacheControl. The
+	// setting was previously stored, displayed and read by nothing: the header
+	// was hardcoded, so the control said "Saved." and changed nothing (A5-01).
+	CacheControlFn func() string
 	// CacheMaxBytes is the render cache's LRU ceiling in bytes, from
 	// AFF_CACHE_MAX_BYTES (PLAN.md §16, default 64MiB). Zero means unlimited,
 	// which is what a test or the e2e harness gets by default; the real
@@ -134,6 +146,23 @@ func (d Deps) now() time.Time {
 		return d.Now()
 	}
 	return time.Now()
+}
+
+// defaultCacheControl is the value used when the operator has not set one.
+// It matches what this handler hardcoded before the setting was wired, so an
+// unset setting changes nothing about how the plane behaves.
+const defaultCacheControl = "max-age=900"
+
+// cacheControl is the live Cache-Control for cached responses. See
+// Deps.CacheControlFn for why it is read per request rather than captured.
+func (s *server) cacheControl() string {
+	if s.deps.CacheControlFn == nil {
+		return defaultCacheControl
+	}
+	if v := strings.TrimSpace(s.deps.CacheControlFn()); v != "" {
+		return v
+	}
+	return defaultCacheControl
 }
 
 // logger returns Deps.Logger, or slog.Default() when unset.
@@ -486,12 +515,15 @@ func writeStatus(w http.ResponseWriter, r *http.Request, msg string, code int) {
 // negotiation and HEAD-vs-GET body suppression uniformly, so every route
 // gets the same transport behavior from one place rather than one
 // implementation per handler that could drift (§5.4, §6).
-func writeEntry(w http.ResponseWriter, r *http.Request, e Entry) {
+func writeEntry(w http.ResponseWriter, r *http.Request, e Entry, cacheControl string) {
+	if cacheControl == "" {
+		cacheControl = defaultCacheControl
+	}
 	h := w.Header()
 	h.Set("Content-Type", e.ContentType)
 	h.Set("ETag", e.ETag)
 	h.Set("Last-Modified", e.LastModified)
-	h.Set("Cache-Control", "max-age=900")
+	h.Set("Cache-Control", cacheControl)
 	// Vary: Accept-Encoding on every cached response (§5.4): without it an
 	// intermediary can cache one encoding and serve it to a client that
 	// cannot read it.
@@ -542,7 +574,7 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	const key = "index"
 	if e, ok := s.cache.Get(key); ok {
 		fromCache = true
-		writeEntry(w, r, e)
+		writeEntry(w, r, e, s.cacheControl())
 		return
 	}
 
@@ -562,7 +594,7 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.cache.Put(key, e)
-	writeEntry(w, r, e)
+	writeEntry(w, r, e, s.cacheControl())
 }
 
 // feedFormat maps a "/feeds/{slug}.{ext}" path to its slug and content type.
@@ -628,7 +660,7 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		// span-creation cost to the one path §5's whole design exists to
 		// keep free of it.
 		fromCache = true
-		writeEntry(w, r, e)
+		writeEntry(w, r, e, s.cacheControl())
 		return
 	}
 
@@ -642,7 +674,7 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.cache.Put(key, e)
-	writeEntry(w, r, e)
+	writeEntry(w, r, e, s.cacheControl())
 }
 
 // errFeedNotFound distinguishes "unknown slug" (→ 404) from any other
@@ -758,7 +790,7 @@ func (s *server) handleItem(w http.ResponseWriter, r *http.Request) {
 	cacheKey := "item:" + itemKey
 	if e, ok := s.cache.Get(cacheKey); ok {
 		fromCache = true
-		writeEntry(w, r, e)
+		writeEntry(w, r, e, s.cacheControl())
 		return
 	}
 
@@ -819,7 +851,7 @@ func (s *server) handleItem(w http.ResponseWriter, r *http.Request) {
 	// Invalidate then could not see. A deleted item's permalink kept serving
 	// its original body. See Cache.PutPair and cacheItem.pair.
 	s.cache.PutPair(feed.Slug+":item:"+itemKey, cacheKey, e)
-	writeEntry(w, r, e)
+	writeEntry(w, r, e, s.cacheControl())
 }
 
 // healthzBody is the /healthz payload. It carries no version banner or
