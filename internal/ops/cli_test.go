@@ -301,6 +301,121 @@ func TestLiveFeedStatusesSkipsFeedWithNoCron(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ResolveStaleGrace (C4-08: configurable staleness grace factor)
+// ---------------------------------------------------------------------------
+
+func TestResolveStaleGraceDefaultsWhenEnvUnset(t *testing.T) {
+	t.Setenv(StaleGraceEnv, "")
+	if got := ResolveStaleGrace(); got != DefaultStaleGrace {
+		t.Errorf("ResolveStaleGrace() = %v, want DefaultStaleGrace %v", got, DefaultStaleGrace)
+	}
+}
+
+func TestResolveStaleGraceHonorsEnvOverride(t *testing.T) {
+	t.Setenv(StaleGraceEnv, "3.5")
+	if got := ResolveStaleGrace(); got != 3.5 {
+		t.Errorf("ResolveStaleGrace() = %v, want 3.5", got)
+	}
+}
+
+func TestResolveStaleGraceIgnoresInvalidOrNonPositiveValues(t *testing.T) {
+	for _, bad := range []string{"not-a-number", "0", "-1", "  "} {
+		t.Run(bad, func(t *testing.T) {
+			t.Setenv(StaleGraceEnv, bad)
+			if got := ResolveStaleGrace(); got != DefaultStaleGrace {
+				t.Errorf("ResolveStaleGrace() with %q = %v, want DefaultStaleGrace %v", bad, got, DefaultStaleGrace)
+			}
+		})
+	}
+}
+
+func TestNewSchedulerDefaultGraceRespectsEnvOverride(t *testing.T) {
+	t.Setenv(StaleGraceEnv, "4")
+	sched := NewScheduler(SchedulerConfig{})
+	if sched.cfg.Grace != 4 {
+		t.Errorf("NewScheduler default Grace = %v, want 4 (from %s)", sched.cfg.Grace, StaleGraceEnv)
+	}
+}
+
+func TestNewSchedulerExplicitGraceIsNotOverriddenByEnv(t *testing.T) {
+	t.Setenv(StaleGraceEnv, "4")
+	sched := NewScheduler(SchedulerConfig{Grace: 1.5})
+	if sched.cfg.Grace != 1.5 {
+		t.Errorf("NewScheduler explicit Grace = %v, want 1.5 (env must not override an explicit value)", sched.cfg.Grace)
+	}
+}
+
+func TestNewDoctorConfigDefaultStaleGraceRespectsEnvOverride(t *testing.T) {
+	t.Setenv(StaleGraceEnv, "5")
+	cfg := NewDoctorConfig("unused.db")
+	if cfg.StaleGrace != 5 {
+		t.Errorf("NewDoctorConfig().StaleGrace = %v, want 5 (from %s)", cfg.StaleGrace, StaleGraceEnv)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LiveFeedErrorCounts (C4-15: error counts on /healthz)
+// ---------------------------------------------------------------------------
+
+func TestLiveFeedErrorCountsCountsFailuresSinceLastSuccess(t *testing.T) {
+	s, dbPath := openLiveStore(t)
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+
+	feedID := seedFeedWithSchedule(t, s, "flaky-daily", "0 12 * * *", "UTC", true)
+	insertRunForPrune(t, s, feedID, now.Add(-72*time.Hour), "failed")
+	insertRunForPrune(t, s, feedID, now.Add(-48*time.Hour), "success") // the anchor
+	insertRunForPrune(t, s, feedID, now.Add(-30*time.Hour), "failed")
+	insertRunForPrune(t, s, feedID, now.Add(-10*time.Hour), "failed")
+
+	ro := openRO(t, dbPath)
+	counts, err := LiveFeedErrorCounts(t.Context(), ro, now, 0)
+	if err != nil {
+		t.Fatalf("LiveFeedErrorCounts: %v", err)
+	}
+	// Only the two failures AFTER the success anchor count; the one before it
+	// belongs to a prior, already-resolved incident.
+	if got := counts["flaky-daily"]; got != 2 {
+		t.Errorf("flaky-daily error count = %d, want 2", got)
+	}
+}
+
+func TestLiveFeedErrorCountsNeverSucceededUsesLookbackWindow(t *testing.T) {
+	s, dbPath := openLiveStore(t)
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+
+	feedID := seedFeedWithSchedule(t, s, "always-failing", "0 12 * * *", "UTC", true)
+	insertRunForPrune(t, s, feedID, now.Add(-20*time.Hour), "failed")
+	// Older than the 24h lookback used below — must not be counted.
+	insertRunForPrune(t, s, feedID, now.Add(-10*24*time.Hour), "failed")
+
+	ro := openRO(t, dbPath)
+	counts, err := LiveFeedErrorCounts(t.Context(), ro, now, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("LiveFeedErrorCounts: %v", err)
+	}
+	if got := counts["always-failing"]; got != 1 {
+		t.Errorf("always-failing error count = %d, want 1 (only the run within the 24h lookback)", got)
+	}
+}
+
+func TestLiveFeedErrorCountsFeedWithNoFailuresIsZero(t *testing.T) {
+	s, dbPath := openLiveStore(t)
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+
+	feedID := seedFeedWithSchedule(t, s, "clean-daily", "0 12 * * *", "UTC", true)
+	insertRunForPrune(t, s, feedID, now.Add(-6*time.Hour), "success")
+
+	ro := openRO(t, dbPath)
+	counts, err := LiveFeedErrorCounts(t.Context(), ro, now, 0)
+	if err != nil {
+		t.Fatalf("LiveFeedErrorCounts: %v", err)
+	}
+	if got := counts["clean-daily"]; got != 0 {
+		t.Errorf("clean-daily error count = %d, want 0", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Doctor
 // ---------------------------------------------------------------------------
 

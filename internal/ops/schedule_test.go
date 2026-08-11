@@ -1,9 +1,11 @@
 package ops
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -16,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/monstercameron/AnimeFeedFlux/internal/obs"
 )
 
 // fakeClock is a manually-advanced Clock so scheduler tests never sleep on
@@ -115,6 +119,21 @@ func TestSchedulerFiresOncePerDayAndRunsBackup(t *testing.T) {
 	// Cross two run-time boundaries in small steps, giving the scheduler
 	// goroutine a moment after each step to actually perform the (real,
 	// filesystem-touching) backup before advancing further.
+	//
+	// This real sleep is kept deliberately: the scheduler goroutine's
+	// re-registration of its NEXT wait (nextRun's +24h) happens only after
+	// runBackup's real VACUUM INTO/fsync completes, synchronously in that
+	// same goroutine. A non-sleeping yield (runtime.Gosched() in a spin
+	// loop) does not force that blocked disk I/O to progress — it was tried
+	// here and, without a real pause, the test goroutine's Advance calls
+	// race far ahead of the backup goroutine, so the eventual re-registered
+	// wait is computed from an already-much-later "now" and its target
+	// lands past this loop's advance budget. SchedulerConfig exposes no
+	// "backup done" signal to wait on instead (unlike StaleFn below, which
+	// is a test-supplied closure this file can hook), and adding one purely
+	// to remove this sleep would be a production seam added as a side
+	// effect, not a deliberate trade — so a short real sleep stays, bounded
+	// to the minimum that has proven reliable.
 	for i := 0; i < 50 && backups.Load() < 2; i++ {
 		clock.Advance(time.Hour)
 		time.Sleep(5 * time.Millisecond)
@@ -124,7 +143,11 @@ func TestSchedulerFiresOncePerDayAndRunsBackup(t *testing.T) {
 
 	// Bounded poll for anything still in flight, rather than assuming the
 	// last Advance's backup already landed by the time the loop above exited.
-	deadline := time.Now().Add(2 * time.Second)
+	// Same real-I/O reasoning as above applies to the pause between checks.
+	// The bound is generous (well beyond a single VACUUM INTO/fsync's normal
+	// cost) because this is real disk I/O sharing the machine with whatever
+	// else is running, not a fixed compute cost this test controls.
+	deadline := time.Now().Add(10 * time.Second)
 	for backups.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 		matches, _ := filepath.Glob(filepath.Join(outDir, backupBaseName(dbPath)+"-*.db"))
@@ -168,7 +191,18 @@ func TestSchedulerStopsOnContextCancellation(t *testing.T) {
 func TestSchedulerStalePathNeverPanicsOnNotifyFailure(t *testing.T) {
 	clock := newFakeClock(time.Date(2026, 8, 10, 2, 59, 0, 0, time.UTC))
 
+	// staleCalled is a deterministic synchronization primitive: the test's
+	// own staleFn closure signals it the instant the scheduler has actually
+	// read stale statuses (i.e. processed the fired 03:00 tick), so the test
+	// can wait for that exact event instead of sleeping and hoping the tick
+	// was processed in time. Buffered so the (possibly repeated) call never
+	// blocks the scheduler goroutine.
+	staleCalled := make(chan struct{}, 1)
 	staleFn := func(ctx context.Context, now time.Time) ([]FeedStatus, error) {
+		select {
+		case staleCalled <- struct{}{}:
+		default:
+		}
 		return []FeedStatus{
 			{FeedSlug: "quiet-feed", Enabled: true, Interval: time.Hour}, // never succeeded -> always stale
 		}, nil
@@ -194,8 +228,29 @@ func TestSchedulerStalePathNeverPanicsOnNotifyFailure(t *testing.T) {
 		_ = sched.Run(ctx)
 	}()
 
-	clock.Advance(2 * time.Minute) // cross 03:00
-	time.Sleep(50 * time.Millisecond)
+	// A single big Advance can race the scheduler goroutine's first
+	// Clock.Now()/Clock.After() call: this fakeClock.After does not fire
+	// immediately for an already-past target (unlike the schedule package's
+	// fakeClock), it only fires on a later Advance — so if the goroutine
+	// hasn't registered its wait for "today 03:00" yet when a single big
+	// jump lands past it, the goroutine instead computes and registers a
+	// wait for "tomorrow 03:00", and today's tick is lost entirely. Small
+	// steps give the goroutine many chances to register while "today 03:00"
+	// is still ahead of the clock; the short real wait between steps blocks
+	// on staleCalled so it returns the instant the tick is actually
+	// processed rather than after a fixed guessed delay.
+	staleFired := false
+	for i := 0; i < 40 && !staleFired; i++ {
+		clock.Advance(3 * time.Second) // 40 * 3s = 120s, crosses the 2-minute gap to 03:00
+		select {
+		case <-staleCalled:
+			staleFired = true
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if !staleFired {
+		t.Fatal("staleFn was never invoked after crossing 03:00")
+	}
 	cancel()
 
 	select {
@@ -613,5 +668,150 @@ func TestOffsiteCopyMissingAlertsAbsenceVisibly(t *testing.T) {
 	joined := strings.Join(posts, "\n")
 	if !strings.Contains(joined, "off-box backup copy is not configured") {
 		t.Fatalf("expected an alert making the missing off-box copy visible, got: %v", posts)
+	}
+}
+
+// fakeStalenessRecorder implements FeedStalenessRecorder without a
+// MeterProvider at all, mirroring fakeClock's role for time — it lets
+// runOnce's metrics wiring be tested as plain recorded calls.
+type fakeStalenessRecorder struct {
+	mu   sync.Mutex
+	seen map[string]float64
+}
+
+func (f *fakeStalenessRecorder) RecordFeedStaleness(_ context.Context, feedSlug string, ageSeconds float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.seen == nil {
+		f.seen = make(map[string]float64)
+	}
+	f.seen[feedSlug] = ageSeconds
+	return nil
+}
+
+// TestRunOnceRecordsFeedStalenessMetricForEveryEligibleFeed is TODOS.md
+// C4-16: the watchdog's number must be graphable, which means recording
+// aff_feed_staleness_seconds for every enabled/interval-bearing feed on each
+// nightly firing — not only the ones Check flags as stale. It also checks
+// the two documented exclusions: a disabled feed and a feed that has never
+// succeeded (no defined age) are both skipped.
+func TestRunOnceRecordsFeedStalenessMetricForEveryEligibleFeed(t *testing.T) {
+	s, dbPath := openLiveStore(t)
+	_ = dbPath
+
+	now := time.Date(2026, 8, 10, 3, 0, 0, 0, time.UTC)
+	fresh := now.Add(-2 * time.Hour)    // well within threshold, not stale
+	overdue := now.Add(-72 * time.Hour) // daily feed, grace 2.0 -> stale
+
+	staleFn := func(ctx context.Context, callNow time.Time) ([]FeedStatus, error) {
+		return []FeedStatus{
+			{FeedSlug: "fresh-feed", Enabled: true, Interval: 24 * time.Hour, LastSuccessAt: fresh},
+			{FeedSlug: "overdue-feed", Enabled: true, Interval: 24 * time.Hour, LastSuccessAt: overdue},
+			{FeedSlug: "disabled-feed", Enabled: false, Interval: 24 * time.Hour, LastSuccessAt: overdue},
+			{FeedSlug: "never-succeeded-feed", Enabled: true, Interval: 24 * time.Hour},
+		}, nil
+	}
+
+	rec := &fakeStalenessRecorder{}
+	clock := newFakeClock(now)
+	sched := NewScheduler(SchedulerConfig{
+		Clock:      clock,
+		Logger:     slog.New(slog.DiscardHandler),
+		Writer:     s.Writer(),
+		PruneOpts:  PruneOptions{RunRetention: 24 * time.Hour, EmbeddingWindow: 500},
+		StaleFn:    staleFn,
+		WebhookURL: "",
+		Grace:      2.0,
+		Metrics:    rec,
+	})
+
+	sched.runOnce(context.Background())
+
+	if len(rec.seen) != 2 {
+		t.Fatalf("recorded staleness for %d feeds, want 2 (fresh-feed, overdue-feed): %v", len(rec.seen), rec.seen)
+	}
+	if got, want := rec.seen["fresh-feed"], (2 * time.Hour).Seconds(); got != want {
+		t.Errorf("fresh-feed age = %v, want %v", got, want)
+	}
+	if got, want := rec.seen["overdue-feed"], (72 * time.Hour).Seconds(); got != want {
+		t.Errorf("overdue-feed age = %v, want %v", got, want)
+	}
+	if _, ok := rec.seen["disabled-feed"]; ok {
+		t.Errorf("disabled-feed must not be recorded")
+	}
+	if _, ok := rec.seen["never-succeeded-feed"]; ok {
+		t.Errorf("never-succeeded-feed must not be recorded (no defined age)")
+	}
+}
+
+// TestRunOnceNilMetricsIsSafe confirms the zero-value SchedulerConfig
+// (Metrics left nil, as every deployment without a wired MeterProvider has
+// it today — see obs.Setup's production call sites) does not panic or alter
+// runOnce's other behavior.
+func TestRunOnceNilMetricsIsSafe(t *testing.T) {
+	s, dbPath := openLiveStore(t)
+	_ = dbPath
+
+	staleFn := func(ctx context.Context, now time.Time) ([]FeedStatus, error) {
+		return []FeedStatus{
+			{FeedSlug: "some-feed", Enabled: true, Interval: time.Hour, LastSuccessAt: now.Add(-30 * time.Minute)},
+		}, nil
+	}
+
+	clock := newFakeClock(time.Date(2026, 8, 10, 3, 0, 0, 0, time.UTC))
+	sched := NewScheduler(SchedulerConfig{
+		Clock:     clock,
+		Logger:    slog.New(slog.DiscardHandler),
+		Writer:    s.Writer(),
+		PruneOpts: PruneOptions{RunRetention: 24 * time.Hour, EmbeddingWindow: 500},
+		StaleFn:   staleFn,
+		Grace:     2.0,
+		// Metrics intentionally left nil.
+	})
+
+	sched.runOnce(context.Background()) // must not panic
+}
+
+// TestAlertBackupSanitizesReasonInLogFallback covers the migration onto
+// PLAN.md §15.0's canonical vocabulary: BackupAlert.Reason (alert.go) is
+// human-facing Slack prose by design and must stay prose there, but when the
+// alert itself fails to send and alertBackup falls back to a log line, that
+// same prose becomes a LOG FIELD — which obs.FieldReason constrains to a
+// short stable token (A0-L05). A prose reason must come through
+// obs.SanitizeReason's fallback token, never verbatim, or every distinct
+// sentence becomes its own ungroupable bucket.
+func TestAlertBackupSanitizesReasonInLogFallback(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	sched := NewScheduler(SchedulerConfig{
+		Clock:  newFakeClock(time.Now()),
+		Logger: logger,
+		// An invalid URL makes postToSlack fail synchronously with no
+		// network call, so the log-fallback branch is exercised deterministically.
+		WebhookURL: "://not-a-valid-url",
+	})
+
+	proseReason := "no successful backup within the schedule's grace window"
+	sched.alertBackup(context.Background(), BackupAlert{Reason: proseReason})
+
+	dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
+	var rec map[string]any
+	if !dec.More() {
+		t.Fatal("expected a log record from the alert-send failure, got none")
+	}
+	if err := dec.Decode(&rec); err != nil {
+		t.Fatalf("log line is not JSON: %v\n%s", err, buf.String())
+	}
+
+	got, _ := rec[obs.FieldReason].(string)
+	if got == proseReason {
+		t.Fatalf("prose reason %q reached the log field verbatim", proseReason)
+	}
+	if got != obs.SanitizeReason(proseReason) {
+		t.Errorf("reason = %q, want SanitizeReason(%q) = %q", got, proseReason, obs.SanitizeReason(proseReason))
+	}
+	if !obs.IsCanonicalField(obs.FieldReason) {
+		t.Fatal("obs.FieldReason is not itself canonical, which would make this whole test meaningless")
 	}
 }

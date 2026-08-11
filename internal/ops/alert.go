@@ -68,7 +68,16 @@ func postToSlack(ctx context.Context, webhookURL, text string) error {
 type BackupAlert struct {
 	// Reason is a short, stable statement of what's wrong: e.g. "nightly
 	// backup run failed", "no successful backup within the schedule's grace
-	// window", "off-box backup copy is not configured".
+	// window", "off-box backup copy is not configured". This is human-facing
+	// alert prose read by an operator at 2am (formatBackupAlert renders it
+	// straight into the Slack message), NOT a log field — PLAN.md §15.0's
+	// canonical vocabulary (internal/obs) and its reason-must-be-a-token rule
+	// govern structured log records, not alert text, and forcing this into a
+	// snake_case token would make the alert unreadable in service of a rule
+	// that was never about it. A caller that also logs this reason (e.g.
+	// schedule.go's alertBackup) is responsible for running it through
+	// obs.SanitizeReason at the point it becomes a log field; this string
+	// itself stays prose.
 	Reason string
 	// Err is the underlying error, if any — nil for a pure absence alert,
 	// where nothing errored but nothing has succeeded recently either.

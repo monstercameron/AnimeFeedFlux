@@ -299,6 +299,66 @@ func LiveFeedStatuses(ctx context.Context, db *sql.DB, now time.Time) ([]FeedSta
 	return out, nil
 }
 
+// DefaultErrorCountLookback bounds how far back LiveFeedErrorCounts looks for
+// a feed that has never succeeded — without a successful run to anchor on,
+// "every failed run ever" would grow unbounded for a feed that has been
+// failing for months, which is not a useful number on /healthz (it would
+// just read as a large, ever-climbing count rather than "how bad is it right
+// now"). A week matches the window most operators would actually look back
+// over by hand.
+const DefaultErrorCountLookback = 7 * 24 * time.Hour
+
+// LiveFeedErrorCounts pairs each non-deleted feed's slug with the count of
+// 'failed' runs recorded since its most recent success (or, for a feed that
+// has never succeeded, since now-lookback) — the ErrorCount that
+// internal/publish/health.go's FeedHealthInput carries for /healthz
+// (TODOS.md C4-15). That package cannot compute this itself: the publish
+// plane deliberately has no store dependency (§2), so the count has to be
+// produced here, alongside LiveFeedStatuses, and handed to whatever builds
+// FeedHealthInput.
+//
+// A feed absent from the returned map had zero matching failed runs — the
+// map only ever contains feeds that were read from the feeds table, so
+// "absent" cannot mean "unknown feed" the way it might for a smaller,
+// caller-constructed set.
+func LiveFeedErrorCounts(ctx context.Context, db *sql.DB, now time.Time, lookback time.Duration) (map[string]int, error) {
+	if lookback <= 0 {
+		lookback = DefaultErrorCountLookback
+	}
+	cutoff := now.Add(-lookback).UTC().Format(time.RFC3339Nano)
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT f.slug, COUNT(r.id)
+		FROM feeds f
+		LEFT JOIN runs r
+			ON r.feed_id = f.id
+			AND r.status = 'failed'
+			AND r.started_at > COALESCE(
+				(SELECT MAX(r2.started_at) FROM runs r2
+				 WHERE r2.feed_id = f.id AND r2.status IN ('success', 'completed_unconfirmed')),
+				?)
+		WHERE f.deleted_at IS NULL
+		GROUP BY f.id, f.slug`, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("ops: counting feed errors: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := map[string]int{}
+	for rows.Next() {
+		var slug string
+		var n int
+		if err := rows.Scan(&slug, &n); err != nil {
+			return nil, fmt.Errorf("ops: scanning feed error count row: %w", err)
+		}
+		out[slug] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ops: iterating feed error counts: %w", err)
+	}
+	return out, nil
+}
+
 // feedInterval derives a schedule period from a feed's stored recipe: parse
 // the cron expression against its timezone, then measure the gap between two
 // consecutive future firings rather than trusting any single field to name
@@ -341,7 +401,61 @@ func feedInterval(specJSON, timezone string, now time.Time) time.Duration {
 // DefaultStaleGrace matches the nightly scheduler's default grace factor
 // (schedule.go), so `aff doctor`'s "feeds are current" check and the
 // watchdog that actually pages someone agree on what "stale" means.
+//
+// 2.0 is a documented guess, not a measured value: TODOS.md C3-11 (recording
+// Slack's actual observed poll interval, docs/slack-proof.md) is still
+// unresolved, so there is no real number yet to feed the "max delay before a
+// quiet feed looks stale" calculation C3-11 describes. The reasoning behind
+// 2.0 specifically: a daily feed's grace window is then two full days, which
+// absorbs exactly one missed-or-retried run (a transient provider outage, one
+// skipped cron tick) without also absorbing a second consecutive miss — the
+// point past which "quiet" stops looking like ordinary jitter and starts
+// looking like the generator actually stopped. 1.0 would alert on routine
+// single-run jitter (a fast way to get an alert muted); much above ~3.0 hides
+// a genuinely-stuck daily feed for the better part of a week. Replace this
+// default, not the mechanism, once C3-11 lands a measured number.
 const DefaultStaleGrace = 2.0
+
+// StaleGraceEnv is the environment variable that overrides DefaultStaleGrace
+// when set to a valid, positive float — see ResolveStaleGrace. A single named
+// knob (rather than a hardcoded constant per call site) exists because C3-11
+// is unresolved: whoever eventually measures Slack's real poll interval
+// should be able to correct the grace factor everywhere it is used — the
+// nightly Slack webhook (schedule.go's SchedulerConfig.Grace,
+// NewScheduler's zero-value default), `aff doctor` (NewDoctorConfig's
+// StaleGrace default), and — once cmd/animefeedflux/wire.go passes this same
+// resolved value into internal/publish's Deps.HealthGrace — /healthz too —
+// without hunting down every default individually or letting them drift
+// apart. See ResolveStaleGrace's doc comment for the current wiring status.
+const StaleGraceEnv = "AFF_STALE_GRACE_FACTOR"
+
+// ResolveStaleGrace resolves the effective staleness grace multiplier:
+// StaleGraceEnv if set to a value strconv.ParseFloat accepts and that is
+// > 0, otherwise DefaultStaleGrace. Both NewScheduler (schedule.go) and
+// NewDoctorConfig (below) call this for their zero-value default, so setting
+// StaleGraceEnv immediately changes both the nightly Slack alert and `aff
+// doctor`'s "feeds running on schedule" check — both real, reachable call
+// paths (cmd/animefeedflux/wire.go's runAll, cmd/aff/doctor_cmd.go) that
+// neither sets Grace/StaleGrace explicitly today.
+//
+// /healthz (internal/publish/health.go's DefaultHealthGrace,
+// server.go's Deps.HealthGrace) is NOT yet wired to this function — that
+// package is intentionally untouched here (see this change's report for
+// why) — so until cmd/animefeedflux/wire.go is changed to pass
+// ops.ResolveStaleGrace() into Deps.HealthGrace, setting StaleGraceEnv
+// changes what "stale" means for the webhook/doctor but leaves /healthz at
+// the fixed DefaultHealthGrace (2.0, matching this package's own default at
+// the moment, but no longer guaranteed to once the env var is set). Treat
+// StaleGraceEnv as not fully supported until that one-line wire.go change
+// lands.
+func ResolveStaleGrace() float64 {
+	if v := strings.TrimSpace(os.Getenv(StaleGraceEnv)); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			return f
+		}
+	}
+	return DefaultStaleGrace
+}
 
 // DefaultWALMaxBytes is the threshold above which doctor flags the WAL
 // sidecar as unexpectedly large. Not a PLAN.md-pinned number — chosen as
@@ -381,7 +495,7 @@ func NewDoctorConfig(dbPath string) DoctorConfig {
 		DBPath:           dbPath,
 		Now:              time.Now(),
 		ProviderKeyEnv:   "SCHEMAFLUX_API_KEY", // PLAN.md §16 — never OPENAI_API_KEY
-		StaleGrace:       DefaultStaleGrace,
+		StaleGrace:       ResolveStaleGrace(),
 		WALMaxBytes:      DefaultWALMaxBytes,
 		DiskMinFreeBytes: DefaultDiskMinFreeBytes,
 	}

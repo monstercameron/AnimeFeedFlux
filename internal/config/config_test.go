@@ -45,6 +45,9 @@ func TestLoadMinimalEnvironment(t *testing.T) {
 	if got, want := c.CacheMaxBytes, int64(DefaultCacheMaxBytes); got != want {
 		t.Errorf("CacheMaxBytes = %d, want default %d", got, want)
 	}
+	if got, want := c.AdminStaticDir, DefaultAdminStaticDir; got != want {
+		t.Errorf("AdminStaticDir = %q, want default %q", got, want)
+	}
 	if !c.GenerationEnabled {
 		t.Error("GenerationEnabled should default to true")
 	}
@@ -243,6 +246,144 @@ func TestOverrides(t *testing.T) {
 	}
 	if c.GenerationEnabled {
 		t.Error("GenerationEnabled should be false")
+	}
+}
+
+// TestAdminStaticDirOverride: an explicit AFF_ADMIN_STATIC_DIR wins over
+// DefaultAdminStaticDir, and is trimmed like every other string setting.
+func TestAdminStaticDirOverride(t *testing.T) {
+	m := valid()
+	m["AFF_ADMIN_STATIC_DIR"] = "  /srv/aff/admin-ui  "
+
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got, want := c.AdminStaticDir, "/srv/aff/admin-ui"; got != want {
+		t.Errorf("AdminStaticDir = %q, want %q", got, want)
+	}
+}
+
+// TestOffsiteDirDefaultsEmpty: the nightly off-box copy is opt-in; an
+// unconfigured deployment must not silently pick a directory for it.
+func TestOffsiteDirDefaultsEmpty(t *testing.T) {
+	c, err := Load(env(valid()))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.OffsiteDir != "" {
+		t.Errorf("OffsiteDir = %q, want empty by default", c.OffsiteDir)
+	}
+}
+
+func TestOffsiteDirOverride(t *testing.T) {
+	m := valid()
+	m["AFF_OFFSITE_DIR"] = "/mnt/offsite"
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got, want := c.OffsiteDir, "/mnt/offsite"; got != want {
+		t.Errorf("OffsiteDir = %q, want %q", got, want)
+	}
+}
+
+// TestOTelDefaults: an unconfigured deployment stays fully off, matching
+// obs.Setup's own zero-overhead default (§15.0a).
+func TestOTelDefaults(t *testing.T) {
+	c, err := Load(env(valid()))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.OTelEnabled {
+		t.Error("OTelEnabled must default to false")
+	}
+	if c.OTelExporter != "" {
+		t.Errorf("OTelExporter = %q, want empty while disabled", c.OTelExporter)
+	}
+	if c.TraceSampleRatio != DefaultTraceSampleRatio {
+		t.Errorf("TraceSampleRatio = %v, want default %v", c.TraceSampleRatio, DefaultTraceSampleRatio)
+	}
+	if c.OTelServiceName != DefaultOTelServiceName {
+		t.Errorf("OTelServiceName = %q, want default %q", c.OTelServiceName, DefaultOTelServiceName)
+	}
+}
+
+// TestOTelExporterDefaultsToOTLPWhenEnabled: §16's documented rule — an
+// unnamed exporter while AFF_OTEL_ENABLED=1 must not silently mean "record
+// but never export" (obs.Setup's "", "none" branch).
+func TestOTelExporterDefaultsToOTLPWhenEnabled(t *testing.T) {
+	m := valid()
+	m["AFF_OTEL_ENABLED"] = "true"
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.OTelExporter != "otlp" {
+		t.Errorf("OTelExporter = %q, want otlp default when enabled", c.OTelExporter)
+	}
+}
+
+func TestOTelExporterExplicitStdoutWins(t *testing.T) {
+	m := valid()
+	m["AFF_OTEL_ENABLED"] = "true"
+	m["AFF_OTEL_EXPORTER"] = "stdout"
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.OTelExporter != "stdout" {
+		t.Errorf("OTelExporter = %q, want stdout", c.OTelExporter)
+	}
+}
+
+func TestOTelExporterRejectsUnknownValue(t *testing.T) {
+	m := valid()
+	m["AFF_OTEL_EXPORTER"] = "jaeger"
+	if _, err := Load(env(m)); err == nil {
+		t.Fatal("AFF_OTEL_EXPORTER=jaeger was accepted")
+	} else if !strings.Contains(err.Error(), "AFF_OTEL_EXPORTER") {
+		t.Fatalf("error does not name AFF_OTEL_EXPORTER: %v", err)
+	}
+}
+
+func TestTraceSampleRatioValidation(t *testing.T) {
+	for _, tc := range []struct{ value string }{
+		{"-0.1"}, {"1.1"}, {"not-a-number"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			m := valid()
+			m["AFF_TRACE_SAMPLE_RATIO"] = tc.value
+			if _, err := Load(env(m)); err == nil {
+				t.Fatalf("AFF_TRACE_SAMPLE_RATIO=%q was accepted", tc.value)
+			} else if !strings.Contains(err.Error(), "AFF_TRACE_SAMPLE_RATIO") {
+				t.Fatalf("error does not name AFF_TRACE_SAMPLE_RATIO: %v", err)
+			}
+		})
+	}
+}
+
+func TestTraceSampleRatioOverride(t *testing.T) {
+	m := valid()
+	m["AFF_TRACE_SAMPLE_RATIO"] = "0.5"
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.TraceSampleRatio != 0.5 {
+		t.Errorf("TraceSampleRatio = %v, want 0.5", c.TraceSampleRatio)
+	}
+}
+
+func TestOTelServiceNameOverride(t *testing.T) {
+	m := valid()
+	m["OTEL_SERVICE_NAME"] = "aff-canary"
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.OTelServiceName != "aff-canary" {
+		t.Errorf("OTelServiceName = %q, want aff-canary", c.OTelServiceName)
 	}
 }
 

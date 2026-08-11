@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/monstercameron/AnimeFeedFlux/internal/obs"
 )
 
 // Clock abstracts time so the nightly scheduler is testable without sleeping
@@ -83,6 +85,26 @@ type SchedulerConfig struct {
 	// expected period before quiet becomes stale", and there is no reason
 	// backups should tolerate a different multiple than feeds do.
 	Grace float64
+
+	// Metrics, if set, receives an aff_feed_staleness_seconds observation
+	// (TODOS.md C4-16) for every enabled feed with a meaningful Interval on
+	// each nightly firing — not only the ones Check (above) flags as stale.
+	// A boolean "stale" tells an operator nothing about whether a feed is
+	// drifting toward its threshold or nowhere near it; the metric is what
+	// makes that a graph instead of a guess. nil is a valid, safe default —
+	// every call site below is already guarded — since a process that never
+	// wires a MeterProvider (obs.Setup) must not need this field to be
+	// non-nil to run at all.
+	Metrics FeedStalenessRecorder
+}
+
+// FeedStalenessRecorder is the one method Scheduler needs from
+// internal/obs's *Metrics (metrics.go: RecordFeedStaleness), expressed as an
+// interface so this package does not import internal/obs just to hold a
+// pointer, and so tests can supply a fake without a MeterProvider at all —
+// the same pattern Clock already uses here for the wall clock.
+type FeedStalenessRecorder interface {
+	RecordFeedStaleness(ctx context.Context, feedSlug string, ageSeconds float64) error
 }
 
 // DefaultRunAt is 03:00 UTC.
@@ -109,7 +131,12 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		cfg.Keep = 14 // PLAN.md §15: "Kept 14 days"
 	}
 	if cfg.Grace <= 0 {
-		cfg.Grace = 2.0
+		// ResolveStaleGrace (cli.go) — DefaultStaleGrace unless StaleGraceEnv
+		// (AFF_STALE_GRACE_FACTOR) overrides it. C4-08: the grace factor was a
+		// hardcoded 2.0 here with no way to tune it short of a code change;
+		// C3-11 (the real observed Slack poll interval) is still unresolved,
+		// so an operator needs a way to correct this without waiting on that.
+		cfg.Grace = ResolveStaleGrace()
 	}
 	return &Scheduler{cfg: cfg}
 }
@@ -195,6 +222,7 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 			return
 		}
 		stale := Check(feeds, now, c.Grace)
+		s.recordStalenessMetric(ctx, feeds, now)
 		if err := Notify(ctx, c.WebhookURL, stale); err != nil {
 			// A failed Slack post must not crash the scheduler loop — see
 			// Notify's doc comment. This one stays log-only rather than
@@ -205,6 +233,32 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 			// worst never arrive either. runBackup's alertBackup applies the
 			// identical rule for the same reason.
 			c.Logger.Warn("nightly staleness notify failed", "error", err, "stale_count", len(stale))
+		}
+	}
+}
+
+// recordStalenessMetric observes aff_feed_staleness_seconds{feed_slug} for
+// every enabled feed with a meaningful Interval (the same skip condition
+// Check applies), independent of whether that feed is currently flagged
+// stale — see SchedulerConfig.Metrics's doc comment for why every feed, not
+// just the stale ones. A feed that has never succeeded (LastSuccessAt zero)
+// has no defined age to observe and is skipped here too; it is still
+// visible via Notify's stale report. A recording failure (e.g. the
+// cardinality guard rejecting a malformed slug) is logged and does not stop
+// the loop or the rest of runOnce — telemetry must never be why a nightly
+// job aborts.
+func (s *Scheduler) recordStalenessMetric(ctx context.Context, feeds []FeedStatus, now time.Time) {
+	c := s.cfg
+	if c.Metrics == nil {
+		return
+	}
+	for _, f := range feeds {
+		if !f.Enabled || f.Interval <= 0 || f.LastSuccessAt.IsZero() {
+			continue
+		}
+		age := now.Sub(f.LastSuccessAt).Seconds()
+		if err := c.Metrics.RecordFeedStaleness(ctx, f.FeedSlug, age); err != nil {
+			c.Logger.Warn("recording aff_feed_staleness_seconds failed", "error", err, "feed_slug", f.FeedSlug)
 		}
 	}
 }
@@ -341,7 +395,13 @@ func latestBackupTime(outDir, base string) (time.Time, error) {
 func (s *Scheduler) alertBackup(ctx context.Context, a BackupAlert) {
 	c := s.cfg
 	if err := NotifyBackupAlert(ctx, c.WebhookURL, a); err != nil {
-		c.Logger.Warn("backup alert failed to send", "error", err, "reason", a.Reason)
+		// a.Reason (alert.go's BackupAlert doc comment) is prose meant for a
+		// human reading the Slack alert, e.g. "no successful backup within
+		// the schedule's grace window" — exactly the free text §15.0's
+		// canonical reason field forbids (one bucket per occurrence defeats
+		// grouping), so it goes through SanitizeReason here, same as any
+		// other non-token reason reaching a log record.
+		c.Logger.Warn("backup alert failed to send", "error", err, obs.FieldReason, obs.SanitizeReason(a.Reason))
 	}
 }
 

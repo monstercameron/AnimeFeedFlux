@@ -74,6 +74,51 @@ type Config struct {
 	BackupDir           string
 	SlackWebhookURL     string
 
+	// OffsiteDir, if set, is where the nightly ops scheduler (internal/ops's
+	// Scheduler, wired in cmd/animefeedflux's runAll) additionally writes an
+	// encrypted off-box copy of that night's backup — see
+	// ops.SchedulerConfig.OffsiteDir's doc comment for exactly what this
+	// does and does not provide. Empty (the default) means no off-box copy
+	// is attempted; the nightly job alerts on that absence rather than only
+	// logging it (TODOS.md C4-03), so leaving this unset is a visible,
+	// deliberate choice, not a silent gap.
+	OffsiteDir string
+
+	// OTelEnabled/OTelExporter/TraceSampleRatio/OTelServiceName configure
+	// obs.Setup (PLAN.md §15.0a, §16). Instrumentation itself always runs
+	// unconditionally at every call site; only whether it's ever exported
+	// anywhere is gated by these. OTelEnabled defaults to false so a
+	// deployment that never touches these variables gets the same
+	// zero-overhead no-op providers it always has.
+	// MonthlySpendCeilingUSD is the calendar-month provider-spend ceiling
+	// (§13, §19). Zero means unlimited — an unset ceiling must not read as
+	// "zero budget", which would stop all generation on the first run and
+	// look exactly like a broken kill switch.
+	//
+	// A daily cap does not bound a month: thirty-one days at the daily limit
+	// is a month at thirty-one times it, and that failure is a slow bleed
+	// that never trips a single daily check. The provider bills monthly, so
+	// the limit that matches the thing being protected is monthly too.
+	MonthlySpendCeilingUSD float64
+
+	OTelEnabled      bool
+	OTelExporter     string // "otlp" or "stdout"; defaults to "otlp" when OTelEnabled
+	TraceSampleRatio float64
+	OTelServiceName  string
+
+	// AdminStaticDir is the directory web/build.sh stages the compiled
+	// admin WASM bundle into (app.wasm, app.wasm.gz, wasm_exec.js,
+	// index.html — see internal/publish/static.go's NewStaticHandler).
+	// Defaults to "web/dist", the same default web/build.sh itself uses
+	// (SERVE_DIR), so an unconfigured dev box and an unconfigured
+	// container agree on where to look without either side hardcoding the
+	// other's default. A missing directory is normal before `make web`/
+	// web/build.sh has run — that is NOT validated here (existence is a
+	// startup-time filesystem check, cmd/animefeedflux's composition
+	// root's job, not config parsing's) — so Load never fails because the
+	// bundle hasn't been built yet.
+	AdminStaticDir string
+
 	// PasswordPepper is the optional second secret PLAN.md §4 describes
 	// (HMAC-SHA256 mixed into the admin credential before it is hashed).
 	// Empty means "no pepper configured" — the default, and the case that
@@ -106,6 +151,24 @@ const (
 	DefaultScheduleJitter      = 10 * time.Minute
 	DefaultCacheMaxBytes       = 64 << 20 // 64 MiB
 	DefaultLogLevel            = slog.LevelInfo
+	// DefaultAdminStaticDir mirrors web/build.sh's own default SERVE_DIR
+	// ("$script_dir/dist", i.e. web/dist relative to the repo root) so the
+	// two sides of the build/serve split agree without either hardcoding
+	// the other's value.
+	DefaultAdminStaticDir = "web/dist"
+	// DefaultTraceSampleRatio matches obs.Setup's own fallback (otel.go),
+	// named here so §16's table and obs's default cannot silently drift
+	// apart from each other.
+	DefaultTraceSampleRatio = 0.05
+	// DefaultOTelServiceName is what OTEL_SERVICE_NAME defaults to when
+	// unset — the standard OTel env var, not an AFF_-prefixed one (§16).
+	DefaultOTelServiceName = "animefeedflux"
+	// defaultOTelExporterWhenEnabled is AFF_OTEL_EXPORTER's default the
+	// moment AFF_OTEL_ENABLED=1 and no exporter was named explicitly (§16:
+	// "default otlp when enabled"). It is not exported because it only ever
+	// applies inside Load, never as a standalone default a caller could want
+	// independent of OTelEnabled.
+	defaultOTelExporterWhenEnabled = "otlp"
 )
 
 // Load reads and validates the configuration.
@@ -124,6 +187,8 @@ func Load(env Getenv) (*Config, error) {
 
 		BackupDir:       env("AFF_BACKUP_DIR"),
 		SlackWebhookURL: env("AFF_SLACK_WEBHOOK_URL"),
+		OffsiteDir:      env("AFF_OFFSITE_DIR"),
+		AdminStaticDir:  v.optionalWithDefault("AFF_ADMIN_STATIC_DIR", DefaultAdminStaticDir),
 
 		GenerationEnabled:   v.boolean("AFF_GENERATION_ENABLED", true),
 		MaxConcurrentRuns:   v.positive("AFF_MAX_CONCURRENT_RUNS", DefaultMaxConcurrentRuns),
@@ -132,7 +197,13 @@ func Load(env Getenv) (*Config, error) {
 		CacheMaxBytes:       int64(v.positive("AFF_CACHE_MAX_BYTES", DefaultCacheMaxBytes)),
 		LogLevel:            v.level("AFF_LOG_LEVEL", DefaultLogLevel),
 		LiveLLM:             v.boolean("AFF_LIVE_LLM", false),
+
+		OTelEnabled:            v.boolean("AFF_OTEL_ENABLED", false),
+		MonthlySpendCeilingUSD: v.nonNegativeFloat("AFF_MONTHLY_SPEND_CEILING_USD"),
+		TraceSampleRatio:       v.ratio("AFF_TRACE_SAMPLE_RATIO", DefaultTraceSampleRatio),
+		OTelServiceName:        v.optionalWithDefault("OTEL_SERVICE_NAME", DefaultOTelServiceName),
 	}
+	c.OTelExporter = v.otelExporter("AFF_OTEL_EXPORTER", c.OTelEnabled)
 
 	c.PublicBaseURL = v.baseURL("AFF_PUBLIC_BASE_URL")
 	c.AllowedOrigins = v.originList("AFF_ALLOWED_ORIGINS")
@@ -202,6 +273,20 @@ func (v *validator) positive(name string, def int) int {
 	return n
 }
 
+// optionalWithDefault returns the trimmed env value, or def when unset. There
+// is nothing to validate about an arbitrary string (unlike positive/duration/
+// level below), so this never adds a problem — it exists purely so a
+// string-valued optional setting follows the same "env empty -> named
+// default" shape as the typed ones instead of being spelled out ad hoc at
+// each call site.
+func (v *validator) optionalWithDefault(name, def string) string {
+	s := strings.TrimSpace(v.env(name))
+	if s == "" {
+		return def
+	}
+	return s
+}
+
 func (v *validator) duration(name string, def time.Duration) time.Duration {
 	raw := strings.TrimSpace(v.env(name))
 	if raw == "" {
@@ -217,6 +302,67 @@ func (v *validator) duration(name string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// ratio validates a float64 in [0,1] — used only for AFF_TRACE_SAMPLE_RATIO
+// today, but named generically since "a fraction between 0 and 1" is not
+// specific to tracing.
+// nonNegativeFloat reads an optional non-negative float. Unset yields 0,
+// which every caller here reads as "no limit" — see MonthlySpendCeilingUSD
+// for why the zero value must mean unlimited rather than zero budget.
+func (v *validator) nonNegativeFloat(name string) float64 {
+	raw := strings.TrimSpace(v.env(name))
+	if raw == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		v.bad(name, fmt.Sprintf("must be a number (got %q)", raw))
+		return 0
+	}
+	if f < 0 {
+		v.bad(name, fmt.Sprintf("must not be negative (got %v)", f))
+		return 0
+	}
+	return f
+}
+
+func (v *validator) ratio(name string, def float64) float64 {
+	raw := strings.TrimSpace(v.env(name))
+	if raw == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		v.bad(name, fmt.Sprintf("must be a number between 0 and 1 (got %q)", raw))
+		return def
+	}
+	if f < 0 || f > 1 {
+		v.bad(name, fmt.Sprintf("must be between 0 and 1 (got %v)", f))
+		return def
+	}
+	return f
+}
+
+// otelExporter validates AFF_OTEL_EXPORTER against the two values obs.Setup
+// understands (otel.go's setupTraces/setupMetrics switches) and applies
+// §16's "default otlp when enabled" rule: an unset exporter is fine (and
+// meaningless) while tracing is off, but the moment AFF_OTEL_ENABLED=1 an
+// unset exporter would otherwise silently mean "record everything, export
+// nothing" (obs.Setup's "", "none" branch) — surprising for a value whose
+// whole point was turning export ON. enabled is decided ahead of this call
+// (AFF_OTEL_ENABLED is parsed first in Load) so this function only supplies
+// the exporter default, not the enabled default.
+func (v *validator) otelExporter(name string, enabled bool) string {
+	raw := strings.TrimSpace(v.env(name))
+	if raw != "" && raw != "otlp" && raw != "stdout" {
+		v.bad(name, fmt.Sprintf("must be otlp or stdout (got %q)", raw))
+		return raw
+	}
+	if raw == "" && enabled {
+		return defaultOTelExporterWhenEnabled
+	}
+	return raw
 }
 
 func (v *validator) level(name string, def slog.Level) slog.Level {
