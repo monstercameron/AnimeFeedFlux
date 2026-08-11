@@ -803,6 +803,9 @@ func (e *genExecutor) Execute(ctx context.Context, feedID int64, trigger string)
 		return fmt.Errorf("wire: starting run for feed %d: %w", feedID, err)
 	}
 
+	stopHeartbeat := keepRunAlive(ctx, e.st, e.log, feedID, runID)
+	defer stopHeartbeat()
+
 	deps := generate.Deps{
 		Store:    genStoreAdapter{st: e.st, runID: runID},
 		Novelty:  e.novelty,
@@ -847,6 +850,64 @@ type wireRunExecutor struct {
 	log      *slog.Logger
 }
 
+// runHeartbeatInterval is how often a live run renews its lock. Comfortably
+// inside internal/store's runLockStaleAfter (3 minutes) so a single slow
+// renewal — a busy writer connection, a GC pause — does not let the lock
+// lapse while the run is plainly alive.
+const runHeartbeatInterval = 30 * time.Second
+
+// keepRunAlive renews runID's lock until the returned stop function is
+// called. It is what makes the run lock mean "a process is working on this"
+// rather than "a process started this less than three minutes ago".
+//
+// # The lock was expiring under every long run
+//
+// StartRun stamps heartbeat_at once at insert and store.Heartbeat renews it —
+// except nothing outside tests ever called Heartbeat. So the single-flight
+// lock (§13) went stale exactly runLockStaleAfter after a run STARTED,
+// regardless of whether it was still running, and StartRun then treats a
+// stale lock as a crashed process and lets the next caller through.
+//
+// That is reachable, and it costs money. FeedService.RunNow deliberately does
+// not reimplement single-flight — its doc says so — and relies entirely on
+// this lock, so pressing Run Now on a feed whose scheduled run had been going
+// for three minutes started a SECOND concurrent run. The reverse holds too:
+// the scheduler's in-process guard only knows about runs IT dispatched, so a
+// manual run in flight does not stop a cron tick either. Both runs call the
+// provider; both bill.
+//
+// Errors are logged and the loop continues. A failed renewal is not fatal on
+// its own — the next tick is 30 seconds away and the lock has three minutes
+// of slack — and ErrNotFound simply means the run finished between ticks,
+// which is the ordinary way this ends.
+func keepRunAlive(ctx context.Context, st *store.Store, log *slog.Logger, feedID, runID int64) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(runHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Not ctx: a canceled or timed-out run still holds the lock
+				// until its terminal row is written, and a heartbeat issued
+				// with a dead context cannot renew it.
+				hbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				err := st.Heartbeat(hbCtx, runID)
+				cancel()
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
+					log.Warn("run heartbeat failed; the single-flight lock may lapse",
+						"feed_id", feedID, "run_id", runID, "error", err)
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
 func (e *wireRunExecutor) ExecuteRun(feedID, runID int64) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), manualRunTimeout)
@@ -870,6 +931,9 @@ func (e *wireRunExecutor) ExecuteRun(feedID, runID int64) {
 			_ = e.st.FailRun(ctx, runID, "spec_parse_failed", err.Error(), store.RunSummary{})
 			return
 		}
+
+		stopHeartbeat := keepRunAlive(ctx, e.st, e.log, feedID, runID)
+		defer stopHeartbeat()
 
 		deps := generate.Deps{
 			Store:    genStoreAdapter{st: e.st, runID: runID},
