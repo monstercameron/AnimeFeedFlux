@@ -3,6 +3,7 @@ package rpc
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -347,5 +348,187 @@ func TestSystemBackupProducesAValidSQLiteFile(t *testing.T) {
 	const sqliteMagic = "SQLite format 3\x00"
 	if len(resp.GetDbFile()) < len(sqliteMagic) || string(resp.GetDbFile()[:len(sqliteMagic)]) != sqliteMagic {
 		t.Fatal("backup file does not start with the SQLite header")
+	}
+}
+
+// --- ListAuditEvents -------------------------------------------------
+
+func TestSystemListAuditEventsEmptyLogReturnsEmptyNotError(t *testing.T) {
+	s := sysTestStore(t)
+	ctx := t.Context()
+	srv := NewSystemServer(s, nil)
+
+	resp, err := srv.ListAuditEvents(ctx, &affv1.SystemServiceListAuditEventsRequest{})
+	if err != nil {
+		t.Fatalf("list audit events on an empty log: %v", err)
+	}
+	if len(resp.GetEvents()) != 0 {
+		t.Fatalf("events = %d, want 0 on a fresh database", len(resp.GetEvents()))
+	}
+	if resp.GetNextPageToken() != "" {
+		t.Fatalf("next_page_token = %q, want empty on an empty log", resp.GetNextPageToken())
+	}
+}
+
+func TestSystemListAuditEventsNewestFirstWithWorkingPagination(t *testing.T) {
+	s := sysTestStore(t)
+	ctx := t.Context()
+	srv := NewSystemServer(s, nil)
+
+	// Five events, alternating outcome, distinguishable by kind so the
+	// order assertion below is unambiguous.
+	kinds := []string{"login", "recover", "login", "change_password", "reenroll_totp"}
+	for i, kind := range kinds {
+		if err := s.RecordAuthEvent(ctx, kind, "203.0.113.1", i%2 == 0, "seed"); err != nil {
+			t.Fatalf("seeding auth event %d: %v", i, err)
+		}
+	}
+
+	// page_size=2 forces three pages for five rows.
+	var allKinds []string
+	token := ""
+	for page := 0; page < 10; page++ { // bounded loop: never trust pagination to terminate on its own in a test
+		resp, err := srv.ListAuditEvents(ctx, &affv1.SystemServiceListAuditEventsRequest{
+			PageSize:  2,
+			PageToken: token,
+		})
+		if err != nil {
+			t.Fatalf("list audit events page %d: %v", page, err)
+		}
+		for _, e := range resp.GetEvents() {
+			allKinds = append(allKinds, e.GetKind())
+		}
+		if resp.GetNextPageToken() == "" {
+			break
+		}
+		token = resp.GetNextPageToken()
+	}
+
+	// Insertion order was login, recover, login, change_password,
+	// reenroll_totp — newest-first across all pages reverses that with no
+	// duplicate and no drop at a page boundary.
+	want := []string{"reenroll_totp", "change_password", "login", "recover", "login"}
+	if len(allKinds) != len(want) {
+		t.Fatalf("collected %d events across pages, want %d: %v", len(allKinds), len(want), allKinds)
+	}
+	for i := range want {
+		if allKinds[i] != want[i] {
+			t.Fatalf("event %d = %q, want %q (full order %v)", i, allKinds[i], want[i], allKinds)
+		}
+	}
+}
+
+func TestSystemListAuditEventsRejectsInvalidPageToken(t *testing.T) {
+	s := sysTestStore(t)
+	ctx := t.Context()
+	srv := NewSystemServer(s, nil)
+
+	_, err := srv.ListAuditEvents(ctx, &affv1.SystemServiceListAuditEventsRequest{
+		PageToken: "not a real cursor",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("error = %v, want codes.InvalidArgument", err)
+	}
+}
+
+// TestSystemListAuditEventsNoSecretMaterial is the load-bearing security
+// assertion for this RPC (see AuditEvent's doc comment in
+// proto/aff/v1/system.proto): even if a write site somehow put something
+// sensitive in auth_events.detail, this RPC could not leak it, because
+// AuditEvent has no field for detail at all. Simulated here with a
+// deliberately planted "secret" in detail — RecordAuthEvent's real call
+// sites never do this (internal/rpc/auth_test.go asserts that separately),
+// this test is about what ListAuditEvents's wire shape can and cannot
+// carry, independent of write-side discipline.
+func TestSystemListAuditEventsNoSecretMaterial(t *testing.T) {
+	s := sysTestStore(t)
+	ctx := t.Context()
+	srv := NewSystemServer(s, nil)
+
+	const planted = "sk-totally-secret-value-should-never-appear"
+	if err := s.RecordAuthEvent(ctx, "login", "203.0.113.1", true, planted); err != nil {
+		t.Fatalf("seeding auth event: %v", err)
+	}
+
+	resp, err := srv.ListAuditEvents(ctx, &affv1.SystemServiceListAuditEventsRequest{})
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+	if bytes.Contains(raw, []byte(planted)) {
+		t.Fatal("ListAuditEvents response leaked auth_events.detail")
+	}
+	if len(resp.GetEvents()) != 1 {
+		t.Fatalf("events = %d, want 1", len(resp.GetEvents()))
+	}
+	e := resp.GetEvents()[0]
+	if e.GetKind() != "login" || e.GetIp() != "203.0.113.1" || !e.GetOk() {
+		t.Fatalf("event = %+v, want kind=login ip=203.0.113.1 ok=true", e)
+	}
+	if e.GetAt() == nil {
+		t.Fatal("event has no `at` timestamp")
+	}
+}
+
+// --- Vacuum -------------------------------------------------------------
+
+func TestSystemVacuumReportsSizesBeforeAndAfter(t *testing.T) {
+	s := sysTestStore(t)
+	ctx := t.Context()
+	srv := NewSystemServer(s, nil)
+
+	// Give VACUUM something to compact.
+	for i := 0; i < 100; i++ {
+		if _, err := s.CreateFeed(ctx, model.Feed{
+			Slug: fmt.Sprintf("vacuum-rpc-fill-%d", i), Title: "Fill",
+			Kind: model.KindGenerative, Timezone: "UTC", Enabled: true,
+		}); err != nil {
+			t.Fatalf("seed feed %d: %v", i, err)
+		}
+	}
+
+	resp, err := srv.Vacuum(ctx, &affv1.SystemServiceVacuumRequest{})
+	if err != nil {
+		t.Fatalf("vacuum: %v", err)
+	}
+	if resp.GetSizeBeforeBytes() <= 0 {
+		t.Fatalf("size_before_bytes = %d, want > 0", resp.GetSizeBeforeBytes())
+	}
+	if resp.GetSizeAfterBytes() <= 0 {
+		t.Fatalf("size_after_bytes = %d, want > 0", resp.GetSizeAfterBytes())
+	}
+	if resp.GetDurationMs() < 0 {
+		t.Fatalf("duration_ms = %d, want >= 0", resp.GetDurationMs())
+	}
+}
+
+// TestSystemVacuumRefusesWhileRunInFlight is the concurrent-write behavior
+// this RPC must have (task requirement: "vacuum reports before/after sizes
+// and behaves as you decided under a concurrent write"). The decision: a
+// generation run holding the 'running' status refuses VACUUM outright
+// rather than letting the two contend for SQLite's single writer
+// connection — see Vacuum's doc comment in internal/rpc/system.go.
+func TestSystemVacuumRefusesWhileRunInFlight(t *testing.T) {
+	s := sysTestStore(t)
+	ctx := t.Context()
+	srv := NewSystemServer(s, nil)
+
+	feedID, err := s.CreateFeed(ctx, model.Feed{
+		Slug: "vacuum-refuse-test", Title: "Vacuum Refuse Test",
+		Kind: model.KindGenerative, Timezone: "UTC", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateFeed: %v", err)
+	}
+	if _, err := s.StartRun(ctx, feedID, "manual", "test-holder"); err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+
+	_, err = srv.Vacuum(ctx, &affv1.SystemServiceVacuumRequest{})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("vacuum error = %v, want codes.FailedPrecondition while a run is in flight", err)
 	}
 }

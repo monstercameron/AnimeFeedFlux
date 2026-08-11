@@ -22,6 +22,7 @@ import (
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/internal/auth"
 	"github.com/monstercameron/AnimeFeedFlux/internal/bridge"
+	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 )
 
 // sessionTokenCtxKey is an explicit-override context key: something set it
@@ -168,8 +169,32 @@ func (s *AuthServer) authorize(ctx context.Context, fullMethod string) (context.
 		return ctx, status.Error(codes.Unauthenticated, "invalid session")
 	}
 
+	// The in-memory tracker remains the thing that DECIDES whether this
+	// session is elevated (RecoverWithCode marks it, it expires after
+	// elevatedSessionTTL, and it resets — safely, to "not elevated" — on a
+	// restart; see elevatedTracker's doc comment. That behavior is
+	// deliberately unchanged here, per OQ-06: this migration adds a scope
+	// column, it does not decide whether a recovery code buys one action or
+	// two.) What changes is that the decision is now written onto the
+	// session's own row (migrations/0005_session_scope.sql) on every
+	// authorized call, so scope is something the session carries rather
+	// than something that exists only in this process's memory, and so a
+	// default-deny check can be made against it centrally, here, rather
+	// than trusting every future handler to remember to ask the tracker.
 	elevated := s.elevated.isElevated(hash, now)
-	if elevated && !elevatedAllowedMethods[fullMethod] {
+	wantScope := store.SessionScopeFull
+	if elevated {
+		wantScope = store.SessionScopeElevated
+	}
+	if err := s.store.SetSessionScope(ctx, id, wantScope); err != nil {
+		return ctx, status.Error(codes.Internal, "updating session scope")
+	}
+
+	// Default deny: fullMethod must be explicitly present in
+	// elevatedAllowedMethods to be reachable from a non-full scope. A method
+	// nobody has opted in yet — including one that does not exist today —
+	// is refused, not silently reachable.
+	if wantScope != store.SessionScopeFull && !elevatedAllowedMethods[fullMethod] {
 		return ctx, status.Error(codes.PermissionDenied, "elevated session cannot reach this method")
 	}
 

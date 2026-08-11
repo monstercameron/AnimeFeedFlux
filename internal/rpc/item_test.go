@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -900,5 +901,399 @@ func TestItemRevertRevision_UnknownItemOrRevision(t *testing.T) {
 		ItemId: created.GetItem().GetId(), RevisionId: 999999, ExpectedVersion: created.GetItem().GetVersion(),
 	}); status.Code(err) != codes.NotFound {
 		t.Fatalf("unknown revision_id: got %v, want NotFound", err)
+	}
+}
+
+// --- published_at range/zero validation -------------------------------
+//
+// Fuzzing found that RFC822 and RFC3339 (internal/render/dates.go) each
+// format a year >= 10000 into a string their OWN reference layout then
+// rejects on Parse: time.Time.Format writes as many digits as the year
+// needs, but Go's reference-layout Parse always consumes exactly four. That
+// gap is closed here, at the point published_at enters the system, rather
+// than in the renderer — a renderer that silently clamped the value would
+// produce a document that disagrees with the database.
+
+// itemOutOfRangeYear is a year past the four-digit boundary every renderer
+// requires (itemMaxPublishedAtYear); itemOrdinaryPublishedAt is an
+// unremarkable in-range date used as a control in every test below to prove
+// the new checks do not touch normal dates.
+var (
+	itemOutOfRangeYear      = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	itemOrdinaryPublishedAt = time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC)
+)
+
+// itemAssertRangeRejection fails t unless err is an InvalidArgument whose
+// message names the four-digit-year bound rather than reusing RULE-7's
+// backdating wording — the two rejections must read differently, or an
+// operator who gets "date rejected" with no reason tends to retry the exact
+// same request without knowing which of the two distinct rules to fix.
+func itemAssertRangeRejection(t *testing.T, err error, wantSubstr string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected published_at to be refused")
+	}
+	if got := status.Code(err); got != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got %v (%v)", got, err)
+	}
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf("error %q does not mention %q — range rejection must be distinguishable from RULE-7 backdating", err.Error(), wantSubstr)
+	}
+	if strings.Contains(err.Error(), "backdated") || strings.Contains(err.Error(), "current newest") {
+		t.Fatalf("error %q reads like the RULE-7 backdating rejection, not a range rejection", err.Error())
+	}
+}
+
+// TestItemCreate_RejectsOutOfRangePublishedAt proves Create refuses a
+// published_at with a year the four-digit date layouts (RFC 822/RFC 3339)
+// cannot round-trip.
+func TestItemCreate_RejectsOutOfRangePublishedAt(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-range-create")
+
+	_, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(itemOutOfRangeYear),
+	}})
+	itemAssertRangeRejection(t, err, "four-digit")
+}
+
+// TestItemCreate_RejectsZeroPublishedAt proves Create refuses the exact
+// zero time.Time — treated distinctly from an out-of-range year, since the
+// zero value is a plausible-looking in-range date (0001-01-01) far more
+// likely to be an uninitialized value than an intended one.
+func TestItemCreate_RejectsZeroPublishedAt(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-zero-create")
+
+	_, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(time.Time{}),
+	}})
+	itemAssertRangeRejection(t, err, "zero time.Time")
+}
+
+// TestItemCreate_OrdinaryPublishedAtUnaffected proves the new checks leave
+// an unremarkable date alone.
+func TestItemCreate_OrdinaryPublishedAtUnaffected(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-range-create-ok")
+
+	if _, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(itemOrdinaryPublishedAt),
+	}}); err != nil {
+		t.Fatalf("ordinary published_at was rejected: %v", err)
+	}
+}
+
+// TestItemUpdate_RejectsOutOfRangePublishedAt is the same rule, exercised on
+// Update.
+func TestItemUpdate_RejectsOutOfRangePublishedAt(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-range-update")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(itemOrdinaryPublishedAt),
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	_, err = srv.Update(ctx, &affv1.ItemServiceUpdateRequest{
+		Item: &affv1.Item{
+			Id: created.GetItem().GetId(), Title: "T2", SummaryText: "s2", BodyHtml: "<p>b2</p>",
+			PublishedAt: timestamppb.New(itemOutOfRangeYear),
+		},
+		ExpectedVersion: created.GetItem().GetVersion(),
+	})
+	itemAssertRangeRejection(t, err, "four-digit")
+}
+
+// TestItemUpdate_RejectsZeroPublishedAt is the zero-value rule, exercised
+// on Update.
+func TestItemUpdate_RejectsZeroPublishedAt(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-zero-update")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(itemOrdinaryPublishedAt),
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	_, err = srv.Update(ctx, &affv1.ItemServiceUpdateRequest{
+		Item: &affv1.Item{
+			Id: created.GetItem().GetId(), Title: "T2", SummaryText: "s2", BodyHtml: "<p>b2</p>",
+			PublishedAt: timestamppb.New(time.Time{}),
+		},
+		ExpectedVersion: created.GetItem().GetVersion(),
+	})
+	itemAssertRangeRejection(t, err, "zero time.Time")
+}
+
+// TestItemUpdate_UnrelatedEditNotBlockedByOmittedPublishedAt proves an
+// Update that does not touch published_at at all (an ordinary title/body
+// edit) is never rejected by the range check, even implicitly — the range
+// check only runs when the caller actively supplies a published_at.
+func TestItemUpdate_UnrelatedEditNotBlockedByOmittedPublishedAt(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-range-update-omit")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(itemOrdinaryPublishedAt),
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if _, err := srv.Update(ctx, &affv1.ItemServiceUpdateRequest{
+		Item: &affv1.Item{
+			Id: created.GetItem().GetId(), Title: "T2", SummaryText: "s2", BodyHtml: "<p>b2</p>",
+			// PublishedAt deliberately omitted: Update must keep old.PublishedAt
+			// and must not run the range check against it.
+		},
+		ExpectedVersion: created.GetItem().GetVersion(),
+	}); err != nil {
+		t.Fatalf("update omitting published_at was rejected: %v", err)
+	}
+}
+
+// TestItemPublishCorrection_RejectsOutOfRangeStamp proves PublishCorrection
+// refuses to insert a correction when the stamp it derives (feed's stored
+// newest + 1 second) would fall outside the four-digit-year range —
+// PublishCorrectionRequest carries no published_at field, so this exercises
+// the pre-write validation of the computed stamp rather than caller input.
+func TestItemPublishCorrection_RejectsOutOfRangeStamp(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-range-correction")
+
+	// The last representable instant within the four-digit-year bound: any
+	// correction stamped strictly after it (newest + 1s, per PublishCorrection's
+	// own no-backdating rule) necessarily overflows into year 10000.
+	boundary := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	original, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(boundary),
+	}})
+	if err != nil {
+		t.Fatalf("create at year-9999 boundary: %v", err)
+	}
+
+	_, err = srv.PublishCorrection(ctx, &affv1.ItemServicePublishCorrectionRequest{
+		CorrectsItemId: original.GetItem().GetId(), Title: "Fix", SummaryText: "fixed", BodyHtml: "<p>fixed</p>",
+	})
+	itemAssertRangeRejection(t, err, "four-digit")
+}
+
+// TestItemPromoteSample_RejectsOutOfRangeCommittedPublishedAt proves
+// PromoteSample surfaces an error rather than silently succeeding when the
+// stamp it commits (entirely internal to store.Store.PromoteSample — the
+// request has no published_at field) lands outside the four-digit-year
+// range. Unlike Create/Update/PublishCorrection this cannot be a pre-write
+// InvalidArgument: there is no caller-supplied field to blame, and the
+// write has already committed by the time this package can see the result.
+func TestItemPromoteSample_RejectsOutOfRangeCommittedPublishedAt(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-range-promote")
+
+	boundary := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	if _, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(boundary),
+	}}); err != nil {
+		t.Fatalf("create at year-9999 boundary: %v", err)
+	}
+
+	payload := `[{"candidate_id":"c1","title":"Promoted","summary_text":"promoted summary","body_html":"<p>promoted</p>"}]`
+	sampleID, err := st.PutSample(ctx, feedID, []byte(payload), 10, 20, 0.01, time.Hour)
+	if err != nil {
+		t.Fatalf("put sample: %v", err)
+	}
+
+	_, err = srv.PromoteSample(ctx, &affv1.ItemServicePromoteSampleRequest{
+		SampleId: strconv.FormatInt(sampleID, 10), CandidateId: "c1",
+	})
+	if err == nil {
+		t.Fatal("expected promote of a sample stamped past the feed's four-digit-year boundary to be refused")
+	}
+	if got := status.Code(err); got != codes.Internal {
+		t.Fatalf("expected Internal (this is a store-side data-consistency problem, not a caller mistake), got %v (%v)", got, err)
+	}
+}
+
+// --- sub-second published_at / rendered-pubDate collisions -----------------
+//
+// RSS's RFC 822 pubDate (internal/render's RFC822, §5.1) has one-second
+// resolution. Two items whose published_at differ only within the same
+// second render byte-identical — the exact "one item is invisible forever,
+// silently" failure §5.5 describes for Slack's bookmark model, which
+// advances a watermark past the newer of the two and never revisits the
+// other. These tests prove Create/Update close that gap at the point
+// published_at enters the system, and that the collision-retry path (for
+// the race Create's separate read-then-insert leaves open) actually runs.
+
+// TestItemCreate_SubSecondPublishedAtTruncatedToWholeSecond proves a
+// caller-supplied sub-second published_at does not survive Create: what
+// comes back (and what is stored) has no sub-second component, so it
+// round-trips through RFC 822 unchanged.
+func TestItemCreate_SubSecondPublishedAtTruncatedToWholeSecond(t *testing.T) {
+	srv, _, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, srv.st, "feed-subsecond-create")
+
+	withFrac := time.Date(2026, 8, 9, 12, 0, 0, 750_000_000, time.UTC) // .75s
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(withFrac),
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got := created.GetItem().GetPublishedAt().AsTime()
+	if !got.Equal(withFrac.Truncate(time.Second)) {
+		t.Fatalf("published_at = %v, want %v (truncated to whole seconds)", got, withFrac.Truncate(time.Second))
+	}
+	if got.Nanosecond() != 0 {
+		t.Fatalf("published_at retained a sub-second component: %v", got)
+	}
+}
+
+// TestItemCreate_RejectsSubSecondCollisionWithExistingItem proves two items
+// whose explicit published_at values differ only within the same second
+// cannot both exist in one feed: the second Create is refused as backdated
+// (RULE-7, §5.5), because once truncated it is at-or-before the feed's
+// current newest — exactly what would otherwise render as a duplicate
+// pubDate.
+func TestItemCreate_RejectsSubSecondCollisionWithExistingItem(t *testing.T) {
+	srv, _, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, srv.st, "feed-subsecond-collide")
+
+	base := time.Date(2026, 8, 9, 12, 0, 0, 100_000_000, time.UTC) // .1s
+	if _, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "First", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(base),
+	}}); err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+
+	// 400ms later — a different instant, but the same second once truncated.
+	_, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "Second", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(base.Add(400 * time.Millisecond)),
+	}})
+	if err == nil {
+		t.Fatal("expected a sub-second-apart published_at (same second once truncated) to be refused")
+	}
+	if got := status.Code(err); got != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got %v (%v)", got, err)
+	}
+}
+
+// TestItemCreate_CollisionRetryBumpsByWholeSecond proves the +1-second
+// collision retry (itemTimestampRetries, mirroring PromoteSample's and
+// PublishCorrection's identical pattern) actually runs, not merely
+// compiles: itemCreateAfterReadNewestHook opens the same race window
+// PromoteSample's promoteAfterReadNewestHook does in samples_test.go —
+// inserting a colliding row through the store directly, after Create has
+// already read "newest" and validated against it, but before Create's own
+// insert. Create must still succeed, landing one whole second after the
+// row that snuck in ahead of it, rather than failing or silently landing on
+// top of it.
+func TestItemCreate_CollisionRetryBumpsByWholeSecond(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-collision-retry")
+
+	pinned := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	srv.now = func() time.Time { return pinned }
+
+	t.Cleanup(func() { itemCreateAfterReadNewestHook = nil })
+	itemCreateAfterReadNewestHook = func() {
+		itemCreateAfterReadNewestHook = nil // fire exactly once
+		sneak := model.Item{
+			FeedID:      feedID,
+			ItemKey:     "snuck-in-ahead",
+			ContentHash: "snuck-in-ahead-hash",
+			Title:       "Snuck in ahead",
+			SummaryText: "s",
+			BodyHTML:    "<p>b</p>",
+			PublishedAt: pinned,
+			Origin:      model.OriginManual,
+		}
+		if _, err := st.InsertItem(ctx, sneak); err != nil {
+			t.Fatalf("inserting colliding row inside the hook: %v", err)
+		}
+	}
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "Racing create", SummaryText: "s", BodyHtml: "<p>b</p>",
+	}})
+	if err != nil {
+		t.Fatalf("create: %v (collision retry should have absorbed the race, not surfaced it)", err)
+	}
+
+	got := created.GetItem().GetPublishedAt().AsTime()
+	want := pinned.Add(time.Second)
+	if !got.Equal(want) {
+		t.Fatalf("published_at = %v, want %v (one whole second after the row that won the race)", got, want)
+	}
+
+	// And the two rows are genuinely distinct once rendered, not merely
+	// distinct in Go's in-memory representation.
+	sneakIt, err := st.GetItem(ctx, "snuck-in-ahead")
+	if err != nil {
+		t.Fatalf("get snuck-in-ahead item: %v", err)
+	}
+	if got.Equal(sneakIt.PublishedAt) {
+		t.Fatalf("racing create landed on the exact same published_at as the row that won the race: %v", got)
+	}
+}
+
+// TestItemUpdate_SubSecondPublishedAtTruncatedToWholeSecond mirrors the
+// Create test above, for Update.
+func TestItemUpdate_SubSecondPublishedAtTruncatedToWholeSecond(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-subsecond-update")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)),
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	withFrac := time.Date(2026, 8, 9, 13, 0, 0, 250_000_000, time.UTC) // .25s, strictly after
+	updated, err := srv.Update(ctx, &affv1.ItemServiceUpdateRequest{
+		Item: &affv1.Item{
+			Id: created.GetItem().GetId(), Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+			PublishedAt: timestamppb.New(withFrac),
+		},
+		ExpectedVersion: created.GetItem().GetVersion(),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got := updated.GetItem().GetPublishedAt().AsTime()
+	if !got.Equal(withFrac.Truncate(time.Second)) {
+		t.Fatalf("published_at = %v, want %v (truncated to whole seconds)", got, withFrac.Truncate(time.Second))
+	}
+	if got.Nanosecond() != 0 {
+		t.Fatalf("published_at retained a sub-second component: %v", got)
 	}
 }

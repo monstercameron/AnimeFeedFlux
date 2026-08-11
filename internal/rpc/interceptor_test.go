@@ -12,6 +12,7 @@ import (
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/internal/auth"
+	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 )
 
 // withSessionMetadata attaches token as incoming gRPC metadata under
@@ -109,6 +110,126 @@ func TestElevatedSessionBlockedFromFeedService(t *testing.T) {
 		if _, err := srv.authorize(ContextWithSessionToken(t.Context(), token), method); err != nil {
 			t.Errorf("%s: elevated session should reach this method, got %v", method, err)
 		}
+	}
+}
+
+// TestElevatedSessionDefaultDeniesUnlistedMethod asserts the default-deny
+// property directly, rather than by listing every known RPC: a method name
+// that exists nowhere — not in elevatedAllowedMethods, not registered on any
+// real service, standing in for an RPC added after this code was written —
+// must still be refused for an elevated session. An allowlist has this
+// property by construction (unlisted == absent == denied); a denylist would
+// not, which is why this test targets a name that is guaranteed to never
+// appear on either list rather than one that happens to be missing today.
+func TestElevatedSessionDefaultDeniesUnlistedMethod(t *testing.T) {
+	srv, st, _ := newTestServer(t)
+	plain, hashes, err := auth.GenerateCodes(1)
+	if err != nil {
+		t.Fatalf("generate codes: %v", err)
+	}
+	if err := st.StoreRecoveryCodes(t.Context(), hashes); err != nil {
+		t.Fatalf("store recovery codes: %v", err)
+	}
+
+	ctx, fts := withTransportStream(withPeerIP(t.Context(), "10.6.0.2"), affv1.AuthService_RecoverWithCode_FullMethodName)
+	if _, err := srv.RecoverWithCode(ctx, &affv1.AuthServiceRecoverWithCodeRequest{RecoveryCode: plain[0]}); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	token := fts.header.Get(SessionTokenHeader)[0]
+
+	const unlistedMethod = "/aff.v1.NotYetInventedService/DoSomethingNew"
+	_, err = srv.authorize(ContextWithSessionToken(t.Context(), token), unlistedMethod)
+	if err == nil {
+		t.Fatal("elevated session reached an RPC that has never been added to elevatedAllowedMethods")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Errorf("code = %v, want PermissionDenied", status.Code(err))
+	}
+}
+
+// TestFullSessionScopeIsUnaffected: an ordinary (non-elevated) session's
+// scope round-trips as "full" through the interceptor, and it is unaffected
+// by the elevated-scope enforcement path — every method it could reach
+// before this change, it can still reach.
+func TestFullSessionScopeIsUnaffected(t *testing.T) {
+	srv, st, secret := newTestServer(t)
+	token := loginAndGetToken(t, srv, secret, time.Now(), "10.6.0.3")
+
+	sess, err := st.GetSessionByTokenHash(t.Context(), auth.HashToken(token))
+	if err != nil {
+		t.Fatalf("lookup session: %v", err)
+	}
+	id, err := srv.sessionIDByHash(t.Context(), sess.TokenHash)
+	if err != nil {
+		t.Fatalf("lookup session id: %v", err)
+	}
+
+	for _, method := range []string{
+		affv1.AuthService_Session_FullMethodName,
+		affv1.AuthService_ListSessions_FullMethodName,
+		"/aff.v1.FeedService/List",
+	} {
+		if _, err := srv.authorize(ContextWithSessionToken(t.Context(), token), method); err != nil {
+			t.Errorf("%s: full session should reach this method, got %v", method, err)
+		}
+	}
+
+	scope, err := st.SessionScope(t.Context(), id)
+	if err != nil {
+		t.Fatalf("SessionScope: %v", err)
+	}
+	if scope != store.SessionScopeFull {
+		t.Errorf("full session's persisted scope = %q, want %q", scope, store.SessionScopeFull)
+	}
+}
+
+// TestElevatedSessionScopeIsPersistedOnTheSessionRow proves the scope an
+// elevated session is enforced against is not merely process-local state:
+// authorize() writes it onto the session's own row
+// (migrations/0005_session_scope.sql), where anything reading the store
+// directly — not just this process's in-memory tracker — can see it.
+func TestElevatedSessionScopeIsPersistedOnTheSessionRow(t *testing.T) {
+	srv, st, _ := newTestServer(t)
+	plain, hashes, err := auth.GenerateCodes(1)
+	if err != nil {
+		t.Fatalf("generate codes: %v", err)
+	}
+	if err := st.StoreRecoveryCodes(t.Context(), hashes); err != nil {
+		t.Fatalf("store recovery codes: %v", err)
+	}
+
+	ctx, fts := withTransportStream(withPeerIP(t.Context(), "10.6.0.4"), affv1.AuthService_RecoverWithCode_FullMethodName)
+	if _, err := srv.RecoverWithCode(ctx, &affv1.AuthServiceRecoverWithCodeRequest{RecoveryCode: plain[0]}); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	token := fts.header.Get(SessionTokenHeader)[0]
+
+	id, err := srv.sessionIDByHash(t.Context(), auth.HashToken(token))
+	if err != nil {
+		t.Fatalf("lookup session id: %v", err)
+	}
+
+	// Before any authorize() call the row still shows the schema default —
+	// the tracker knows this session is elevated, but nothing has written
+	// that onto the row yet.
+	before, err := st.SessionScope(t.Context(), id)
+	if err != nil {
+		t.Fatalf("SessionScope before authorize: %v", err)
+	}
+	if before != store.SessionScopeFull {
+		t.Errorf("scope before any authorize() call = %q, want %q (the schema default)", before, store.SessionScopeFull)
+	}
+
+	if _, err := srv.authorize(ContextWithSessionToken(t.Context(), token), affv1.AuthService_ChangePassword_FullMethodName); err != nil {
+		t.Fatalf("authorize on an allowed method: %v", err)
+	}
+
+	after, err := st.SessionScope(t.Context(), id)
+	if err != nil {
+		t.Fatalf("SessionScope after authorize: %v", err)
+	}
+	if after != store.SessionScopeElevated {
+		t.Errorf("scope after authorize() = %q, want %q", after, store.SessionScopeElevated)
 	}
 }
 

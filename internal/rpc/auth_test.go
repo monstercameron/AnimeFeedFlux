@@ -885,3 +885,24 @@ func TestPasswordResetTokenNeverLogged(t *testing.T) {
 		}
 	}
 }
+
+// TestPasswordResetNotOnGRPCSurface is the structural half of the
+// reachability decision documented on IssuePasswordResetToken/
+// CompletePasswordReset above: neither is a proto RPC, so no network caller
+// — authenticated or not — can reach them through the bridge at all. The
+// only caller is cmd/aff/admin_cmd.go's `aff admin reset-password`, which
+// requires direct filesystem access to the SQLite file (the same local-only
+// authorization tier as `aff admin init`/`aff admin reset`). This asserts
+// that fact against the generated grpc.ServiceDesc rather than trusting a
+// comment to stay true across future proto edits: if a later change adds
+// these to auth.proto, this test fails and forces the reachability decision
+// to be revisited deliberately instead of silently.
+func TestPasswordResetNotOnGRPCSurface(t *testing.T) {
+	for _, m := range affv1.AuthService_ServiceDesc.Methods {
+		if m.MethodName == "IssuePasswordResetToken" || m.MethodName == "CompletePasswordReset" {
+			t.Fatalf("%q is registered as a gRPC method on AuthService — password reset issuance/completion "+
+				"must stay local-only (CLI, direct DB access), never reachable over the bridge "+
+				"by any caller, authenticated or not", m.MethodName)
+		}
+	}
+}

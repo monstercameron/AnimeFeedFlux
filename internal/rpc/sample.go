@@ -268,7 +268,7 @@ func (s *SampleServer) Sample(ctx context.Context, req *affv1.SampleServiceSampl
 		return nil, err
 	}
 
-	feed, result, candidates, cerr := s.prepareSample(ctx, req.GetFeedId(), sampleSize)
+	feed, result, candidates, cerr := s.prepareSample(ctx, req.GetFeedId(), sampleSize, req.GetDraft())
 	if cerr != nil {
 		return nil, cerr
 	}
@@ -299,7 +299,7 @@ func (s *SampleServer) Sample(ctx context.Context, req *affv1.SampleServiceSampl
 // — and only then — call generate.Sample. Every early return here happens
 // BEFORE deps.Provider.Generate is ever reachable, which is what "no
 // provider call is made at all" means concretely.
-func (s *SampleServer) prepareSample(ctx context.Context, feedID int64, sampleSize int32) (model.Feed, generate.SampleResult, []*affv1.SampleCandidate, error) {
+func (s *SampleServer) prepareSample(ctx context.Context, feedID int64, sampleSize int32, draft *affv1.SampleDraft) (model.Feed, generate.SampleResult, []*affv1.SampleCandidate, error) {
 	feed, spec, err := s.cfg.Feeds.GetFeedForSample(ctx, feedID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -312,6 +312,18 @@ func (s *SampleServer) prepareSample(ctx context.Context, feedID int64, sampleSi
 	}
 	spec.ItemsPerRun = int(sampleSize)
 	spec.Trigger = "" // Sample never writes a run row; Trigger is meaningless here (runner.go)
+
+	// Apply the unsaved editor draft, if one was sent. This is what makes
+	// §22's J3 loop possible without committing an experiment over the
+	// working recipe first — see SampleDraft's doc comment in the proto.
+	//
+	// Applied AFTER the saved spec is loaded and BEFORE any validation or
+	// provider call, so a draft is subject to exactly the same checks a
+	// saved recipe is. Nothing here is written back: `spec` is a value, and
+	// this function never persists it.
+	if err := smpApplyDraft(&spec, draft); err != nil {
+		return model.Feed{}, generate.SampleResult{}, nil, err
+	}
 
 	// Kill switch, checked BEFORE anything that could reach the provider.
 	enabled, reason, err := s.cfg.Enabled(ctx)
@@ -417,7 +429,7 @@ func (s *SampleServer) SampleStream(req *affv1.SampleServiceSampleStreamRequest,
 	}
 
 	ctx := stream.Context()
-	feed, result, candidates, cerr := s.prepareSample(ctx, req.GetFeedId(), sampleSize)
+	feed, result, candidates, cerr := s.prepareSample(ctx, req.GetFeedId(), sampleSize, req.GetDraft())
 
 	var sampleID string
 	if cerr == nil {
@@ -747,3 +759,55 @@ func (s *SampleServer) noveltyVerdict(ctx context.Context, feedID int64, it mode
 		NearestItemTitle: nearest,
 	}
 }
+
+// smpApplyDraft overlays the unsaved editor draft onto the loaded spec.
+//
+// Empty fields mean "keep what is saved", so a client sends only what the
+// operator actually changed and a draft can never blank a recipe field by
+// omission.
+//
+// The prompt templates are COMPILED here, against a fully populated dummy
+// context, for the same reason §7 makes ValidateSpec execute them: text/
+// template's Parse does not check that {{.Foo}} names a real field — that
+// surfaces only at Execute. Catching it here turns "the sample failed" into
+// a named field error at the moment the operator typed it, rather than a
+// provider call that spends money and then fails on a template the server
+// could have rejected for free.
+func smpApplyDraft(spec *generate.Spec, draft *affv1.SampleDraft) error {
+	if draft == nil {
+		return nil
+	}
+	if v := draft.GetSystemPrompt(); v != "" {
+		spec.SystemPrompt = v
+	}
+	if v := draft.GetUserPrompt(); v != "" {
+		spec.UserPromptTemplate = v
+	}
+	if v := draft.GetModel(); v != "" {
+		spec.Model = v
+	}
+	if v := draft.GetEffort(); v != "" {
+		if !smpValidEfforts[v] {
+			return status.Errorf(codes.InvalidArgument,
+				"draft.effort %q is not one of smart, fast, quick", v)
+		}
+		spec.Effort = v
+	}
+	// generate.ValidateTemplate is what feedspec.validatePrompts uses; called
+	// directly here so the failure names WHICH prompt, which a []Problem
+	// would also carry but at the cost of running every unrelated spec check
+	// (slug uniqueness, cron, budgets) against a draft that changed none of
+	// them.
+	if err := generate.ValidateTemplate(spec.SystemPrompt); err != nil {
+		return status.Errorf(codes.InvalidArgument, "draft system_prompt: %v", err)
+	}
+	if err := generate.ValidateTemplate(spec.UserPromptTemplate); err != nil {
+		return status.Errorf(codes.InvalidArgument, "draft user_prompt: %v", err)
+	}
+	return nil
+}
+
+// smpValidEfforts mirrors internal/rpc's validProviderEfforts — SchemaFlux's
+// Speed tiers (PLAN.md §8.1). A draft must not be able to smuggle in a tier
+// the settings path rejects.
+var smpValidEfforts = map[string]bool{"smart": true, "fast": true, "quick": true}

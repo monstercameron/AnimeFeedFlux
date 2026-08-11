@@ -206,6 +206,54 @@ func itemNewestPublished(ctx context.Context, db itemQuerier, feedID, excludeID 
 	return t, nil
 }
 
+// itemMaxPublishedAtYear is one past the highest year every renderer's
+// four-digit-year date layout can actually round-trip. Fuzzing found that
+// RFC822 and RFC3339 (internal/render/dates.go) each format a year >= 10000
+// into a string their OWN reference layout ("2006") then rejects on Parse —
+// time.Time.Format writes as many digits as the year needs, but Go's
+// reference-layout Parse always consumes exactly four, so the two
+// operations silently stop being inverses past year 9999. §5.1/§5.2/§5.3
+// all promise a four-digit year; nothing between here and the renderer
+// otherwise bounds published_at at all, so this is where that promise is
+// actually enforced rather than merely documented.
+const itemMaxPublishedAtYear = 9999
+
+// itemValidatePublishedAt rejects a published_at that cannot survive a round
+// trip through every feed format's date layout, and separately rejects the
+// exact zero time.Time value. Two checks, not one:
+//
+//   - The zero value (0001-01-01T00:00:00Z) sits INSIDE the four-digit-year
+//     range and parses just fine — it is wrong for a different reason. In
+//     Go, `var t time.Time` — an uninitialized field, a struct literal that
+//     forgot to set PublishedAt, a bug in some future caller — is far more
+//     likely to reach this path than anyone ever intending to publish an
+//     item dated the year 1, and unlike an out-of-range year it renders as
+//     a plausible-looking "0001-01-01" pubDate instead of failing loudly
+//     anywhere downstream. A renderer that quietly emits it produces a
+//     document that disagrees with what the caller almost certainly meant,
+//     which is worse than a rejection here.
+//   - The four-digit-year bound is the fuzz-found gap itself: a year of
+//     10000 or more (and, symmetrically, a year below 1 — Go's proleptic
+//     calendar allows negative/zero years, RFC 822/3339 four-digit years do
+//     not) formats into a string no reader can parse back.
+//
+// Distinguished from itemRejectBackdated's message on purpose: an operator
+// who gets "date rejected" with no reason tends to retry the exact same
+// request, and RULE-7 (relative to another item) and this range check
+// (absolute, about the value itself) need different fixes.
+func itemValidatePublishedAt(t time.Time) error {
+	if t.IsZero() {
+		return status.Error(codes.InvalidArgument,
+			"rpc: published_at is the zero time.Time (0001-01-01T00:00:00Z) — this is almost always an unset/uninitialized value rather than an intended date; set an explicit published_at or omit the field to default to now")
+	}
+	if y := t.Year(); y < 1 || y > itemMaxPublishedAtYear {
+		return status.Errorf(codes.InvalidArgument,
+			"rpc: published_at year %d is outside the four-digit range [0001, %d] that every feed format's date layout requires (PLAN.md §5.1/§5.2/§5.3) — this is a format-range rejection, not the RULE-7 backdating rule",
+			y, itemMaxPublishedAtYear)
+	}
+	return nil
+}
+
 // itemRejectBackdated enforces RULE-7 (PLAN.md §5.5): Slack's bookmark model
 // fetches only items dated strictly later than the last one it retrieved, so
 // a published_at at or before the feed's current newest item is invisible to
@@ -237,6 +285,20 @@ func itemContentHash(feedID int64, title, summary, body, link string) string {
 // its reasoning: a handful of attempts is the point past which colliding on
 // every single try stops being a race and starts being a bug worth surfacing.
 const itemTimestampRetries = 5
+
+// itemCreateAfterReadNewestHook, when non-nil, runs right after Create has
+// read the feed's current newest published_at and validated the new item's
+// stamp against it, but before the insert attempt — mirroring
+// internal/store/samples.go's promoteAfterReadNewestHook exactly, for the
+// identical reason: Create's "read newest" and "insert" are two separate
+// statements (not one transaction, same as PromoteSample), so two Create
+// calls racing for the store's single writer connection (store.go:
+// writer.SetMaxOpenConns(1)) can interleave between them. That window is
+// otherwise unreachable in a single-process, timing-independent test; this
+// hook lets item_test.go force it open deliberately, proving the
+// collision-retry path (below) actually runs rather than merely compiling.
+// Production leaves this nil.
+var itemCreateAfterReadNewestHook func()
 
 // itemIsUniquePublishedAtViolation mirrors internal/store/samples.go's
 // unexported isUniquePublishedAtViolation (duplicated here for the same
@@ -546,13 +608,37 @@ func (s *ItemServer) Create(ctx context.Context, req *affv1.ItemServiceCreateReq
 	if ts := in.GetPublishedAt(); ts != nil {
 		published = ts.AsTime()
 	}
+	// Truncated to whole seconds BEFORE any comparison: RFC 822 pubDate
+	// (internal/render's RFC822, §5.1) has one-second resolution, and
+	// items.published_at's UNIQUE(feed_id, published_at) constraint only
+	// actually prevents two items sharing a rendered pubDate (§5.5 — the
+	// invisible-forever failure Slack's bookmark model produces) if what
+	// gets compared and stored is at that same granularity. Mirrors
+	// PublishCorrection's identical truncation below and
+	// store.truncatePublishedAt (internal/store/items.go), which now also
+	// truncates on write as a second line of defense.
+	published = published.Truncate(time.Second)
+	if err := itemValidatePublishedAt(published); err != nil {
+		return nil, err
+	}
 
 	newest, err := itemNewestPublished(ctx, db, feedID, 0)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "rpc: %v", err)
 	}
+	// Also truncated: a legacy row written before this fix existed (or a
+	// row written directly by internal/store/runs.go's CommitRun, which
+	// this package does not own) could still carry a sub-second
+	// published_at. Comparing at second granularity on both sides keeps
+	// "strictly after" meaning what it says once rendered, regardless of
+	// what precision the newest existing row happens to be stored at.
+	newest = newest.Truncate(time.Second)
 	if err := itemRejectBackdated(published, newest, slug); err != nil {
 		return nil, err
+	}
+
+	if itemCreateAfterReadNewestHook != nil {
+		itemCreateAfterReadNewestHook()
 	}
 
 	it := model.Item{
@@ -565,11 +651,30 @@ func (s *ItemServer) Create(ctx context.Context, req *affv1.ItemServiceCreateReq
 		AnswerHTML:  in.GetAnswerHtml(),
 		Link:        in.GetLink(),
 		SourceName:  in.GetSourceName(),
-		PublishedAt: published,
 		Origin:      model.OriginManual,
 	}
-	id, err := s.st.InsertItem(ctx, it)
-	if err != nil {
+
+	// Retried at +1 second on a UNIQUE(feed_id, published_at) collision,
+	// exactly like PromoteSample (internal/store/samples.go) and
+	// PublishCorrection below: the reads above happen outside a
+	// transaction, so two Create calls that both read the same "newest"
+	// before either has inserted can both compute the same truncated
+	// stamp and both pass itemRejectBackdated — a real race, not a caller
+	// mistake, and truncating to one-second buckets makes that race far
+	// more likely to actually land in the same bucket than it was at
+	// nanosecond precision. Goes through the SAME collision-retry shape
+	// as those two call sites rather than a second mechanism beside it.
+	var id int64
+	for attempt := 0; ; attempt++ {
+		it.PublishedAt = published
+		id, err = s.st.InsertItem(ctx, it)
+		if err == nil {
+			break
+		}
+		if itemIsUniquePublishedAtViolation(err) && attempt < itemTimestampRetries {
+			published = published.Add(time.Second)
+			continue
+		}
 		return nil, status.Errorf(codes.Internal, "rpc: creating item: %v", err)
 	}
 
@@ -718,19 +823,50 @@ func (s *ItemServer) Update(ctx context.Context, req *affv1.ItemServiceUpdateReq
 
 	newPublished := old.PublishedAt
 	if ts := in.GetPublishedAt(); ts != nil {
-		newPublished = ts.AsTime()
-	}
-	if !newPublished.Equal(old.PublishedAt) {
-		// Excludes this item's own row from "the feed's current newest" —
-		// otherwise a no-op re-save of the newest item in a feed would be
-		// compared against itself and always rejected (RULE-7 is about
-		// backdating relative to OTHER items, not a stable timestamp).
-		newest, err := itemNewestPublished(ctx, db, old.FeedID, old.ID)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "rpc: %v", err)
-		}
-		if err := itemRejectBackdated(newPublished, newest, strconv.FormatInt(old.FeedID, 10)); err != nil {
+		// Truncated to whole seconds for the same reason Create truncates
+		// (RFC 822 pubDate has one-second resolution, §5.1/§5.5) — see the
+		// comment there.
+		candidate := ts.AsTime().Truncate(time.Second)
+		// Validated only when the caller actively supplies a value, not
+		// unconditionally on newPublished: an Update that leaves
+		// published_at untouched must still be able to fix an unrelated
+		// field (title, body) on a row whose published_at predates this
+		// check, rather than getting permanently stuck because of a value
+		// the caller never asked to change.
+		if err := itemValidatePublishedAt(candidate); err != nil {
 			return nil, err
+		}
+		// Compared against old.PublishedAt TRUNCATED, not old.PublishedAt
+		// itself: a row written before this fix existed (or by
+		// internal/store/runs.go's CommitRun, which this package does not
+		// own and which does not truncate) can still carry a sub-second
+		// published_at. A caller that round-trips that exact value back in
+		// — e.g. an edit that only touches title/body, PLAN.md §12.4's
+		// "an edit is not a rewind" pattern cmd/affseed/main.go's
+		// reviseNewsItem relies on — must see that as the no-op it is, not
+		// as "moved earlier" once truncation changes what the two sides
+		// compare equal to. Only actually adopt the truncated candidate
+		// (and require it to be strictly after the feed's newest) when the
+		// caller asked for a genuinely different second; a legacy
+		// sub-second row that nothing ever asks to change is left exactly
+		// as it was written, not silently rewritten out from under an
+		// unrelated edit.
+		if !candidate.Equal(old.PublishedAt.Truncate(time.Second)) {
+			// Excludes this item's own row from "the feed's current
+			// newest" — otherwise a no-op re-save of the newest item in a
+			// feed would be compared against itself and always rejected
+			// (RULE-7 is about backdating relative to OTHER items, not a
+			// stable timestamp).
+			newest, err := itemNewestPublished(ctx, db, old.FeedID, old.ID)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "rpc: %v", err)
+			}
+			// Truncated for the same legacy-row reason above.
+			newest = newest.Truncate(time.Second)
+			if err := itemRejectBackdated(candidate, newest, strconv.FormatInt(old.FeedID, 10)); err != nil {
+				return nil, err
+			}
+			newPublished = candidate
 		}
 	}
 
@@ -938,6 +1074,22 @@ func (s *ItemServer) PromoteSample(ctx context.Context, req *affv1.ItemServicePr
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "rpc: reloading promoted item %d: %v", itemID, err)
 	}
+	// PromoteSampleRequest has no published_at field (proto/aff/v1/
+	// item.proto): the stamp is entirely internal to store.Store.PromoteSample
+	// (internal/store/samples.go's promoteClock + the feed's stored newest),
+	// which is off-limits to edit from this package and already committed by
+	// the time we can see it. There is nothing here to reject BEFORE the
+	// write, so this checks the committed result instead: if it is somehow
+	// out of range (a corrupted "newest" upstream of the stamp, a future
+	// store regression), returning Internal rather than silently reporting
+	// success at least surfaces the inconsistency to the caller instead of
+	// producing an item that later fails to render/parse with no warning
+	// anyone saw at write time.
+	if verr := itemValidatePublishedAt(out.PublishedAt); verr != nil {
+		return nil, status.Errorf(codes.Internal,
+			"rpc: promoted item %d committed with published_at %s outside the range every feed format can render — this indicates upstream data corruption (e.g. the feed's stored newest published_at), not a caller mistake: %v",
+			itemID, out.PublishedAt.UTC().Format(time.RFC3339Nano), verr)
+	}
 	return &affv1.ItemServicePromoteSampleResponse{Item: itemToProto(out)}, nil
 }
 
@@ -1032,6 +1184,15 @@ func (s *ItemServer) PublishCorrection(ctx context.Context, req *affv1.ItemServi
 	stamp := now.Truncate(time.Second)
 	if !stamp.After(newest) {
 		stamp = newest.Add(time.Second)
+	}
+	// PublishCorrection's request has no published_at field (proto/aff/v1/
+	// item.proto) — stamp is derived entirely from s.now() and the feed's
+	// stored newest, never from caller input. Validating it here still
+	// matters: a corrupted "newest" already sitting in the database (e.g.
+	// legacy data written before this check existed) would otherwise
+	// silently propagate into this brand-new item via newest.Add(1s).
+	if err := itemValidatePublishedAt(stamp); err != nil {
+		return nil, err
 	}
 
 	key := s.ids.NewItemKey(now)
@@ -1335,6 +1496,15 @@ func (s *ItemServer) RevertRevision(ctx context.Context, req *affv1.ItemServiceR
 	}
 
 	if !updated.PublishedAt.Equal(old.PublishedAt) {
+		// Same range guard Update applies when it actually changes
+		// published_at, for the same reason: a revert can restore a
+		// published_at written before this check existed (item_revisions
+		// rows predate the fix and are never rewritten), and reverting TO an
+		// out-of-range value would reintroduce exactly the unrenderable
+		// document this check exists to prevent.
+		if err := itemValidatePublishedAt(updated.PublishedAt); err != nil {
+			return nil, err
+		}
 		// Same RULE-7 guard Update applies, and for the same reason: a revert
 		// is an ordinary edit, and an ordinary edit that backdates a feed's
 		// newest item is invisible to Slack forever regardless of how the

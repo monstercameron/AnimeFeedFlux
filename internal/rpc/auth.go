@@ -26,6 +26,7 @@ import (
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/internal/auth"
+	"github.com/monstercameron/AnimeFeedFlux/internal/bridge"
 	"github.com/monstercameron/AnimeFeedFlux/internal/config"
 	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 )
@@ -37,6 +38,17 @@ import (
 // so it travels out-of-band, and the bridge (transport layer) is the only
 // thing that reads this header and turns it into a __Host- cookie.
 const SessionTokenHeader = "x-aff-session-token"
+
+// SessionTicketHeader is the outgoing gRPC header Login/RecoverWithCode
+// attach a single-use login TICKET to — never the raw session token — for
+// any caller that arrived over the bridge (a real browser/WASM connection).
+// See internal/bridge/ticket.go's package doc comment for the full design:
+// a ticket is safe to hand back over the same socket the request came in on
+// (unlike SessionTokenHeader, whose value must never reach a browser) because
+// it is single-use, expires in seconds, and on its own authenticates nothing
+// — it only lets the NEXT WebSocket upgrade redeem the real session and
+// receive the cookie that actually authenticates future calls.
+const SessionTicketHeader = "x-aff-login-ticket"
 
 // elevatedSessionTTL is the "short-lived" window PLAN.md §12.2 commits to for
 // a recovery-code session: 10 minutes to change the password or re-enroll
@@ -89,6 +101,32 @@ type AuthServer struct {
 	// internal/auth/pepper.go's doc comment specify.
 	pepperKey     []byte
 	pepperVersion int
+
+	// tickets mints the single-use login tickets a bridge-transport caller
+	// gets in place of the raw session token (see SessionTicketHeader and
+	// internal/bridge/ticket.go). nil is a valid, if unusual, configuration
+	// — see issueSessionCredential's doc comment for what it means when a
+	// bridge caller shows up with no ticket store configured.
+	tickets *bridge.TicketStore
+
+	// devInsecureAuth relaxes two anti-abuse controls that exist to stop an
+	// ATTACKER and that, on a local dev instance, only ever stop the
+	// operator: TOTP replay rejection and login backoff. It changes nothing
+	// about whether a credential must be CORRECT — the password is still
+	// verified against argon2id and the code still has to be a valid TOTP
+	// for the enrolled secret.
+	//
+	// It exists because the dev-build login prefill (web/pages/auth/
+	// devfill_on.go) is meant to be a one-click sign-in and was not: a
+	// second click inside the same 30-second step replays a consumed step
+	// and is refused, and a few refused attempts then trip the backoff, so
+	// the more the operator retried the more stuck they got — reported live,
+	// repeatedly, on a dev box.
+	//
+	// Set ONLY from AFF_DEV_INSECURE_AUTH=1, which wire.go refuses to honour
+	// unless the listener is loopback-only, and which logs a WARN on every
+	// boot that enables it. See NewAuthServer's WithDevInsecureAuth.
+	devInsecureAuth bool
 }
 
 // AuthServerOption configures optional AuthServer behavior. Added as a
@@ -113,6 +151,41 @@ func WithPasswordPepper(key []byte, version int) AuthServerOption {
 		s.pepperKey = key
 		s.pepperVersion = version
 	}
+}
+
+// WithTicketStore wires the login-ticket store a bridge-transport Login/
+// RecoverWithCode mints from (see SessionTicketHeader). Without this option
+// (or in a test that never sets it), a bridge-transport call that succeeds
+// simply mints no ticket and sets no ticket header — see
+// issueSessionCredential's doc comment for why that is a safe degraded
+// state (the session itself is fine; only the browser has no way to redeem
+// it without hand-supplying a cookie some other way) rather than an error,
+// so every existing NewAuthServer(st, secretKey) call site written before
+// this option existed keeps compiling and passing unmodified.
+func WithTicketStore(tickets *bridge.TicketStore) AuthServerOption {
+	return func(s *AuthServer) { s.tickets = tickets }
+}
+
+// WithDevInsecureAuth turns off TOTP replay rejection and login backoff.
+//
+// **This must never be enabled on anything reachable from a network.** Both
+// controls it removes are real: replay rejection is what stops a code
+// observed over someone's shoulder (or captured once) from being reused
+// inside its 30-second window, and backoff is what makes online guessing
+// expensive. PLAN.md §4 requires both.
+//
+// What it does NOT do is accept a wrong credential. The password still goes
+// through argon2id and the code still has to validate against the enrolled
+// secret; only the "you already used this step" and "you have tried too
+// often" refusals are dropped. That keeps the blast radius to "a dev box is
+// as strong as password + a currently-valid TOTP, with no rate limit"
+// rather than "a dev box has no authentication".
+//
+// The gate lives at the wiring layer, not here: cmd/animefeedflux refuses to
+// pass this unless the admin listener is bound to loopback, so a config file
+// copied to a real host cannot quietly turn it on.
+func WithDevInsecureAuth() AuthServerOption {
+	return func(s *AuthServer) { s.devInsecureAuth = true }
 }
 
 // NewAuthServer wires an AuthServer against st, using secretKey to
@@ -234,7 +307,7 @@ func (s *AuthServer) Login(ctx context.Context, req *affv1.AuthServiceLoginReque
 	ip := clientIP(ctx)
 	now := s.now()
 
-	if s.backoff.blocked(ip, now) {
+	if !s.devInsecureAuth && s.backoff.blocked(ip, now) {
 		_ = s.store.RecordAuthEvent(ctx, "login", ip, false, "backoff active")
 		return nil, errAuthFailed
 	}
@@ -299,7 +372,7 @@ func (s *AuthServer) Login(ctx context.Context, req *affv1.AuthServiceLoginReque
 
 	s.backoff.recordSuccess(ip)
 	_ = s.store.RecordAuthEvent(ctx, "login", ip, true, "")
-	setSessionTokenHeader(ctx, rawToken)
+	s.issueSessionCredential(ctx, now, rawToken)
 
 	return &affv1.AuthServiceLoginResponse{Session: toProtoSession(id, sess, true)}, nil
 }
@@ -315,7 +388,7 @@ func (s *AuthServer) RecoverWithCode(ctx context.Context, req *affv1.AuthService
 	ip := clientIP(ctx)
 	now := s.now()
 
-	if s.backoff.blocked(ip, now) {
+	if !s.devInsecureAuth && s.backoff.blocked(ip, now) {
 		_ = s.store.RecordAuthEvent(ctx, "recover", ip, false, "backoff active")
 		return nil, errAuthFailed
 	}
@@ -358,7 +431,7 @@ func (s *AuthServer) RecoverWithCode(ctx context.Context, req *affv1.AuthService
 
 	s.backoff.recordSuccess(ip)
 	_ = s.store.RecordAuthEvent(ctx, "recover", ip, true, "")
-	setSessionTokenHeader(ctx, rawToken)
+	s.issueSessionCredential(ctx, now, rawToken)
 
 	return &affv1.AuthServiceRecoverWithCodeResponse{
 		Session:                toProtoSession(id, sess, true),
@@ -369,16 +442,50 @@ func (s *AuthServer) RecoverWithCode(ctx context.Context, req *affv1.AuthService
 // --- Password reset tokens -------------------------------------------------
 //
 // internal/auth/reset.go's NewResetToken/VerifyResetToken are complete and
-// tested (SEC-31), but PLAN.md §12.2's actual documented recovery journey
-// (J7) is built entirely on recovery codes — RecoverWithCode above — not a
-// mailed or displayed reset link; no AuthService RPC or proto message for a
-// reset-token flow exists (proto/aff/v1/auth.proto is out of scope for this
-// change). IssuePasswordResetToken and CompletePasswordReset below are the
-// orchestration and single-use enforcement (SEC-33/34) those primitives were
-// missing — store.CompletePasswordReset does the actual atomic
-// mark-used+rewrite-password+revoke-all-sessions in one transaction — so
-// that wiring a real RPC onto them later, once one is designed, is a thin
-// pass-through rather than a rewrite of the security-critical part.
+// tested (SEC-31). IssuePasswordResetToken and CompletePasswordReset below
+// are the orchestration and single-use enforcement (SEC-33/34) on top of
+// them — store.CompletePasswordReset does the actual atomic
+// mark-used+rewrite-password+revoke-all-sessions in one transaction.
+//
+// Reachability decision (closing SEC-31/33's "zero callers" gap): NEITHER
+// method is a proto RPC, and none should be added. AuthService's whole
+// design (see the service doc comment above) is "every RPC is reached only
+// through a session minted by Login/RecoverWithCode, checked by an
+// interceptor on every call" — but a caller invoking IssuePasswordResetToken
+// is, by definition, one who cannot get a session (that is the entire point
+// of a password reset). There is no way to require authentication on that
+// call without defeating its purpose, and with a single admin account and no
+// email infrastructure (PLAN.md §12.2), an unauthenticated network RPC that
+// mints a reset token would just be an unauthenticated "take over the only
+// account" RPC. So issuing cannot be exposed over the bridge at all.
+// Completing inherits the same answer rather than a weaker one: this system
+// has no channel to deliver a freshly minted raw token to a browser that
+// doesn't already pass through the same machine issuing it, so splitting
+// "issue" (local) from "complete" (networked) would add a whole gRPC
+// service method for zero actual capability while growing the unauthenticated
+// attack surface for no reason.
+//
+// The only caller is `aff admin reset-password` (cmd/aff/admin_cmd.go),
+// which — like `aff admin init`/`aff admin reset` — requires direct
+// filesystem access to the SQLite file as its authorization; it calls
+// IssuePasswordResetToken and CompletePasswordReset as ordinary Go methods
+// in the same process, never over a network, and mints+consumes the token in
+// one invocation so the raw value never needs to be displayed, stored, or
+// carried anywhere. Unlike `aff admin reset`, it leaves TOTP enrollment and
+// recovery codes untouched — the scenario it exists for is "forgot the
+// password but the other factors are still fine", where blowing away a
+// working TOTP enrollment and burning a full set of recovery codes (which
+// `aff admin reset` does, by design) is real, avoidable cost. Sessions are
+// still fully revoked (SEC-33), because that property is unconditional.
+// TestPasswordResetNotOnGRPCSurface (auth_test.go) makes this a checked
+// invariant, not just a comment: it fails if a future proto change ever adds
+// either method to AuthService.
+//
+// PLAN.md §11's "aff admin init and aff admin reset are the only local-only
+// commands" and §12.2's silence on a third recovery path are now stale
+// against this and should be updated to mention `aff admin reset-password`
+// alongside them — noted here rather than edited in PLAN.md itself, which is
+// out of scope for this change.
 
 // IssuePasswordResetToken mints a fresh single-use reset token and persists
 // only its SHA-256 hash (internal/auth/reset.go: "raw is returned to the
@@ -489,7 +596,21 @@ func (s *AuthServer) Session(ctx context.Context, _ *affv1.AuthServiceSessionReq
 	if err != nil {
 		return nil, status.Error(codes.Unauthenticated, "invalid session")
 	}
-	return &affv1.AuthServiceSessionResponse{Session: toProtoSession(cs.ID, sess, true)}, nil
+	// The recovery-code count rides along on the session lookup rather than
+	// getting its own RPC: it is account state the admin app wants at the
+	// same moments it wants "am I signed in", and a second round trip for
+	// one integer would be a worse trade. A failure to count is NOT a
+	// failure to report the session — being unable to say how many codes
+	// remain must not log anybody out — so the error is logged and the
+	// count reported as zero-unknown, with the session still returned.
+	remaining, err := s.store.CountUnusedRecoveryCodes(ctx)
+	if err != nil {
+		remaining = 0
+	}
+	return &affv1.AuthServiceSessionResponse{
+		Session:                toProtoSession(cs.ID, sess, true),
+		RemainingRecoveryCodes: int32(remaining),
+	}, nil
 }
 
 // --- ChangePassword --------------------------------------------------------
@@ -771,6 +892,12 @@ func (s *AuthServer) verifyTOTPCode(ctx context.Context, code string, now time.T
 	}
 	if err := s.store.MarkTOTPStepUsed(ctx, step, sha256Hex(code)); err != nil {
 		if errors.Is(err, store.ErrTOTPReplay) {
+			// The code was VALID; it had simply been used already. On a dev
+			// instance that is the operator clicking the prefilled one-click
+			// sign-in twice, not an attacker replaying a captured code.
+			if s.devInsecureAuth {
+				return true, nil
+			}
 			return false, nil
 		}
 		return false, fmt.Errorf("rpc: marking totp step used: %w", err)
@@ -986,6 +1113,71 @@ func userAgentFromContext(ctx context.Context) string {
 // failure after the security-critical work above already succeeded.
 func setSessionTokenHeader(ctx context.Context, rawToken string) {
 	_ = grpc.SetHeader(ctx, metadata.Pairs(SessionTokenHeader, rawToken))
+}
+
+// setLoginTicketHeader hands a single-use login ticket to the transport
+// layer via a gRPC response header, the ticket analog of
+// setSessionTokenHeader — see SessionTicketHeader's doc comment for why a
+// TICKET, unlike the raw session token, is safe to send this way even to a
+// caller whose transport is the bridge.
+func setLoginTicketHeader(ctx context.Context, ticket string) {
+	_ = grpc.SetHeader(ctx, metadata.Pairs(SessionTicketHeader, ticket))
+}
+
+// issueSessionCredential is Login/RecoverWithCode's shared last step after a
+// session has been minted: decide whether the CALLER (not the session) is a
+// browser on the other end of the bridge, and hand back the credential that
+// caller can safely receive.
+//
+//   - bridge.SessionFromContext(ctx) succeeding is what identifies a
+//     bridge-transport call — internal/bridge's ServeHTTP (server.go)
+//     attaches a Session to EVERY request context it hands to the WebSocket
+//     handler, authenticated or anonymous alike (see that file's own doc
+//     comment), so its mere presence — not its Token field, which is empty
+//     for the anonymous case Login/RecoverWithCode are reached through —
+//     is what this checks. A caller on the plain grpc.Server at AdminAddr
+//     (cmd/aff, this project's own e2e suite) never has one attached at
+//     all, which is exactly the "not a browser" signal this needs: that
+//     transport is a trusted local process reading its own response, not
+//     JavaScript/WASM in a browser, so PLAN.md §4's "the token never
+//     touches JavaScript or WASM" simply does not apply to it, and it keeps
+//     getting the raw token exactly as it always has (SessionTokenHeader) —
+//     changing that would break cmd/aff's `aff login` and this project's
+//     entire e2e suite, which both depend on reading it back directly.
+//   - A bridge-transport call instead gets ONLY a ticket
+//     (SessionTicketHeader) — see that constant's doc comment for why a
+//     ticket, unlike the raw token, is safe to place in gRPC response
+//     metadata a WASM client will read.
+//   - s.tickets == nil (WithTicketStore never configured — every test
+//     written before this option existed) degrades to "mint nothing for a
+//     bridge caller": the session itself is still fully valid and usable by
+//     any client that already has its raw token some other way, it is only
+//     unreachable via ticket-driven reconnect. This mirrors how a missing
+//     Config.Tickets on the bridge side simply ignores an incoming ticket
+//     query parameter (server.go) rather than erroring — "ticket
+//     infrastructure not wired" degrades to "anonymous stays anonymous /
+//     bridge caller gets no ticket," never to "leak the raw token instead."
+func (s *AuthServer) issueSessionCredential(ctx context.Context, now time.Time, rawToken string) {
+	if _, onBridge := bridge.SessionFromContext(ctx); !onBridge {
+		setSessionTokenHeader(ctx, rawToken)
+		return
+	}
+	if s.tickets == nil {
+		return
+	}
+	ticket, _, err := s.tickets.Issue(now, rawToken)
+	if err != nil {
+		// Ticket minting is not security-critical to fail loudly on here —
+		// the session itself is already committed and valid; a caller that
+		// gets no ticket simply cannot reconnect the anonymous socket into
+		// an authenticated one and has to retry Login. Recorded nowhere
+		// beyond this comment because auth_events already has a true "login
+		// succeeded" row for this attempt (RecordAuthEvent, just above every
+		// call site) and a second, ticket-specific failure event would be
+		// more oracle than signal on a single-admin system.
+		return
+	}
+	setLoginTicketHeader(ctx, ticket)
 }
 
 // --- backoff tracker ---------------------------------------------------

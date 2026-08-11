@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -284,6 +285,200 @@ func runDecodeCursor(token string) (int64, error) {
 	return strconv.ParseInt(string(b), 10, 64)
 }
 
+// RunProgressReporter is the write side of Watch's live progress. Nothing in
+// this codebase calls it yet — internal/generate's runner (or whatever
+// ultimately owns §9's per-run loop) is the intended caller, and wiring that
+// in is explicitly out of this file's scope (internal/rpc must not edit
+// internal/generate or internal/schedule). *RunServer implements it; a
+// caller only needs this interface, not the concrete type.
+//
+// The contract the emitting side must follow. Most of it — the timing
+// relative to the commit transaction — is nothing this package can see, so
+// it is documentation, not a guard. One part of it IS mechanically
+// enforced: see ReportCommitted below and runProgressHub.publishCommitted's
+// doc comment.
+//
+//   - ReportCandidate(runID, phase, candidatesSeen): call any time BEFORE
+//     §9's commit transaction, once per candidate currently being worked
+//     (acquiring context, calling the model, validating, novelty-checking,
+//     link-checking — phase is free text). candidatesSeen is the cumulative
+//     count of candidates considered so far this run, tentative — some may
+//     still be rejected by steps 5-6 and never committed. Always safe to
+//     call; nothing here is persisted.
+//   - ReportCommitted(runID, itemsCommitted): call ONLY AFTER §9's commit
+//     transaction — the one that closes the run row and inserts its items
+//     atomically — has returned success, with the cumulative item count
+//     actually committed so far this run. Calling this earlier, or with a
+//     count that has not actually landed in `items`, violates BF-43 and is
+//     a bug in the caller: this package has no visibility into the
+//     caller's transaction boundary and cannot detect that class of
+//     violation directly. It CAN and does detect the one symptom of it that
+//     is structurally observable from here: itemsCommitted must never
+//     decrease across calls for the same run_id, because §9's commit
+//     transaction only ever grows `items`. A regressing call is dropped and
+//     logged rather than delivered to any watcher — see
+//     runProgressHub.publishCommitted.
+//
+// Both methods are non-blocking best-effort fan-out (runProgressHub.publish)
+// — a run with no watcher, or a watcher whose channel is momentarily full,
+// never slows or blocks the generator. The next periodic Watch poll always
+// resends the authoritative `runs` row regardless of which progress ticks
+// were dropped in between, so a dropped tick is cosmetic, never a lost fact.
+type RunProgressReporter interface {
+	ReportCandidate(runID int64, phase string, candidatesSeen int32)
+	ReportCommitted(runID int64, itemsCommitted int32)
+}
+
+// runProgressHub fans a run's live progress out to every current watcher of
+// that run. It is deliberately NOT a replay log: a watcher joining mid-run
+// gets the current authoritative `runs` row immediately (Watch's initial
+// poll, before it ever touches this hub) but only the progress ticks
+// emitted AFTER it subscribes — buffering full progress history for a
+// stream nobody may ever read is the wrong tradeoff for data that is
+// superseded within one watchPoll of arriving anyway. This is one of the
+// two documented, deliberately-either-way decisions this file makes; the
+// other is multiple concurrent watchers of the same run (see below): both
+// receive an independent subscription and are fanned out to identically —
+// two browser tabs watching the same run see the same ticks, each at its
+// own pace, and neither one's disconnect affects the other (consistent with
+// BF-41: a watcher, of which there may be several, is never coupled to run
+// lifetime).
+type runProgressHub struct {
+	mu   sync.Mutex
+	subs map[int64]map[chan *affv1.RunProgress]struct{}
+
+	// lastCommitted tracks, per run, the most recent itemsCommitted value
+	// actually delivered to a watcher. It is what makes half of
+	// RunProgressReporter's contract mechanically enforceable instead of
+	// merely documented: see publishCommitted's doc comment for exactly what
+	// is checked and why the other half (that the count reflects a
+	// transaction that has truly landed) cannot be.
+	//
+	// An entry exists only while subs[runID] is non-empty — deleted in
+	// unsubscribe the same moment the last watcher for that run leaves, the
+	// same rule subs itself follows. The alternative, keying this off
+	// ReportCommitted calls alone, would grow one entry per run FOREVER
+	// (most runs here are unattended cron fires nobody ever watches, so
+	// "forever" is the common case, not an edge case) on a box with no
+	// headroom for that — exactly the leak class this task flags. Tying it
+	// to subscriber presence costs nothing observable: with no watcher there
+	// is nothing to protect from seeing a regression in the first place.
+	lastCommitted map[int64]int32
+
+	log *slog.Logger
+}
+
+func newRunProgressHub(log *slog.Logger) *runProgressHub {
+	return &runProgressHub{
+		subs:          make(map[int64]map[chan *affv1.RunProgress]struct{}),
+		lastCommitted: make(map[int64]int32),
+		log:           log,
+	}
+}
+
+// runProgressChanBuf bounds how many un-delivered progress ticks a single
+// watcher can queue before publish starts silently dropping ticks for it
+// (see publish's doc comment). Small and generous for a human-facing UI tick
+// rate; it exists to protect the generator from a stalled watcher, not to
+// guarantee delivery.
+const runProgressChanBuf = 8
+
+func (h *runProgressHub) subscribe(runID int64) chan *affv1.RunProgress {
+	ch := make(chan *affv1.RunProgress, runProgressChanBuf)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.subs[runID] == nil {
+		h.subs[runID] = make(map[chan *affv1.RunProgress]struct{})
+	}
+	h.subs[runID][ch] = struct{}{}
+	return ch
+}
+
+func (h *runProgressHub) unsubscribe(runID int64, ch chan *affv1.RunProgress) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if subs := h.subs[runID]; subs != nil {
+		delete(subs, ch)
+		if len(subs) == 0 {
+			delete(h.subs, runID)
+			// See lastCommitted's doc comment: its lifecycle is tied to
+			// subscriber presence, not to the run's, so it cannot outlive
+			// the last watcher that could ever have observed it.
+			delete(h.lastCommitted, runID)
+		}
+	}
+}
+
+// publish fans p out to every current subscriber of runID. Non-blocking: a
+// slow or gone watcher must never stall the generator — the same principle
+// BF-41 states for the socket itself extends here to a socket that is
+// technically open but not draining. A full channel silently drops the
+// tick; the next periodic DB poll always resends the authoritative snapshot
+// regardless, so nothing false is ever shown, only a gap in the live ticks.
+func (h *runProgressHub) publish(runID int64, p *affv1.RunProgress) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.subs[runID] {
+		select {
+		case ch <- p:
+		default:
+		}
+	}
+}
+
+// publishCommitted is ReportCommitted's fan-out path, kept distinct from
+// publish because it enforces the one half of RunProgressReporter's contract
+// this package CAN check mechanically: itemsCommitted, for a given run, must
+// never regress tick over tick. §9 only ever appends to `items` inside one
+// growing commit transaction per run, so a caller that honors the interface
+// contract (only report AFTER a successful commit, with the cumulative
+// count) can only ever report a non-decreasing sequence; a decrease is
+// therefore proof of a caller bug — double-reporting, reporting before
+// commit, or reporting against the wrong run_id — not a legitimate state.
+//
+// This is NOT the other half of the contract (that the count reflects a
+// transaction that has actually landed in the database): this package has
+// no visibility into the caller's transaction boundary, so it cannot tell a
+// truthful "3 committed" from an optimistic one. That half remains,
+// unavoidably, a caller contract stated in RunProgressReporter's doc
+// comment, not something any type here can verify. Making the checkable
+// half a runtime guard rather than silently trusting every call is what
+// this file can add beyond documentation.
+//
+// A violation is logged and the tick dropped — never delivered, never
+// panicked. Panicking here would hand a bug in the generator's caller the
+// power to crash the RPC server (or, guarded by a recover, would still
+// convert a slow cosmetic tick loss into a hard failure for reasons no
+// operator watching a run asked for); dropping matches this hub's existing
+// rule that a lost tick is always cosmetic; the next periodic Watch poll
+// resends the authoritative `runs` row regardless.
+func (h *runProgressHub) publishCommitted(runID int64, itemsCommitted int32) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	subs := h.subs[runID]
+	if len(subs) == 0 {
+		// Nobody is watching, so nothing here is observable and there is
+		// nothing to protect from seeing a regression. See lastCommitted's
+		// doc comment for why this also means: do not record a baseline.
+		return
+	}
+	if prev, ok := h.lastCommitted[runID]; ok && itemsCommitted < prev {
+		if h.log != nil {
+			h.log.Error("rpc: dropped a regressing committed-progress tick (RunProgressReporter contract violation in the caller)",
+				"run_id", runID, "previous_items_committed", prev, "reported_items_committed", itemsCommitted)
+		}
+		return
+	}
+	h.lastCommitted[runID] = itemsCommitted
+	p := &affv1.RunProgress{ItemsCommitted: itemsCommitted}
+	for ch := range subs {
+		select {
+		case ch <- p:
+		default:
+		}
+	}
+}
+
 // RunServer implements affv1.RunServiceServer.
 type RunServer struct {
 	affv1.UnimplementedRunServiceServer
@@ -295,6 +490,26 @@ type RunServer struct {
 	// literal) so tests can shrink it instead of sleeping through the
 	// production interval.
 	watchPoll time.Duration
+
+	// progress fans out live RunProgress ticks reported through
+	// RunProgressReporter to every current Watch call for that run.
+	progress *runProgressHub
+}
+
+var _ RunProgressReporter = (*RunServer)(nil)
+
+// ReportCandidate implements RunProgressReporter. See that interface's doc
+// comment for the caller contract.
+func (s *RunServer) ReportCandidate(runID int64, phase string, candidatesSeen int32) {
+	s.progress.publish(runID, &affv1.RunProgress{Phase: phase, CandidatesSeen: candidatesSeen})
+}
+
+// ReportCommitted implements RunProgressReporter. See that interface's doc
+// comment for the caller contract — in particular, it must only be called
+// after the commit transaction that persisted itemsCommitted has returned
+// success.
+func (s *RunServer) ReportCommitted(runID int64, itemsCommitted int32) {
+	s.progress.publishCommitted(runID, itemsCommitted)
 }
 
 // defaultWatchPoll is production's Watch polling interval. There is no
@@ -309,7 +524,7 @@ func NewRunServer(st *store.Store, log *slog.Logger) *RunServer {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &RunServer{st: st, log: log, watchPoll: defaultWatchPoll}
+	return &RunServer{st: st, log: log, watchPoll: defaultWatchPoll, progress: newRunProgressHub(log)}
 }
 
 // History paginates runs newest-first, filterable by feed, status and
@@ -436,59 +651,106 @@ func (s *RunServer) Get(ctx context.Context, req *affv1.RunServiceGetRequest) (*
 	return &affv1.RunServiceGetResponse{Run: p}, nil
 }
 
-// Watch streams a run's progress by polling until it reaches a terminal
-// status, then returns — in EVERY branch, success or failure (§22 J9: "the
-// stream terminates when the run does, in every branch including failure").
+// Watch streams a run's progress: the authoritative `runs` row on an
+// initial snapshot and every watchPoll tick thereafter, live RunProgress
+// ticks fanned out through runProgressHub as they are reported in between,
+// and returns — in EVERY branch, success or failure (§22 J9: "the stream
+// terminates when the run does, in every branch including failure") — the
+// instant the row is observed in a terminal status.
+//
+// The initial snapshot is sent before entering the tick loop, not on the
+// first ticker fire: this is what makes watching an already-finished run
+// return immediately rather than waiting up to watchPoll for the first
+// read (§22 J9's reconnect case, "reconnecting shows the run's true current
+// state rather than a stale snapshot" — BF-42), and it is also what a
+// watcher joining mid-run sees first, ahead of any progress ticks (see
+// runProgressHub's doc comment for that decision).
 //
 // A dropped client is detected via stream.Context() being done and simply
 // stops the loop; nothing here ever touches the run row on that path,
 // because the run is not the stream's to cancel (§22 J9: "a dropped socket
-// does not abort the run").
+// does not abort the run"). Multiple concurrent Watch calls for the same
+// run_id are independent: each gets its own DB poll cadence and its own
+// runProgressHub subscription (see that type's doc comment).
 func (s *RunServer) Watch(req *affv1.RunServiceWatchRequest, stream grpc.ServerStreamingServer[affv1.RunServiceWatchResponse]) error {
 	ctx := stream.Context()
+	runID := req.GetRunId()
+
+	// Subscribed before the initial poll so a progress tick reported in the
+	// narrow window between "run observed non-terminal" and "subscribed" is
+	// not silently missed — worst case it arrives redundantly early, never
+	// late.
+	progressCh := s.progress.subscribe(runID)
+	defer s.progress.unsubscribe(runID, progressCh)
+
+	// pollAndSend reads the current run row and sends it as the snapshot
+	// message, reporting whether that status is terminal. A nil error with
+	// terminal==false and nothing sent can only happen when ctx is already
+	// canceled, which the caller must check for itself (see both call
+	// sites) — this function never manufactures a status.
+	pollAndSend := func() (terminal bool, err error) {
+		rr, err := runGetByID(ctx, s.st.Reader(), runID)
+		if err != nil {
+			if ctx.Err() != nil {
+				// The read failed because the client disconnected, not
+				// because anything about the run is wrong — clean
+				// termination, not a real error.
+				return false, nil
+			}
+			return false, err
+		}
+		p, err := runToProto(rr)
+		if err != nil {
+			return false, status.Errorf(codes.Internal, "rpc: converting run: %v", err)
+		}
+		if err := stream.Send(&affv1.RunServiceWatchResponse{Run: p}); err != nil {
+			// The client is gone. Return without touching the run — it
+			// keeps running to completion regardless of who is watching
+			// (§22 J9).
+			return false, err
+		}
+		return runIsTerminal(rr.status), nil
+	}
+
+	terminal, err := pollAndSend()
+	if err != nil {
+		return err
+	}
+	if terminal || ctx.Err() != nil {
+		return nil
+	}
+
 	ticker := time.NewTicker(s.watchPoll)
 	defer ticker.Stop()
 
 	for {
-		// Checked before every read, not only in the select below: the
-		// ticker and ctx.Done() can both be ready in the same instant (the
-		// test's cancel() racing a poll tick is a real, reachable case, not
-		// just a test artifact), and select picks between ready cases at
-		// random. Without this, a read that loses that race hits SQLite
-		// with an already-canceled context and returns a spurious error
-		// instead of the clean "client is gone" termination §22 J9 asks
-		// for.
-		if ctx.Err() != nil {
-			return nil
-		}
-
-		rr, err := runGetByID(ctx, s.st.Reader(), req.GetRunId())
-		if err != nil {
-			if ctx.Err() != nil {
-				// The read failed because the client disconnected, not
-				// because anything about the run is wrong — same clean
-				// termination as the check above.
-				return nil
-			}
-			return err
-		}
-		p, err := runToProto(rr)
-		if err != nil {
-			return status.Errorf(codes.Internal, "rpc: converting run: %v", err)
-		}
-		if err := stream.Send(&affv1.RunServiceWatchResponse{Run: p}); err != nil {
-			// The client is gone. Return without touching the run — it keeps
-			// running to completion regardless of who is watching (§22 J9).
-			return err
-		}
-		if runIsTerminal(rr.status) {
-			return nil
-		}
-
 		select {
 		case <-ctx.Done():
 			return nil
+		case prog := <-progressCh:
+			if err := stream.Send(&affv1.RunServiceWatchResponse{Progress: prog}); err != nil {
+				// The client is gone — same rule as pollAndSend: the run is
+				// untouched.
+				return err
+			}
 		case <-ticker.C:
+			// Checked before every read: the ticker and ctx.Done() can both
+			// be ready in the same instant (a cancel() racing a poll tick is
+			// a real, reachable case, not just a test artifact), and select
+			// picks between ready cases at random. Without this, a read
+			// that loses that race hits SQLite with an already-canceled
+			// context and returns a spurious error instead of the clean
+			// "client is gone" termination §22 J9 asks for.
+			if ctx.Err() != nil {
+				return nil
+			}
+			terminal, err := pollAndSend()
+			if err != nil {
+				return err
+			}
+			if terminal {
+				return nil
+			}
 		}
 	}
 }
