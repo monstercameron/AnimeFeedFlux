@@ -94,7 +94,43 @@ message SampleServiceSampleRequest {
   // presently-inert override — SchemaFlux exposes no per-call temperature
   // knob yet (PLAN.md §8.1).
   double temperature_override = 3;
+  // Draft is the UNSAVED editor state to sample instead of the recipe on
+  // file. Optional; absent means "sample what is saved", which is what this
+  // RPC did exclusively until now.
+  //
+  // It exists because §22's J3 — "iterate a prompt by sampling: sample, read
+  // the verdicts, edit the prompt, sample again" — was not actually possible:
+  // Sample took only a feed_id, so trying a prompt meant first SAVING it over
+  // the working recipe, and disliking the result meant you had already
+  // overwritten the thing that worked. A preview you have to commit before
+  // you can see is not a preview.
+  //
+  // Nothing here is persisted. The draft overrides fields on the loaded spec
+  // for the duration of one call; the `samples` row it produces is the same
+  // 24h scratch record a saved-recipe sample already writes.
+  SampleDraft draft = 4;
 }
+
+// SampleDraft carries the recipe fields an operator iterates on in the
+// editor, and only those.
+//
+// Deliberately NOT the whole spec: slug and kind are identity and pipeline
+// shape, not prompt-tuning knobs — sampling a "grounded" draft against a
+// generative feed would exercise a different code path than the one that
+// will actually run, which makes the preview a lie. Schedule, budgets and
+// feed window do not affect what a single sample produces at all.
+//
+// Every field is optional and an empty one means "use the saved value", so a
+// client sends only what the operator actually changed.
+message SampleDraft {
+  string system_prompt = 1;
+  string user_prompt = 2;
+  string model = 3;
+  // Effort is the SchemaFlux Speed tier: "smart" | "fast" | "quick"
+  // (PLAN.md §8.1). Empty uses the saved/default tier.
+  string effort = 4;
+}
+
 
 message SampleServiceSampleResponse {
   string sample_id = 1;
@@ -108,6 +144,9 @@ message SampleServiceSampleStreamRequest {
   int64 feed_id = 1;
   int32 sample_size = 2;
   double temperature_override = 3;
+  // The same unsaved draft the unary Sample accepts — see its doc comment.
+  // Both paths take it so the streaming preview is not a weaker one.
+  SampleDraft draft = 4;
 }
 
 // SampleServiceSampleStreamResponse is one increment of a streaming sample.

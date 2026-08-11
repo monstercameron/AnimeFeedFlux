@@ -25,6 +25,35 @@ service SystemService {
   // Backup triggers an on-demand DB backup download (PLAN.md §12.5, Data
   // section).
   rpc Backup(SystemServiceBackupRequest) returns (SystemServiceBackupResponse);
+  // ListAuditEvents reads the audit trail `auth_events` writes on every
+  // login, recovery, password-change and TOTP event (PLAN.md §4, §10) —
+  // until this RPC existed, that table was written roughly 19 places and
+  // read nowhere, which answers no question at all. Newest first,
+  // opaque-cursor paginated (PLAN.md §11). Deliberately narrow: see
+  // AuditEvent's doc comment for what is and is not exposed, and why.
+  rpc ListAuditEvents(SystemServiceListAuditEventsRequest) returns (SystemServiceListAuditEventsResponse);
+  // Vacuum runs SQLite's VACUUM against the live database. This is NOT an
+  // instant operation — see the response and rpc/system.go's doc comment
+  // for what it blocks and for how long.
+  rpc Vacuum(SystemServiceVacuumRequest) returns (SystemServiceVacuumResponse);
+  // ListModels asks the provider which models this API key can actually
+  // use, so the Settings model fields can be a chosen value rather than a
+  // typed one.
+  //
+  // The call is made SERVER-side and the key never leaves it (PLAN.md §4:
+  // key material is "never displayed, never sent to the client"), which is
+  // also why this is an RPC rather than the browser talking to OpenAI
+  // directly. A model id typed by hand is a per-feed outage waiting to
+  // happen: §8's error taxonomy classifies "model not found" as a
+  // recipe-scoped Fatal that disables that feed, and a typo is
+  // indistinguishable from a deprecation until a run fails at 4am.
+  rpc ListModels(SystemServiceListModelsRequest) returns (SystemServiceListModelsResponse);
+  // CostHistory reports daily provider spend, so §13's cost model is
+  // something an operator can SEE rather than infer from a running total.
+  // The numbers come from `runs.est_cost_usd`, which each run stamped at
+  // the price in force at the time (§13), so editing the price table does
+  // not rewrite history.
+  rpc CostHistory(SystemServiceCostHistoryRequest) returns (SystemServiceCostHistoryResponse);
 }
 
 // PriceEntry is one row of the editable price table used for cost estimates
@@ -50,6 +79,20 @@ message Settings {
     // editable here (PLAN.md §12.5, §4).
     bool api_key_present = 4;
     repeated PriceEntry price_table = 5;
+    // Effort is how hard the model is asked to work per generation. It maps
+    // onto SchemaFlux's Speed tier — the only such knob its public API
+    // exposes (PLAN.md §8.1: "no per-call temperature knob, only Mode and
+    // Speed tiers") — so the values are exactly those tiers rather than an
+    // invented scale this codebase would then have to translate:
+    // "smart" | "fast" | "quick". Empty means smart, which is what
+    // internal/llm already did implicitly by setting no tier at all.
+    string effort = 6;
+    // ActiveProfile names which entry in `profiles` is in use, "" for the
+    // built-in OpenAI default.
+    string active_profile = 7;
+    // Profiles are operator-configured OpenAI-compatible endpoints (PLAN.md
+    // §12.5). They carry no key — see ProviderProfile.api_key_env.
+    repeated ProviderProfile profiles = 8;
   }
   message Generation {
     bool enabled = 1;
@@ -129,4 +172,150 @@ message SystemServiceBackupResponse {
   // multi-gigabyte at this project's scale (PLAN.md §14.4).
   bytes db_file = 1;
   string filename = 2;
+}
+
+// AuditEvent is one row of the `auth_events` audit trail (PLAN.md §10),
+// exposed deliberately narrowly. It carries exactly what answers "who
+// logged in, from where, when, and did it succeed" (`at`, `kind`, `ip`,
+// `ok`) plus a stable `id` for UI list identity and cursor construction.
+//
+// `detail` (the fifth `auth_events` column) is intentionally NOT exposed
+// here, even though every write site stores only a short, non-secret
+// reason token (never a password, token, or TOTP code — verified by
+// internal/rpc/auth_test.go). This RPC's job is to answer one narrow
+// question, not to be a raw table dump; keeping the wire surface to the
+// four columns that answer it means a future write site that gets `detail`
+// wrong cannot turn this RPC into a leak by extension. There is exactly
+// one account on this system, so `kind`/`ok` alone can never be used to
+// enumerate other usernames the way it could on a multi-tenant system.
+message AuditEvent {
+  int64 id = 1;
+  google.protobuf.Timestamp at = 2;
+  string kind = 3;
+  string ip = 4;
+  bool ok = 5;
+}
+
+message SystemServiceListAuditEventsRequest {
+  // 0 defaults to a server-chosen page size (PLAN.md §11); capped
+  // server-side regardless of what the client asks for.
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message SystemServiceListAuditEventsResponse {
+  repeated AuditEvent events = 1;
+  // Empty when this is the last page. An empty `events` on an empty log is
+  // a normal, successful response, never an error.
+  string next_page_token = 2;
+}
+
+message SystemServiceVacuumRequest {}
+
+message SystemServiceVacuumResponse {
+  // Database file size (main file + WAL/SHM sidecars) immediately before
+  // and after VACUUM, so the caller can tell whether it accomplished
+  // anything — the only reason to run it (PLAN.md §12.5 Data section).
+  int64 size_before_bytes = 1;
+  int64 size_after_bytes = 2;
+  // Wall-clock time VACUUM held the exclusive lock for. VACUUM rewrites the
+  // whole database file; on a live system this is a real stall, not an
+  // instant operation, and this field is how the caller finds out how real.
+  int64 duration_ms = 3;
+}
+
+// SystemServiceListModelsRequest asks the configured provider for the models
+// this deployment's API key can use.
+message SystemServiceListModelsRequest {}
+
+// SystemServiceListModelsResponse carries what the provider reported.
+message SystemServiceListModelsResponse {
+  // Model ids, as the provider spells them — these are values that get
+  // written into a recipe and sent back on every generation call, so they
+  // are never normalised or prettified here.
+  repeated ProviderModel models = 1;
+  // Unavailable is set when the provider could not be asked at all (no key
+  // configured, network failure, an error response). The list is then empty
+  // and the UI must fall back to letting the operator type a model id
+  // rather than presenting an empty menu as though the account has no
+  // models.
+  bool unavailable = 2;
+  // Reason is a short, human-readable explanation of `unavailable`, for the
+  // operator — never the raw provider error, which can carry account
+  // details.
+  string unavailable_reason = 3;
+}
+
+// ProviderModel is one selectable model.
+message ProviderModel {
+  string id = 1;
+  // Owner is the provider's own grouping ("openai", "system", ...). Shown
+  // as secondary text so a long list can be scanned.
+  string owned_by = 2;
+  // Chat reports whether this looks like a text-generation model rather
+  // than an embedding, audio, image or moderation one. The provider does
+  // not say, so this is inferred from the id — see internal/llm's
+  // ClassifyModel. Callers use it to group the menu, never to hide a model
+  // outright: a wrong guess must not make a usable model unselectable.
+  bool chat = 3;
+  // Embedding reports the same for the embedding-model field.
+  bool embedding = 4;
+}
+
+// ProviderProfile is one manually configured, OpenAI-compatible provider:
+// anything that speaks the same wire protocol at a different base URL
+// (a local llama.cpp/Ollama shim, an Azure deployment, OpenRouter, a
+// self-hosted gateway).
+//
+// **It carries no key, and that is deliberate.** PLAN.md §4 puts key
+// material in the environment only — "never in the DB, never in a recipe,
+// never in an image layer, never logged" — so a profile names the
+// ENVIRONMENT VARIABLE holding its key rather than the key itself. That
+// keeps this message safe to store in SQLite, safe to send to the browser,
+// and safe in a backup, which none of those would be if it held a secret.
+message ProviderProfile {
+  // Name is the operator-facing label and the value active_profile matches
+  // on. Unique within the list.
+  string name = 1;
+  // BaseURL is the OpenAI-compatible API root, e.g.
+  // "https://openrouter.ai/api/v1" or "http://127.0.0.1:11434/v1".
+  // Empty means the provider's own default (api.openai.com).
+  string base_url = 2;
+  // ApiKeyEnv names the environment variable holding this profile's key,
+  // e.g. "OPENROUTER_API_KEY". Never the key.
+  string api_key_env = 3;
+  // KeyPresent reports whether that variable is actually set on the server,
+  // so the operator can see a misconfiguration without the value ever being
+  // sent. Server-populated on read; ignored on write.
+  bool key_present = 4;
+}
+
+// SystemServiceCostHistoryRequest asks for daily provider spend.
+message SystemServiceCostHistoryRequest {
+  // Days of history, counting back from today inclusive. Zero uses a
+  // 30-day default; values above 365 are clamped.
+  int32 days = 1;
+}
+
+// SystemServiceCostHistoryResponse is one bucket per day, oldest first,
+// with days that had no runs present and zeroed rather than omitted — a
+// gap in generation is exactly what an operator is looking for, and a
+// sparse series hides it by drawing a straight line across it.
+message SystemServiceCostHistoryResponse {
+  repeated CostBucket buckets = 1;
+  // TotalUsd over the whole window, so the UI does not re-sum floats the
+  // server already summed.
+  double total_usd = 2;
+}
+
+// CostBucket is one day of provider spend.
+message CostBucket {
+  // Date is the UTC calendar day, "YYYY-MM-DD". UTC to match the
+  // month-boundary convention internal/budget already uses for the monthly
+  // ceiling, rather than any one feed's timezone.
+  string date = 1;
+  double usd = 2;
+  int64 runs = 3;
+  int64 tokens_in = 4;
+  int64 tokens_out = 5;
 }

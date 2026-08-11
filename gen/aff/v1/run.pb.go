@@ -470,10 +470,23 @@ func (x *RunServiceWatchRequest) GetRunId() int64 {
 
 type RunServiceWatchResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Run   *Run                   `protobuf:"bytes,1,opt,name=run,proto3" json:"run,omitempty"`
+	// Sent on the initial snapshot and on every subsequent poll tick
+	// (RunServer.watchPoll) while the run is in flight, and exactly once more
+	// as the terminal message when the run reaches a terminal RunStatus
+	// (PLAN.md §22 J9: "the stream terminates when the run does"). Always the
+	// authoritative row from `runs` — items_added/items_rejected here are
+	// never ahead of what §9's commit transaction has actually persisted.
+	Run *Run `protobuf:"bytes,1,opt,name=run,proto3" json:"run,omitempty"`
 	// Incremental log lines since the previous event, so the client appends
 	// rather than re-fetching the whole log each tick.
-	LogLines      []string `protobuf:"bytes,2,rep,name=log_lines,json=logLines,proto3" json:"log_lines,omitempty"`
+	LogLines []string `protobuf:"bytes,2,rep,name=log_lines,json=logLines,proto3" json:"log_lines,omitempty"`
+	// Set only on a live progress tick pushed through RunProgressReporter
+	// (internal/rpc/run.go) between polls of `run`; unset on every `run`
+	// snapshot above, including the terminal one, which already carries the
+	// authoritative counts. A response has at most one of `run` (unset
+	// log_lines/progress) or `progress` populated — never both in the same
+	// message.
+	Progress      *RunProgress `protobuf:"bytes,3,opt,name=progress,proto3" json:"progress,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -522,6 +535,97 @@ func (x *RunServiceWatchResponse) GetLogLines() []string {
 	return nil
 }
 
+func (x *RunServiceWatchResponse) GetProgress() *RunProgress {
+	if x != nil {
+		return x.Progress
+	}
+	return nil
+}
+
+// RunProgress is a live, in-flight-only signal — it is never persisted and
+// never authoritative. It exists so the UI can show forward motion between
+// the coarser `run` snapshots above, not to replace them.
+//
+// PLAN.md §22 J9 / TODOS.md BF-43: "progress events never claim items that
+// were not committed." Enforced by keeping the two counts on strictly
+// separate events rather than one mutable running total: a candidate tick
+// (candidates_seen set, items_committed always 0) reports work in progress
+// that may still be rejected by novelty or link-integrity checks (§9 steps
+// 5-6) and can never be read as "items added"; a committed tick
+// (items_committed set, candidates_seen always 0, phase empty) is only ever
+// emitted by the caller AFTER §9's commit transaction — the one that closes
+// the run row and inserts its items atomically — has returned success. See
+// RunProgressReporter's doc comment in internal/rpc/run.go for the exact
+// contract the emitting side (internal/generate's runner) must follow;
+// nothing on the wire can enforce that a caller obeys it.
+type RunProgress struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Free-form on purpose — e.g. "acquiring_context", "calling_model",
+	// "validating", "novelty_check", "link_check", "persisting". New phases
+	// must never require a proto change. Empty on a committed tick.
+	Phase string `protobuf:"bytes,1,opt,name=phase,proto3" json:"phase,omitempty"`
+	// Candidates evaluated so far THIS RUN. Tentative — set only on a
+	// candidate tick, always 0 on a committed tick.
+	CandidatesSeen int32 `protobuf:"varint,2,opt,name=candidates_seen,json=candidatesSeen,proto3" json:"candidates_seen,omitempty"`
+	// Items actually committed so far THIS RUN, i.e. persisted inside §9's
+	// commit transaction. Set only on a committed tick, always 0 on a
+	// candidate tick.
+	ItemsCommitted int32 `protobuf:"varint,3,opt,name=items_committed,json=itemsCommitted,proto3" json:"items_committed,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RunProgress) Reset() {
+	*x = RunProgress{}
+	mi := &file_aff_v1_run_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunProgress) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunProgress) ProtoMessage() {}
+
+func (x *RunProgress) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_run_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunProgress.ProtoReflect.Descriptor instead.
+func (*RunProgress) Descriptor() ([]byte, []int) {
+	return file_aff_v1_run_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *RunProgress) GetPhase() string {
+	if x != nil {
+		return x.Phase
+	}
+	return ""
+}
+
+func (x *RunProgress) GetCandidatesSeen() int32 {
+	if x != nil {
+		return x.CandidatesSeen
+	}
+	return 0
+}
+
+func (x *RunProgress) GetItemsCommitted() int32 {
+	if x != nil {
+		return x.ItemsCommitted
+	}
+	return 0
+}
+
 type RunServiceDeleteRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RunId         int64                  `protobuf:"varint,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -531,7 +635,7 @@ type RunServiceDeleteRequest struct {
 
 func (x *RunServiceDeleteRequest) Reset() {
 	*x = RunServiceDeleteRequest{}
-	mi := &file_aff_v1_run_proto_msgTypes[7]
+	mi := &file_aff_v1_run_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -543,7 +647,7 @@ func (x *RunServiceDeleteRequest) String() string {
 func (*RunServiceDeleteRequest) ProtoMessage() {}
 
 func (x *RunServiceDeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_run_proto_msgTypes[7]
+	mi := &file_aff_v1_run_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -556,7 +660,7 @@ func (x *RunServiceDeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunServiceDeleteRequest.ProtoReflect.Descriptor instead.
 func (*RunServiceDeleteRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_run_proto_rawDescGZIP(), []int{7}
+	return file_aff_v1_run_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RunServiceDeleteRequest) GetRunId() int64 {
@@ -574,7 +678,7 @@ type RunServiceDeleteResponse struct {
 
 func (x *RunServiceDeleteResponse) Reset() {
 	*x = RunServiceDeleteResponse{}
-	mi := &file_aff_v1_run_proto_msgTypes[8]
+	mi := &file_aff_v1_run_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -586,7 +690,7 @@ func (x *RunServiceDeleteResponse) String() string {
 func (*RunServiceDeleteResponse) ProtoMessage() {}
 
 func (x *RunServiceDeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_run_proto_msgTypes[8]
+	mi := &file_aff_v1_run_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -599,7 +703,7 @@ func (x *RunServiceDeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunServiceDeleteResponse.ProtoReflect.Descriptor instead.
 func (*RunServiceDeleteResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_run_proto_rawDescGZIP(), []int{8}
+	return file_aff_v1_run_proto_rawDescGZIP(), []int{9}
 }
 
 var File_aff_v1_run_proto protoreflect.FileDescriptor
@@ -648,10 +752,15 @@ const file_aff_v1_run_proto_rawDesc = "" +
 	"\x03run\x18\x01 \x01(\v2\v.aff.v1.RunR\x03run\x12\x10\n" +
 	"\x03log\x18\x02 \x01(\tR\x03log\"/\n" +
 	"\x16RunServiceWatchRequest\x12\x15\n" +
-	"\x06run_id\x18\x01 \x01(\x03R\x05runId\"U\n" +
+	"\x06run_id\x18\x01 \x01(\x03R\x05runId\"\x86\x01\n" +
 	"\x17RunServiceWatchResponse\x12\x1d\n" +
 	"\x03run\x18\x01 \x01(\v2\v.aff.v1.RunR\x03run\x12\x1b\n" +
-	"\tlog_lines\x18\x02 \x03(\tR\blogLines\"0\n" +
+	"\tlog_lines\x18\x02 \x03(\tR\blogLines\x12/\n" +
+	"\bprogress\x18\x03 \x01(\v2\x13.aff.v1.RunProgressR\bprogress\"u\n" +
+	"\vRunProgress\x12\x14\n" +
+	"\x05phase\x18\x01 \x01(\tR\x05phase\x12'\n" +
+	"\x0fcandidates_seen\x18\x02 \x01(\x05R\x0ecandidatesSeen\x12'\n" +
+	"\x0fitems_committed\x18\x03 \x01(\x05R\x0eitemsCommitted\"0\n" +
 	"\x17RunServiceDeleteRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\x03R\x05runId\"\x1a\n" +
 	"\x18RunServiceDeleteResponse2\xb9\x02\n" +
@@ -674,7 +783,7 @@ func file_aff_v1_run_proto_rawDescGZIP() []byte {
 	return file_aff_v1_run_proto_rawDescData
 }
 
-var file_aff_v1_run_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_aff_v1_run_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_aff_v1_run_proto_goTypes = []any{
 	(*Run)(nil),                       // 0: aff.v1.Run
 	(*RunServiceHistoryRequest)(nil),  // 1: aff.v1.RunServiceHistoryRequest
@@ -683,41 +792,43 @@ var file_aff_v1_run_proto_goTypes = []any{
 	(*RunServiceGetResponse)(nil),     // 4: aff.v1.RunServiceGetResponse
 	(*RunServiceWatchRequest)(nil),    // 5: aff.v1.RunServiceWatchRequest
 	(*RunServiceWatchResponse)(nil),   // 6: aff.v1.RunServiceWatchResponse
-	(*RunServiceDeleteRequest)(nil),   // 7: aff.v1.RunServiceDeleteRequest
-	(*RunServiceDeleteResponse)(nil),  // 8: aff.v1.RunServiceDeleteResponse
-	(RunTrigger)(0),                   // 9: aff.v1.RunTrigger
-	(*timestamppb.Timestamp)(nil),     // 10: google.protobuf.Timestamp
-	(RunStatus)(0),                    // 11: aff.v1.RunStatus
-	(ErrorKind)(0),                    // 12: aff.v1.ErrorKind
-	(*RejectReason)(nil),              // 13: aff.v1.RejectReason
+	(*RunProgress)(nil),               // 7: aff.v1.RunProgress
+	(*RunServiceDeleteRequest)(nil),   // 8: aff.v1.RunServiceDeleteRequest
+	(*RunServiceDeleteResponse)(nil),  // 9: aff.v1.RunServiceDeleteResponse
+	(RunTrigger)(0),                   // 10: aff.v1.RunTrigger
+	(*timestamppb.Timestamp)(nil),     // 11: google.protobuf.Timestamp
+	(RunStatus)(0),                    // 12: aff.v1.RunStatus
+	(ErrorKind)(0),                    // 13: aff.v1.ErrorKind
+	(*RejectReason)(nil),              // 14: aff.v1.RejectReason
 }
 var file_aff_v1_run_proto_depIdxs = []int32{
-	9,  // 0: aff.v1.Run.trigger:type_name -> aff.v1.RunTrigger
-	10, // 1: aff.v1.Run.started_at:type_name -> google.protobuf.Timestamp
-	10, // 2: aff.v1.Run.finished_at:type_name -> google.protobuf.Timestamp
-	10, // 3: aff.v1.Run.heartbeat_at:type_name -> google.protobuf.Timestamp
-	11, // 4: aff.v1.Run.status:type_name -> aff.v1.RunStatus
-	12, // 5: aff.v1.Run.error_kind:type_name -> aff.v1.ErrorKind
-	13, // 6: aff.v1.Run.reject_reasons:type_name -> aff.v1.RejectReason
-	11, // 7: aff.v1.RunServiceHistoryRequest.status:type_name -> aff.v1.RunStatus
-	10, // 8: aff.v1.RunServiceHistoryRequest.started_after:type_name -> google.protobuf.Timestamp
-	10, // 9: aff.v1.RunServiceHistoryRequest.started_before:type_name -> google.protobuf.Timestamp
+	10, // 0: aff.v1.Run.trigger:type_name -> aff.v1.RunTrigger
+	11, // 1: aff.v1.Run.started_at:type_name -> google.protobuf.Timestamp
+	11, // 2: aff.v1.Run.finished_at:type_name -> google.protobuf.Timestamp
+	11, // 3: aff.v1.Run.heartbeat_at:type_name -> google.protobuf.Timestamp
+	12, // 4: aff.v1.Run.status:type_name -> aff.v1.RunStatus
+	13, // 5: aff.v1.Run.error_kind:type_name -> aff.v1.ErrorKind
+	14, // 6: aff.v1.Run.reject_reasons:type_name -> aff.v1.RejectReason
+	12, // 7: aff.v1.RunServiceHistoryRequest.status:type_name -> aff.v1.RunStatus
+	11, // 8: aff.v1.RunServiceHistoryRequest.started_after:type_name -> google.protobuf.Timestamp
+	11, // 9: aff.v1.RunServiceHistoryRequest.started_before:type_name -> google.protobuf.Timestamp
 	0,  // 10: aff.v1.RunServiceHistoryResponse.runs:type_name -> aff.v1.Run
 	0,  // 11: aff.v1.RunServiceGetResponse.run:type_name -> aff.v1.Run
 	0,  // 12: aff.v1.RunServiceWatchResponse.run:type_name -> aff.v1.Run
-	1,  // 13: aff.v1.RunService.History:input_type -> aff.v1.RunServiceHistoryRequest
-	3,  // 14: aff.v1.RunService.Get:input_type -> aff.v1.RunServiceGetRequest
-	5,  // 15: aff.v1.RunService.Watch:input_type -> aff.v1.RunServiceWatchRequest
-	7,  // 16: aff.v1.RunService.Delete:input_type -> aff.v1.RunServiceDeleteRequest
-	2,  // 17: aff.v1.RunService.History:output_type -> aff.v1.RunServiceHistoryResponse
-	4,  // 18: aff.v1.RunService.Get:output_type -> aff.v1.RunServiceGetResponse
-	6,  // 19: aff.v1.RunService.Watch:output_type -> aff.v1.RunServiceWatchResponse
-	8,  // 20: aff.v1.RunService.Delete:output_type -> aff.v1.RunServiceDeleteResponse
-	17, // [17:21] is the sub-list for method output_type
-	13, // [13:17] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	7,  // 13: aff.v1.RunServiceWatchResponse.progress:type_name -> aff.v1.RunProgress
+	1,  // 14: aff.v1.RunService.History:input_type -> aff.v1.RunServiceHistoryRequest
+	3,  // 15: aff.v1.RunService.Get:input_type -> aff.v1.RunServiceGetRequest
+	5,  // 16: aff.v1.RunService.Watch:input_type -> aff.v1.RunServiceWatchRequest
+	8,  // 17: aff.v1.RunService.Delete:input_type -> aff.v1.RunServiceDeleteRequest
+	2,  // 18: aff.v1.RunService.History:output_type -> aff.v1.RunServiceHistoryResponse
+	4,  // 19: aff.v1.RunService.Get:output_type -> aff.v1.RunServiceGetResponse
+	6,  // 20: aff.v1.RunService.Watch:output_type -> aff.v1.RunServiceWatchResponse
+	9,  // 21: aff.v1.RunService.Delete:output_type -> aff.v1.RunServiceDeleteResponse
+	18, // [18:22] is the sub-list for method output_type
+	14, // [14:18] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_aff_v1_run_proto_init() }
@@ -732,7 +843,7 @@ func file_aff_v1_run_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_aff_v1_run_proto_rawDesc), len(file_aff_v1_run_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

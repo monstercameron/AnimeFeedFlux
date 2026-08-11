@@ -719,6 +719,767 @@ func (x *SystemServiceBackupResponse) GetFilename() string {
 	return ""
 }
 
+// AuditEvent is one row of the `auth_events` audit trail (PLAN.md §10),
+// exposed deliberately narrowly. It carries exactly what answers "who
+// logged in, from where, when, and did it succeed" (`at`, `kind`, `ip`,
+// `ok`) plus a stable `id` for UI list identity and cursor construction.
+//
+// `detail` (the fifth `auth_events` column) is intentionally NOT exposed
+// here, even though every write site stores only a short, non-secret
+// reason token (never a password, token, or TOTP code — verified by
+// internal/rpc/auth_test.go). This RPC's job is to answer one narrow
+// question, not to be a raw table dump; keeping the wire surface to the
+// four columns that answer it means a future write site that gets `detail`
+// wrong cannot turn this RPC into a leak by extension. There is exactly
+// one account on this system, so `kind`/`ok` alone can never be used to
+// enumerate other usernames the way it could on a multi-tenant system.
+type AuditEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	At            *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=at,proto3" json:"at,omitempty"`
+	Kind          string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	Ip            string                 `protobuf:"bytes,4,opt,name=ip,proto3" json:"ip,omitempty"`
+	Ok            bool                   `protobuf:"varint,5,opt,name=ok,proto3" json:"ok,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AuditEvent) Reset() {
+	*x = AuditEvent{}
+	mi := &file_aff_v1_system_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AuditEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuditEvent) ProtoMessage() {}
+
+func (x *AuditEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuditEvent.ProtoReflect.Descriptor instead.
+func (*AuditEvent) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *AuditEvent) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *AuditEvent) GetAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.At
+	}
+	return nil
+}
+
+func (x *AuditEvent) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *AuditEvent) GetIp() string {
+	if x != nil {
+		return x.Ip
+	}
+	return ""
+}
+
+func (x *AuditEvent) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+type SystemServiceListAuditEventsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 0 defaults to a server-chosen page size (PLAN.md §11); capped
+	// server-side regardless of what the client asks for.
+	PageSize      int32  `protobuf:"varint,1,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	PageToken     string `protobuf:"bytes,2,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SystemServiceListAuditEventsRequest) Reset() {
+	*x = SystemServiceListAuditEventsRequest{}
+	mi := &file_aff_v1_system_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SystemServiceListAuditEventsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SystemServiceListAuditEventsRequest) ProtoMessage() {}
+
+func (x *SystemServiceListAuditEventsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SystemServiceListAuditEventsRequest.ProtoReflect.Descriptor instead.
+func (*SystemServiceListAuditEventsRequest) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *SystemServiceListAuditEventsRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *SystemServiceListAuditEventsRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+type SystemServiceListAuditEventsResponse struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Events []*AuditEvent          `protobuf:"bytes,1,rep,name=events,proto3" json:"events,omitempty"`
+	// Empty when this is the last page. An empty `events` on an empty log is
+	// a normal, successful response, never an error.
+	NextPageToken string `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SystemServiceListAuditEventsResponse) Reset() {
+	*x = SystemServiceListAuditEventsResponse{}
+	mi := &file_aff_v1_system_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SystemServiceListAuditEventsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SystemServiceListAuditEventsResponse) ProtoMessage() {}
+
+func (x *SystemServiceListAuditEventsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SystemServiceListAuditEventsResponse.ProtoReflect.Descriptor instead.
+func (*SystemServiceListAuditEventsResponse) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *SystemServiceListAuditEventsResponse) GetEvents() []*AuditEvent {
+	if x != nil {
+		return x.Events
+	}
+	return nil
+}
+
+func (x *SystemServiceListAuditEventsResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
+type SystemServiceVacuumRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SystemServiceVacuumRequest) Reset() {
+	*x = SystemServiceVacuumRequest{}
+	mi := &file_aff_v1_system_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SystemServiceVacuumRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SystemServiceVacuumRequest) ProtoMessage() {}
+
+func (x *SystemServiceVacuumRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SystemServiceVacuumRequest.ProtoReflect.Descriptor instead.
+func (*SystemServiceVacuumRequest) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{17}
+}
+
+type SystemServiceVacuumResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Database file size (main file + WAL/SHM sidecars) immediately before
+	// and after VACUUM, so the caller can tell whether it accomplished
+	// anything — the only reason to run it (PLAN.md §12.5 Data section).
+	SizeBeforeBytes int64 `protobuf:"varint,1,opt,name=size_before_bytes,json=sizeBeforeBytes,proto3" json:"size_before_bytes,omitempty"`
+	SizeAfterBytes  int64 `protobuf:"varint,2,opt,name=size_after_bytes,json=sizeAfterBytes,proto3" json:"size_after_bytes,omitempty"`
+	// Wall-clock time VACUUM held the exclusive lock for. VACUUM rewrites the
+	// whole database file; on a live system this is a real stall, not an
+	// instant operation, and this field is how the caller finds out how real.
+	DurationMs    int64 `protobuf:"varint,3,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SystemServiceVacuumResponse) Reset() {
+	*x = SystemServiceVacuumResponse{}
+	mi := &file_aff_v1_system_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SystemServiceVacuumResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SystemServiceVacuumResponse) ProtoMessage() {}
+
+func (x *SystemServiceVacuumResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SystemServiceVacuumResponse.ProtoReflect.Descriptor instead.
+func (*SystemServiceVacuumResponse) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *SystemServiceVacuumResponse) GetSizeBeforeBytes() int64 {
+	if x != nil {
+		return x.SizeBeforeBytes
+	}
+	return 0
+}
+
+func (x *SystemServiceVacuumResponse) GetSizeAfterBytes() int64 {
+	if x != nil {
+		return x.SizeAfterBytes
+	}
+	return 0
+}
+
+func (x *SystemServiceVacuumResponse) GetDurationMs() int64 {
+	if x != nil {
+		return x.DurationMs
+	}
+	return 0
+}
+
+// SystemServiceListModelsRequest asks the configured provider for the models
+// this deployment's API key can use.
+type SystemServiceListModelsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SystemServiceListModelsRequest) Reset() {
+	*x = SystemServiceListModelsRequest{}
+	mi := &file_aff_v1_system_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SystemServiceListModelsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SystemServiceListModelsRequest) ProtoMessage() {}
+
+func (x *SystemServiceListModelsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SystemServiceListModelsRequest.ProtoReflect.Descriptor instead.
+func (*SystemServiceListModelsRequest) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{19}
+}
+
+// SystemServiceListModelsResponse carries what the provider reported.
+type SystemServiceListModelsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Model ids, as the provider spells them — these are values that get
+	// written into a recipe and sent back on every generation call, so they
+	// are never normalised or prettified here.
+	Models []*ProviderModel `protobuf:"bytes,1,rep,name=models,proto3" json:"models,omitempty"`
+	// Unavailable is set when the provider could not be asked at all (no key
+	// configured, network failure, an error response). The list is then empty
+	// and the UI must fall back to letting the operator type a model id
+	// rather than presenting an empty menu as though the account has no
+	// models.
+	Unavailable bool `protobuf:"varint,2,opt,name=unavailable,proto3" json:"unavailable,omitempty"`
+	// Reason is a short, human-readable explanation of `unavailable`, for the
+	// operator — never the raw provider error, which can carry account
+	// details.
+	UnavailableReason string `protobuf:"bytes,3,opt,name=unavailable_reason,json=unavailableReason,proto3" json:"unavailable_reason,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *SystemServiceListModelsResponse) Reset() {
+	*x = SystemServiceListModelsResponse{}
+	mi := &file_aff_v1_system_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SystemServiceListModelsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SystemServiceListModelsResponse) ProtoMessage() {}
+
+func (x *SystemServiceListModelsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SystemServiceListModelsResponse.ProtoReflect.Descriptor instead.
+func (*SystemServiceListModelsResponse) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *SystemServiceListModelsResponse) GetModels() []*ProviderModel {
+	if x != nil {
+		return x.Models
+	}
+	return nil
+}
+
+func (x *SystemServiceListModelsResponse) GetUnavailable() bool {
+	if x != nil {
+		return x.Unavailable
+	}
+	return false
+}
+
+func (x *SystemServiceListModelsResponse) GetUnavailableReason() string {
+	if x != nil {
+		return x.UnavailableReason
+	}
+	return ""
+}
+
+// ProviderModel is one selectable model.
+type ProviderModel struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Owner is the provider's own grouping ("openai", "system", ...). Shown
+	// as secondary text so a long list can be scanned.
+	OwnedBy string `protobuf:"bytes,2,opt,name=owned_by,json=ownedBy,proto3" json:"owned_by,omitempty"`
+	// Chat reports whether this looks like a text-generation model rather
+	// than an embedding, audio, image or moderation one. The provider does
+	// not say, so this is inferred from the id — see internal/llm's
+	// ClassifyModel. Callers use it to group the menu, never to hide a model
+	// outright: a wrong guess must not make a usable model unselectable.
+	Chat bool `protobuf:"varint,3,opt,name=chat,proto3" json:"chat,omitempty"`
+	// Embedding reports the same for the embedding-model field.
+	Embedding     bool `protobuf:"varint,4,opt,name=embedding,proto3" json:"embedding,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProviderModel) Reset() {
+	*x = ProviderModel{}
+	mi := &file_aff_v1_system_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProviderModel) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProviderModel) ProtoMessage() {}
+
+func (x *ProviderModel) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProviderModel.ProtoReflect.Descriptor instead.
+func (*ProviderModel) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ProviderModel) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ProviderModel) GetOwnedBy() string {
+	if x != nil {
+		return x.OwnedBy
+	}
+	return ""
+}
+
+func (x *ProviderModel) GetChat() bool {
+	if x != nil {
+		return x.Chat
+	}
+	return false
+}
+
+func (x *ProviderModel) GetEmbedding() bool {
+	if x != nil {
+		return x.Embedding
+	}
+	return false
+}
+
+// ProviderProfile is one manually configured, OpenAI-compatible provider:
+// anything that speaks the same wire protocol at a different base URL
+// (a local llama.cpp/Ollama shim, an Azure deployment, OpenRouter, a
+// self-hosted gateway).
+//
+// **It carries no key, and that is deliberate.** PLAN.md §4 puts key
+// material in the environment only — "never in the DB, never in a recipe,
+// never in an image layer, never logged" — so a profile names the
+// ENVIRONMENT VARIABLE holding its key rather than the key itself. That
+// keeps this message safe to store in SQLite, safe to send to the browser,
+// and safe in a backup, which none of those would be if it held a secret.
+type ProviderProfile struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Name is the operator-facing label and the value active_profile matches
+	// on. Unique within the list.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// BaseURL is the OpenAI-compatible API root, e.g.
+	// "https://openrouter.ai/api/v1" or "http://127.0.0.1:11434/v1".
+	// Empty means the provider's own default (api.openai.com).
+	BaseUrl string `protobuf:"bytes,2,opt,name=base_url,json=baseUrl,proto3" json:"base_url,omitempty"`
+	// ApiKeyEnv names the environment variable holding this profile's key,
+	// e.g. "OPENROUTER_API_KEY". Never the key.
+	ApiKeyEnv string `protobuf:"bytes,3,opt,name=api_key_env,json=apiKeyEnv,proto3" json:"api_key_env,omitempty"`
+	// KeyPresent reports whether that variable is actually set on the server,
+	// so the operator can see a misconfiguration without the value ever being
+	// sent. Server-populated on read; ignored on write.
+	KeyPresent    bool `protobuf:"varint,4,opt,name=key_present,json=keyPresent,proto3" json:"key_present,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProviderProfile) Reset() {
+	*x = ProviderProfile{}
+	mi := &file_aff_v1_system_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProviderProfile) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProviderProfile) ProtoMessage() {}
+
+func (x *ProviderProfile) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProviderProfile.ProtoReflect.Descriptor instead.
+func (*ProviderProfile) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ProviderProfile) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ProviderProfile) GetBaseUrl() string {
+	if x != nil {
+		return x.BaseUrl
+	}
+	return ""
+}
+
+func (x *ProviderProfile) GetApiKeyEnv() string {
+	if x != nil {
+		return x.ApiKeyEnv
+	}
+	return ""
+}
+
+func (x *ProviderProfile) GetKeyPresent() bool {
+	if x != nil {
+		return x.KeyPresent
+	}
+	return false
+}
+
+// SystemServiceCostHistoryRequest asks for daily provider spend.
+type SystemServiceCostHistoryRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Days of history, counting back from today inclusive. Zero uses a
+	// 30-day default; values above 365 are clamped.
+	Days          int32 `protobuf:"varint,1,opt,name=days,proto3" json:"days,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SystemServiceCostHistoryRequest) Reset() {
+	*x = SystemServiceCostHistoryRequest{}
+	mi := &file_aff_v1_system_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SystemServiceCostHistoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SystemServiceCostHistoryRequest) ProtoMessage() {}
+
+func (x *SystemServiceCostHistoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SystemServiceCostHistoryRequest.ProtoReflect.Descriptor instead.
+func (*SystemServiceCostHistoryRequest) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *SystemServiceCostHistoryRequest) GetDays() int32 {
+	if x != nil {
+		return x.Days
+	}
+	return 0
+}
+
+// SystemServiceCostHistoryResponse is one bucket per day, oldest first,
+// with days that had no runs present and zeroed rather than omitted — a
+// gap in generation is exactly what an operator is looking for, and a
+// sparse series hides it by drawing a straight line across it.
+type SystemServiceCostHistoryResponse struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Buckets []*CostBucket          `protobuf:"bytes,1,rep,name=buckets,proto3" json:"buckets,omitempty"`
+	// TotalUsd over the whole window, so the UI does not re-sum floats the
+	// server already summed.
+	TotalUsd      float64 `protobuf:"fixed64,2,opt,name=total_usd,json=totalUsd,proto3" json:"total_usd,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SystemServiceCostHistoryResponse) Reset() {
+	*x = SystemServiceCostHistoryResponse{}
+	mi := &file_aff_v1_system_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SystemServiceCostHistoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SystemServiceCostHistoryResponse) ProtoMessage() {}
+
+func (x *SystemServiceCostHistoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SystemServiceCostHistoryResponse.ProtoReflect.Descriptor instead.
+func (*SystemServiceCostHistoryResponse) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *SystemServiceCostHistoryResponse) GetBuckets() []*CostBucket {
+	if x != nil {
+		return x.Buckets
+	}
+	return nil
+}
+
+func (x *SystemServiceCostHistoryResponse) GetTotalUsd() float64 {
+	if x != nil {
+		return x.TotalUsd
+	}
+	return 0
+}
+
+// CostBucket is one day of provider spend.
+type CostBucket struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Date is the UTC calendar day, "YYYY-MM-DD". UTC to match the
+	// month-boundary convention internal/budget already uses for the monthly
+	// ceiling, rather than any one feed's timezone.
+	Date          string  `protobuf:"bytes,1,opt,name=date,proto3" json:"date,omitempty"`
+	Usd           float64 `protobuf:"fixed64,2,opt,name=usd,proto3" json:"usd,omitempty"`
+	Runs          int64   `protobuf:"varint,3,opt,name=runs,proto3" json:"runs,omitempty"`
+	TokensIn      int64   `protobuf:"varint,4,opt,name=tokens_in,json=tokensIn,proto3" json:"tokens_in,omitempty"`
+	TokensOut     int64   `protobuf:"varint,5,opt,name=tokens_out,json=tokensOut,proto3" json:"tokens_out,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CostBucket) Reset() {
+	*x = CostBucket{}
+	mi := &file_aff_v1_system_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CostBucket) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CostBucket) ProtoMessage() {}
+
+func (x *CostBucket) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_system_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CostBucket.ProtoReflect.Descriptor instead.
+func (*CostBucket) Descriptor() ([]byte, []int) {
+	return file_aff_v1_system_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *CostBucket) GetDate() string {
+	if x != nil {
+		return x.Date
+	}
+	return ""
+}
+
+func (x *CostBucket) GetUsd() float64 {
+	if x != nil {
+		return x.Usd
+	}
+	return 0
+}
+
+func (x *CostBucket) GetRuns() int64 {
+	if x != nil {
+		return x.Runs
+	}
+	return 0
+}
+
+func (x *CostBucket) GetTokensIn() int64 {
+	if x != nil {
+		return x.TokensIn
+	}
+	return 0
+}
+
+func (x *CostBucket) GetTokensOut() int64 {
+	if x != nil {
+		return x.TokensOut
+	}
+	return 0
+}
+
 type Settings_Provider struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	ActiveProvider string                 `protobuf:"bytes,1,opt,name=active_provider,json=activeProvider,proto3" json:"active_provider,omitempty"`
@@ -729,13 +1490,27 @@ type Settings_Provider struct {
 	// editable here (PLAN.md §12.5, §4).
 	ApiKeyPresent bool          `protobuf:"varint,4,opt,name=api_key_present,json=apiKeyPresent,proto3" json:"api_key_present,omitempty"`
 	PriceTable    []*PriceEntry `protobuf:"bytes,5,rep,name=price_table,json=priceTable,proto3" json:"price_table,omitempty"`
+	// Effort is how hard the model is asked to work per generation. It maps
+	// onto SchemaFlux's Speed tier — the only such knob its public API
+	// exposes (PLAN.md §8.1: "no per-call temperature knob, only Mode and
+	// Speed tiers") — so the values are exactly those tiers rather than an
+	// invented scale this codebase would then have to translate:
+	// "smart" | "fast" | "quick". Empty means smart, which is what
+	// internal/llm already did implicitly by setting no tier at all.
+	Effort string `protobuf:"bytes,6,opt,name=effort,proto3" json:"effort,omitempty"`
+	// ActiveProfile names which entry in `profiles` is in use, "" for the
+	// built-in OpenAI default.
+	ActiveProfile string `protobuf:"bytes,7,opt,name=active_profile,json=activeProfile,proto3" json:"active_profile,omitempty"`
+	// Profiles are operator-configured OpenAI-compatible endpoints (PLAN.md
+	// §12.5). They carry no key — see ProviderProfile.api_key_env.
+	Profiles      []*ProviderProfile `protobuf:"bytes,8,rep,name=profiles,proto3" json:"profiles,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Settings_Provider) Reset() {
 	*x = Settings_Provider{}
-	mi := &file_aff_v1_system_proto_msgTypes[14]
+	mi := &file_aff_v1_system_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -747,7 +1522,7 @@ func (x *Settings_Provider) String() string {
 func (*Settings_Provider) ProtoMessage() {}
 
 func (x *Settings_Provider) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_system_proto_msgTypes[14]
+	mi := &file_aff_v1_system_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -798,6 +1573,27 @@ func (x *Settings_Provider) GetPriceTable() []*PriceEntry {
 	return nil
 }
 
+func (x *Settings_Provider) GetEffort() string {
+	if x != nil {
+		return x.Effort
+	}
+	return ""
+}
+
+func (x *Settings_Provider) GetActiveProfile() string {
+	if x != nil {
+		return x.ActiveProfile
+	}
+	return ""
+}
+
+func (x *Settings_Provider) GetProfiles() []*ProviderProfile {
+	if x != nil {
+		return x.Profiles
+	}
+	return nil
+}
+
 type Settings_Generation struct {
 	state                      protoimpl.MessageState `protogen:"open.v1"`
 	Enabled                    bool                   `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
@@ -815,7 +1611,7 @@ type Settings_Generation struct {
 
 func (x *Settings_Generation) Reset() {
 	*x = Settings_Generation{}
-	mi := &file_aff_v1_system_proto_msgTypes[15]
+	mi := &file_aff_v1_system_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -827,7 +1623,7 @@ func (x *Settings_Generation) String() string {
 func (*Settings_Generation) ProtoMessage() {}
 
 func (x *Settings_Generation) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_system_proto_msgTypes[15]
+	mi := &file_aff_v1_system_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -910,7 +1706,7 @@ type Settings_Publishing struct {
 
 func (x *Settings_Publishing) Reset() {
 	*x = Settings_Publishing{}
-	mi := &file_aff_v1_system_proto_msgTypes[16]
+	mi := &file_aff_v1_system_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -922,7 +1718,7 @@ func (x *Settings_Publishing) String() string {
 func (*Settings_Publishing) ProtoMessage() {}
 
 func (x *Settings_Publishing) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_system_proto_msgTypes[16]
+	mi := &file_aff_v1_system_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -996,7 +1792,7 @@ const file_aff_v1_system_proto_rawDesc = "" +
 	"PriceEntry\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12.\n" +
 	"\x14usd_per_1k_tokens_in\x18\x02 \x01(\x01R\x10usdPer1kTokensIn\x120\n" +
-	"\x15usd_per_1k_tokens_out\x18\x03 \x01(\x01R\x11usdPer1kTokensOut\"\xee\b\n" +
+	"\x15usd_per_1k_tokens_out\x18\x03 \x01(\x01R\x11usdPer1kTokensOut\"\xe2\t\n" +
 	"\bSettings\x125\n" +
 	"\bprovider\x18\n" +
 	" \x01(\v2\x19.aff.v1.Settings.ProviderR\bprovider\x12;\n" +
@@ -1005,14 +1801,17 @@ const file_aff_v1_system_proto_rawDesc = "" +
 	"generation\x12;\n" +
 	"\n" +
 	"publishing\x18\x1e \x01(\v2\x1b.aff.v1.Settings.PublishingR\n" +
-	"publishing\x1a\xde\x01\n" +
+	"publishing\x1a\xd2\x02\n" +
 	"\bProvider\x12'\n" +
 	"\x0factive_provider\x18\x01 \x01(\tR\x0eactiveProvider\x12#\n" +
 	"\rdefault_model\x18\x02 \x01(\tR\fdefaultModel\x12'\n" +
 	"\x0fembedding_model\x18\x03 \x01(\tR\x0eembeddingModel\x12&\n" +
 	"\x0fapi_key_present\x18\x04 \x01(\bR\rapiKeyPresent\x123\n" +
 	"\vprice_table\x18\x05 \x03(\v2\x12.aff.v1.PriceEntryR\n" +
-	"priceTable\x1a\x8d\x03\n" +
+	"priceTable\x12\x16\n" +
+	"\x06effort\x18\x06 \x01(\tR\x06effort\x12%\n" +
+	"\x0eactive_profile\x18\a \x01(\tR\ractiveProfile\x123\n" +
+	"\bprofiles\x18\b \x03(\v2\x17.aff.v1.ProviderProfileR\bprofiles\x1a\x8d\x03\n" +
 	"\n" +
 	"Generation\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12;\n" +
@@ -1062,14 +1861,68 @@ const file_aff_v1_system_proto_rawDesc = "" +
 	"\x1aSystemServiceBackupRequest\"R\n" +
 	"\x1bSystemServiceBackupResponse\x12\x17\n" +
 	"\adb_file\x18\x01 \x01(\fR\x06dbFile\x12\x1a\n" +
-	"\bfilename\x18\x02 \x01(\tR\bfilename2\xd2\x04\n" +
+	"\bfilename\x18\x02 \x01(\tR\bfilename\"|\n" +
+	"\n" +
+	"AuditEvent\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12*\n" +
+	"\x02at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\x12\x0e\n" +
+	"\x02ip\x18\x04 \x01(\tR\x02ip\x12\x0e\n" +
+	"\x02ok\x18\x05 \x01(\bR\x02ok\"a\n" +
+	"#SystemServiceListAuditEventsRequest\x12\x1b\n" +
+	"\tpage_size\x18\x01 \x01(\x05R\bpageSize\x12\x1d\n" +
+	"\n" +
+	"page_token\x18\x02 \x01(\tR\tpageToken\"z\n" +
+	"$SystemServiceListAuditEventsResponse\x12*\n" +
+	"\x06events\x18\x01 \x03(\v2\x12.aff.v1.AuditEventR\x06events\x12&\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\x1c\n" +
+	"\x1aSystemServiceVacuumRequest\"\x94\x01\n" +
+	"\x1bSystemServiceVacuumResponse\x12*\n" +
+	"\x11size_before_bytes\x18\x01 \x01(\x03R\x0fsizeBeforeBytes\x12(\n" +
+	"\x10size_after_bytes\x18\x02 \x01(\x03R\x0esizeAfterBytes\x12\x1f\n" +
+	"\vduration_ms\x18\x03 \x01(\x03R\n" +
+	"durationMs\" \n" +
+	"\x1eSystemServiceListModelsRequest\"\xa1\x01\n" +
+	"\x1fSystemServiceListModelsResponse\x12-\n" +
+	"\x06models\x18\x01 \x03(\v2\x15.aff.v1.ProviderModelR\x06models\x12 \n" +
+	"\vunavailable\x18\x02 \x01(\bR\vunavailable\x12-\n" +
+	"\x12unavailable_reason\x18\x03 \x01(\tR\x11unavailableReason\"l\n" +
+	"\rProviderModel\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x19\n" +
+	"\bowned_by\x18\x02 \x01(\tR\aownedBy\x12\x12\n" +
+	"\x04chat\x18\x03 \x01(\bR\x04chat\x12\x1c\n" +
+	"\tembedding\x18\x04 \x01(\bR\tembedding\"\x81\x01\n" +
+	"\x0fProviderProfile\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
+	"\bbase_url\x18\x02 \x01(\tR\abaseUrl\x12\x1e\n" +
+	"\vapi_key_env\x18\x03 \x01(\tR\tapiKeyEnv\x12\x1f\n" +
+	"\vkey_present\x18\x04 \x01(\bR\n" +
+	"keyPresent\"5\n" +
+	"\x1fSystemServiceCostHistoryRequest\x12\x12\n" +
+	"\x04days\x18\x01 \x01(\x05R\x04days\"m\n" +
+	" SystemServiceCostHistoryResponse\x12,\n" +
+	"\abuckets\x18\x01 \x03(\v2\x12.aff.v1.CostBucketR\abuckets\x12\x1b\n" +
+	"\ttotal_usd\x18\x02 \x01(\x01R\btotalUsd\"\x82\x01\n" +
+	"\n" +
+	"CostBucket\x12\x12\n" +
+	"\x04date\x18\x01 \x01(\tR\x04date\x12\x10\n" +
+	"\x03usd\x18\x02 \x01(\x01R\x03usd\x12\x12\n" +
+	"\x04runs\x18\x03 \x01(\x03R\x04runs\x12\x1b\n" +
+	"\ttokens_in\x18\x04 \x01(\x03R\btokensIn\x12\x1d\n" +
+	"\n" +
+	"tokens_out\x18\x05 \x01(\x03R\ttokensOut2\xd4\a\n" +
 	"\rSystemService\x12N\n" +
 	"\x05Stats\x12!.aff.v1.SystemServiceStatsRequest\x1a\".aff.v1.SystemServiceStatsResponse\x12{\n" +
 	"\x14SetGenerationEnabled\x120.aff.v1.SystemServiceSetGenerationEnabledRequest\x1a1.aff.v1.SystemServiceSetGenerationEnabledResponse\x12`\n" +
 	"\vGetSettings\x12'.aff.v1.SystemServiceGetSettingsRequest\x1a(.aff.v1.SystemServiceGetSettingsResponse\x12i\n" +
 	"\x0eUpdateSettings\x12*.aff.v1.SystemServiceUpdateSettingsRequest\x1a+.aff.v1.SystemServiceUpdateSettingsResponse\x12T\n" +
 	"\aVersion\x12#.aff.v1.SystemServiceVersionRequest\x1a$.aff.v1.SystemServiceVersionResponse\x12Q\n" +
-	"\x06Backup\x12\".aff.v1.SystemServiceBackupRequest\x1a#.aff.v1.SystemServiceBackupResponseB:Z8github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1b\x06proto3"
+	"\x06Backup\x12\".aff.v1.SystemServiceBackupRequest\x1a#.aff.v1.SystemServiceBackupResponse\x12l\n" +
+	"\x0fListAuditEvents\x12+.aff.v1.SystemServiceListAuditEventsRequest\x1a,.aff.v1.SystemServiceListAuditEventsResponse\x12Q\n" +
+	"\x06Vacuum\x12\".aff.v1.SystemServiceVacuumRequest\x1a#.aff.v1.SystemServiceVacuumResponse\x12]\n" +
+	"\n" +
+	"ListModels\x12&.aff.v1.SystemServiceListModelsRequest\x1a'.aff.v1.SystemServiceListModelsResponse\x12`\n" +
+	"\vCostHistory\x12'.aff.v1.SystemServiceCostHistoryRequest\x1a(.aff.v1.SystemServiceCostHistoryResponseB:Z8github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1b\x06proto3"
 
 var (
 	file_aff_v1_system_proto_rawDescOnce sync.Once
@@ -1083,7 +1936,7 @@ func file_aff_v1_system_proto_rawDescGZIP() []byte {
 	return file_aff_v1_system_proto_rawDescData
 }
 
-var file_aff_v1_system_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_aff_v1_system_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_aff_v1_system_proto_goTypes = []any{
 	(*PriceEntry)(nil),                                // 0: aff.v1.PriceEntry
 	(*Settings)(nil),                                  // 1: aff.v1.Settings
@@ -1099,37 +1952,62 @@ var file_aff_v1_system_proto_goTypes = []any{
 	(*SystemServiceVersionResponse)(nil),              // 11: aff.v1.SystemServiceVersionResponse
 	(*SystemServiceBackupRequest)(nil),                // 12: aff.v1.SystemServiceBackupRequest
 	(*SystemServiceBackupResponse)(nil),               // 13: aff.v1.SystemServiceBackupResponse
-	(*Settings_Provider)(nil),                         // 14: aff.v1.Settings.Provider
-	(*Settings_Generation)(nil),                       // 15: aff.v1.Settings.Generation
-	(*Settings_Publishing)(nil),                       // 16: aff.v1.Settings.Publishing
-	(*timestamppb.Timestamp)(nil),                     // 17: google.protobuf.Timestamp
+	(*AuditEvent)(nil),                                // 14: aff.v1.AuditEvent
+	(*SystemServiceListAuditEventsRequest)(nil),       // 15: aff.v1.SystemServiceListAuditEventsRequest
+	(*SystemServiceListAuditEventsResponse)(nil),      // 16: aff.v1.SystemServiceListAuditEventsResponse
+	(*SystemServiceVacuumRequest)(nil),                // 17: aff.v1.SystemServiceVacuumRequest
+	(*SystemServiceVacuumResponse)(nil),               // 18: aff.v1.SystemServiceVacuumResponse
+	(*SystemServiceListModelsRequest)(nil),            // 19: aff.v1.SystemServiceListModelsRequest
+	(*SystemServiceListModelsResponse)(nil),           // 20: aff.v1.SystemServiceListModelsResponse
+	(*ProviderModel)(nil),                             // 21: aff.v1.ProviderModel
+	(*ProviderProfile)(nil),                           // 22: aff.v1.ProviderProfile
+	(*SystemServiceCostHistoryRequest)(nil),           // 23: aff.v1.SystemServiceCostHistoryRequest
+	(*SystemServiceCostHistoryResponse)(nil),          // 24: aff.v1.SystemServiceCostHistoryResponse
+	(*CostBucket)(nil),                                // 25: aff.v1.CostBucket
+	(*Settings_Provider)(nil),                         // 26: aff.v1.Settings.Provider
+	(*Settings_Generation)(nil),                       // 27: aff.v1.Settings.Generation
+	(*Settings_Publishing)(nil),                       // 28: aff.v1.Settings.Publishing
+	(*timestamppb.Timestamp)(nil),                     // 29: google.protobuf.Timestamp
 }
 var file_aff_v1_system_proto_depIdxs = []int32{
-	14, // 0: aff.v1.Settings.provider:type_name -> aff.v1.Settings.Provider
-	15, // 1: aff.v1.Settings.generation:type_name -> aff.v1.Settings.Generation
-	16, // 2: aff.v1.Settings.publishing:type_name -> aff.v1.Settings.Publishing
+	26, // 0: aff.v1.Settings.provider:type_name -> aff.v1.Settings.Provider
+	27, // 1: aff.v1.Settings.generation:type_name -> aff.v1.Settings.Generation
+	28, // 2: aff.v1.Settings.publishing:type_name -> aff.v1.Settings.Publishing
 	1,  // 3: aff.v1.SystemServiceGetSettingsResponse.settings:type_name -> aff.v1.Settings
 	1,  // 4: aff.v1.SystemServiceUpdateSettingsRequest.settings:type_name -> aff.v1.Settings
 	1,  // 5: aff.v1.SystemServiceUpdateSettingsResponse.settings:type_name -> aff.v1.Settings
-	17, // 6: aff.v1.SystemServiceVersionResponse.started_at:type_name -> google.protobuf.Timestamp
-	0,  // 7: aff.v1.Settings.Provider.price_table:type_name -> aff.v1.PriceEntry
-	2,  // 8: aff.v1.SystemService.Stats:input_type -> aff.v1.SystemServiceStatsRequest
-	4,  // 9: aff.v1.SystemService.SetGenerationEnabled:input_type -> aff.v1.SystemServiceSetGenerationEnabledRequest
-	6,  // 10: aff.v1.SystemService.GetSettings:input_type -> aff.v1.SystemServiceGetSettingsRequest
-	8,  // 11: aff.v1.SystemService.UpdateSettings:input_type -> aff.v1.SystemServiceUpdateSettingsRequest
-	10, // 12: aff.v1.SystemService.Version:input_type -> aff.v1.SystemServiceVersionRequest
-	12, // 13: aff.v1.SystemService.Backup:input_type -> aff.v1.SystemServiceBackupRequest
-	3,  // 14: aff.v1.SystemService.Stats:output_type -> aff.v1.SystemServiceStatsResponse
-	5,  // 15: aff.v1.SystemService.SetGenerationEnabled:output_type -> aff.v1.SystemServiceSetGenerationEnabledResponse
-	7,  // 16: aff.v1.SystemService.GetSettings:output_type -> aff.v1.SystemServiceGetSettingsResponse
-	9,  // 17: aff.v1.SystemService.UpdateSettings:output_type -> aff.v1.SystemServiceUpdateSettingsResponse
-	11, // 18: aff.v1.SystemService.Version:output_type -> aff.v1.SystemServiceVersionResponse
-	13, // 19: aff.v1.SystemService.Backup:output_type -> aff.v1.SystemServiceBackupResponse
-	14, // [14:20] is the sub-list for method output_type
-	8,  // [8:14] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	29, // 6: aff.v1.SystemServiceVersionResponse.started_at:type_name -> google.protobuf.Timestamp
+	29, // 7: aff.v1.AuditEvent.at:type_name -> google.protobuf.Timestamp
+	14, // 8: aff.v1.SystemServiceListAuditEventsResponse.events:type_name -> aff.v1.AuditEvent
+	21, // 9: aff.v1.SystemServiceListModelsResponse.models:type_name -> aff.v1.ProviderModel
+	25, // 10: aff.v1.SystemServiceCostHistoryResponse.buckets:type_name -> aff.v1.CostBucket
+	0,  // 11: aff.v1.Settings.Provider.price_table:type_name -> aff.v1.PriceEntry
+	22, // 12: aff.v1.Settings.Provider.profiles:type_name -> aff.v1.ProviderProfile
+	2,  // 13: aff.v1.SystemService.Stats:input_type -> aff.v1.SystemServiceStatsRequest
+	4,  // 14: aff.v1.SystemService.SetGenerationEnabled:input_type -> aff.v1.SystemServiceSetGenerationEnabledRequest
+	6,  // 15: aff.v1.SystemService.GetSettings:input_type -> aff.v1.SystemServiceGetSettingsRequest
+	8,  // 16: aff.v1.SystemService.UpdateSettings:input_type -> aff.v1.SystemServiceUpdateSettingsRequest
+	10, // 17: aff.v1.SystemService.Version:input_type -> aff.v1.SystemServiceVersionRequest
+	12, // 18: aff.v1.SystemService.Backup:input_type -> aff.v1.SystemServiceBackupRequest
+	15, // 19: aff.v1.SystemService.ListAuditEvents:input_type -> aff.v1.SystemServiceListAuditEventsRequest
+	17, // 20: aff.v1.SystemService.Vacuum:input_type -> aff.v1.SystemServiceVacuumRequest
+	19, // 21: aff.v1.SystemService.ListModels:input_type -> aff.v1.SystemServiceListModelsRequest
+	23, // 22: aff.v1.SystemService.CostHistory:input_type -> aff.v1.SystemServiceCostHistoryRequest
+	3,  // 23: aff.v1.SystemService.Stats:output_type -> aff.v1.SystemServiceStatsResponse
+	5,  // 24: aff.v1.SystemService.SetGenerationEnabled:output_type -> aff.v1.SystemServiceSetGenerationEnabledResponse
+	7,  // 25: aff.v1.SystemService.GetSettings:output_type -> aff.v1.SystemServiceGetSettingsResponse
+	9,  // 26: aff.v1.SystemService.UpdateSettings:output_type -> aff.v1.SystemServiceUpdateSettingsResponse
+	11, // 27: aff.v1.SystemService.Version:output_type -> aff.v1.SystemServiceVersionResponse
+	13, // 28: aff.v1.SystemService.Backup:output_type -> aff.v1.SystemServiceBackupResponse
+	16, // 29: aff.v1.SystemService.ListAuditEvents:output_type -> aff.v1.SystemServiceListAuditEventsResponse
+	18, // 30: aff.v1.SystemService.Vacuum:output_type -> aff.v1.SystemServiceVacuumResponse
+	20, // 31: aff.v1.SystemService.ListModels:output_type -> aff.v1.SystemServiceListModelsResponse
+	24, // 32: aff.v1.SystemService.CostHistory:output_type -> aff.v1.SystemServiceCostHistoryResponse
+	23, // [23:33] is the sub-list for method output_type
+	13, // [13:23] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_aff_v1_system_proto_init() }
@@ -1143,7 +2021,7 @@ func file_aff_v1_system_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_aff_v1_system_proto_rawDesc), len(file_aff_v1_system_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   17,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

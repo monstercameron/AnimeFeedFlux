@@ -439,9 +439,22 @@ type AuthServiceSessionResponse struct {
 	// Unset if there is no live session — the shell renders /login rather
 	// than treating an empty response as an error (PLAN.md §12: /login "must
 	// never break").
-	Session       *Session `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Session *Session `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
+	// RemainingRecoveryCodes is how many single-use codes are still unused.
+	//
+	// §12.5 requires Settings to show "regenerate recovery codes WITH remaining
+	// count", and §12.2 nags at <=2 — but until this field existed the count
+	// had no read path at all: it was reported only in the response to
+	// RecoverWithCode, i.e. only to someone already locked out and using one.
+	// The Security panel could therefore never show it, which is the one place
+	// an operator would look BEFORE they need it.
+	//
+	// Zero is a real, alarming value (no way back in but break-glass), so it
+	// is not overloaded to mean "unknown" — a caller with no session simply
+	// gets no session, and this field is only meaningful alongside one.
+	RemainingRecoveryCodes int32 `protobuf:"varint,2,opt,name=remaining_recovery_codes,json=remainingRecoveryCodes,proto3" json:"remaining_recovery_codes,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *AuthServiceSessionResponse) Reset() {
@@ -479,6 +492,13 @@ func (x *AuthServiceSessionResponse) GetSession() *Session {
 		return x.Session
 	}
 	return nil
+}
+
+func (x *AuthServiceSessionResponse) GetRemainingRecoveryCodes() int32 {
+	if x != nil {
+		return x.RemainingRecoveryCodes
+	}
+	return 0
 }
 
 type AuthServiceChangePasswordRequest struct {
@@ -1065,9 +1085,10 @@ const file_aff_v1_auth_proto_rawDesc = "" +
 	"\x18remaining_recovery_codes\x18\x02 \x01(\x05R\x16remainingRecoveryCodes\"\x1a\n" +
 	"\x18AuthServiceLogoutRequest\"\x1b\n" +
 	"\x19AuthServiceLogoutResponse\"\x1b\n" +
-	"\x19AuthServiceSessionRequest\"G\n" +
+	"\x19AuthServiceSessionRequest\"\x81\x01\n" +
 	"\x1aAuthServiceSessionResponse\x12)\n" +
-	"\asession\x18\x01 \x01(\v2\x0f.aff.v1.SessionR\asession\"\x8d\x01\n" +
+	"\asession\x18\x01 \x01(\v2\x0f.aff.v1.SessionR\asession\x128\n" +
+	"\x18remaining_recovery_codes\x18\x02 \x01(\x05R\x16remainingRecoveryCodes\"\x8d\x01\n" +
 	" AuthServiceChangePasswordRequest\x12)\n" +
 	"\x10current_password\x18\x01 \x01(\tR\x0fcurrentPassword\x12\x1b\n" +
 	"\ttotp_code\x18\x02 \x01(\tR\btotpCode\x12!\n" +

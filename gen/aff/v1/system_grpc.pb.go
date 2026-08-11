@@ -25,6 +25,10 @@ const (
 	SystemService_UpdateSettings_FullMethodName       = "/aff.v1.SystemService/UpdateSettings"
 	SystemService_Version_FullMethodName              = "/aff.v1.SystemService/Version"
 	SystemService_Backup_FullMethodName               = "/aff.v1.SystemService/Backup"
+	SystemService_ListAuditEvents_FullMethodName      = "/aff.v1.SystemService/ListAuditEvents"
+	SystemService_Vacuum_FullMethodName               = "/aff.v1.SystemService/Vacuum"
+	SystemService_ListModels_FullMethodName           = "/aff.v1.SystemService/ListModels"
+	SystemService_CostHistory_FullMethodName          = "/aff.v1.SystemService/CostHistory"
 )
 
 // SystemServiceClient is the client API for SystemService service.
@@ -50,6 +54,35 @@ type SystemServiceClient interface {
 	// Backup triggers an on-demand DB backup download (PLAN.md §12.5, Data
 	// section).
 	Backup(ctx context.Context, in *SystemServiceBackupRequest, opts ...grpc.CallOption) (*SystemServiceBackupResponse, error)
+	// ListAuditEvents reads the audit trail `auth_events` writes on every
+	// login, recovery, password-change and TOTP event (PLAN.md §4, §10) —
+	// until this RPC existed, that table was written roughly 19 places and
+	// read nowhere, which answers no question at all. Newest first,
+	// opaque-cursor paginated (PLAN.md §11). Deliberately narrow: see
+	// AuditEvent's doc comment for what is and is not exposed, and why.
+	ListAuditEvents(ctx context.Context, in *SystemServiceListAuditEventsRequest, opts ...grpc.CallOption) (*SystemServiceListAuditEventsResponse, error)
+	// Vacuum runs SQLite's VACUUM against the live database. This is NOT an
+	// instant operation — see the response and rpc/system.go's doc comment
+	// for what it blocks and for how long.
+	Vacuum(ctx context.Context, in *SystemServiceVacuumRequest, opts ...grpc.CallOption) (*SystemServiceVacuumResponse, error)
+	// ListModels asks the provider which models this API key can actually
+	// use, so the Settings model fields can be a chosen value rather than a
+	// typed one.
+	//
+	// The call is made SERVER-side and the key never leaves it (PLAN.md §4:
+	// key material is "never displayed, never sent to the client"), which is
+	// also why this is an RPC rather than the browser talking to OpenAI
+	// directly. A model id typed by hand is a per-feed outage waiting to
+	// happen: §8's error taxonomy classifies "model not found" as a
+	// recipe-scoped Fatal that disables that feed, and a typo is
+	// indistinguishable from a deprecation until a run fails at 4am.
+	ListModels(ctx context.Context, in *SystemServiceListModelsRequest, opts ...grpc.CallOption) (*SystemServiceListModelsResponse, error)
+	// CostHistory reports daily provider spend, so §13's cost model is
+	// something an operator can SEE rather than infer from a running total.
+	// The numbers come from `runs.est_cost_usd`, which each run stamped at
+	// the price in force at the time (§13), so editing the price table does
+	// not rewrite history.
+	CostHistory(ctx context.Context, in *SystemServiceCostHistoryRequest, opts ...grpc.CallOption) (*SystemServiceCostHistoryResponse, error)
 }
 
 type systemServiceClient struct {
@@ -120,6 +153,46 @@ func (c *systemServiceClient) Backup(ctx context.Context, in *SystemServiceBacku
 	return out, nil
 }
 
+func (c *systemServiceClient) ListAuditEvents(ctx context.Context, in *SystemServiceListAuditEventsRequest, opts ...grpc.CallOption) (*SystemServiceListAuditEventsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SystemServiceListAuditEventsResponse)
+	err := c.cc.Invoke(ctx, SystemService_ListAuditEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *systemServiceClient) Vacuum(ctx context.Context, in *SystemServiceVacuumRequest, opts ...grpc.CallOption) (*SystemServiceVacuumResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SystemServiceVacuumResponse)
+	err := c.cc.Invoke(ctx, SystemService_Vacuum_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *systemServiceClient) ListModels(ctx context.Context, in *SystemServiceListModelsRequest, opts ...grpc.CallOption) (*SystemServiceListModelsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SystemServiceListModelsResponse)
+	err := c.cc.Invoke(ctx, SystemService_ListModels_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *systemServiceClient) CostHistory(ctx context.Context, in *SystemServiceCostHistoryRequest, opts ...grpc.CallOption) (*SystemServiceCostHistoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SystemServiceCostHistoryResponse)
+	err := c.cc.Invoke(ctx, SystemService_CostHistory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SystemServiceServer is the server API for SystemService service.
 // All implementations must embed UnimplementedSystemServiceServer
 // for forward compatibility.
@@ -143,6 +216,35 @@ type SystemServiceServer interface {
 	// Backup triggers an on-demand DB backup download (PLAN.md §12.5, Data
 	// section).
 	Backup(context.Context, *SystemServiceBackupRequest) (*SystemServiceBackupResponse, error)
+	// ListAuditEvents reads the audit trail `auth_events` writes on every
+	// login, recovery, password-change and TOTP event (PLAN.md §4, §10) —
+	// until this RPC existed, that table was written roughly 19 places and
+	// read nowhere, which answers no question at all. Newest first,
+	// opaque-cursor paginated (PLAN.md §11). Deliberately narrow: see
+	// AuditEvent's doc comment for what is and is not exposed, and why.
+	ListAuditEvents(context.Context, *SystemServiceListAuditEventsRequest) (*SystemServiceListAuditEventsResponse, error)
+	// Vacuum runs SQLite's VACUUM against the live database. This is NOT an
+	// instant operation — see the response and rpc/system.go's doc comment
+	// for what it blocks and for how long.
+	Vacuum(context.Context, *SystemServiceVacuumRequest) (*SystemServiceVacuumResponse, error)
+	// ListModels asks the provider which models this API key can actually
+	// use, so the Settings model fields can be a chosen value rather than a
+	// typed one.
+	//
+	// The call is made SERVER-side and the key never leaves it (PLAN.md §4:
+	// key material is "never displayed, never sent to the client"), which is
+	// also why this is an RPC rather than the browser talking to OpenAI
+	// directly. A model id typed by hand is a per-feed outage waiting to
+	// happen: §8's error taxonomy classifies "model not found" as a
+	// recipe-scoped Fatal that disables that feed, and a typo is
+	// indistinguishable from a deprecation until a run fails at 4am.
+	ListModels(context.Context, *SystemServiceListModelsRequest) (*SystemServiceListModelsResponse, error)
+	// CostHistory reports daily provider spend, so §13's cost model is
+	// something an operator can SEE rather than infer from a running total.
+	// The numbers come from `runs.est_cost_usd`, which each run stamped at
+	// the price in force at the time (§13), so editing the price table does
+	// not rewrite history.
+	CostHistory(context.Context, *SystemServiceCostHistoryRequest) (*SystemServiceCostHistoryResponse, error)
 	mustEmbedUnimplementedSystemServiceServer()
 }
 
@@ -170,6 +272,18 @@ func (UnimplementedSystemServiceServer) Version(context.Context, *SystemServiceV
 }
 func (UnimplementedSystemServiceServer) Backup(context.Context, *SystemServiceBackupRequest) (*SystemServiceBackupResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Backup not implemented")
+}
+func (UnimplementedSystemServiceServer) ListAuditEvents(context.Context, *SystemServiceListAuditEventsRequest) (*SystemServiceListAuditEventsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAuditEvents not implemented")
+}
+func (UnimplementedSystemServiceServer) Vacuum(context.Context, *SystemServiceVacuumRequest) (*SystemServiceVacuumResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Vacuum not implemented")
+}
+func (UnimplementedSystemServiceServer) ListModels(context.Context, *SystemServiceListModelsRequest) (*SystemServiceListModelsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListModels not implemented")
+}
+func (UnimplementedSystemServiceServer) CostHistory(context.Context, *SystemServiceCostHistoryRequest) (*SystemServiceCostHistoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CostHistory not implemented")
 }
 func (UnimplementedSystemServiceServer) mustEmbedUnimplementedSystemServiceServer() {}
 func (UnimplementedSystemServiceServer) testEmbeddedByValue()                       {}
@@ -300,6 +414,78 @@ func _SystemService_Backup_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SystemService_ListAuditEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SystemServiceListAuditEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SystemServiceServer).ListAuditEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SystemService_ListAuditEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SystemServiceServer).ListAuditEvents(ctx, req.(*SystemServiceListAuditEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SystemService_Vacuum_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SystemServiceVacuumRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SystemServiceServer).Vacuum(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SystemService_Vacuum_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SystemServiceServer).Vacuum(ctx, req.(*SystemServiceVacuumRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SystemService_ListModels_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SystemServiceListModelsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SystemServiceServer).ListModels(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SystemService_ListModels_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SystemServiceServer).ListModels(ctx, req.(*SystemServiceListModelsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SystemService_CostHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SystemServiceCostHistoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SystemServiceServer).CostHistory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SystemService_CostHistory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SystemServiceServer).CostHistory(ctx, req.(*SystemServiceCostHistoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SystemService_ServiceDesc is the grpc.ServiceDesc for SystemService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -330,6 +516,22 @@ var SystemService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Backup",
 			Handler:    _SystemService_Backup_Handler,
+		},
+		{
+			MethodName: "ListAuditEvents",
+			Handler:    _SystemService_ListAuditEvents_Handler,
+		},
+		{
+			MethodName: "Vacuum",
+			Handler:    _SystemService_Vacuum_Handler,
+		},
+		{
+			MethodName: "ListModels",
+			Handler:    _SystemService_ListModels_Handler,
+		},
+		{
+			MethodName: "CostHistory",
+			Handler:    _SystemService_CostHistory_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

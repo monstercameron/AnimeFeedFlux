@@ -326,8 +326,23 @@ type SampleServiceSampleRequest struct {
 	// presently-inert override — SchemaFlux exposes no per-call temperature
 	// knob yet (PLAN.md §8.1).
 	TemperatureOverride float64 `protobuf:"fixed64,3,opt,name=temperature_override,json=temperatureOverride,proto3" json:"temperature_override,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Draft is the UNSAVED editor state to sample instead of the recipe on
+	// file. Optional; absent means "sample what is saved", which is what this
+	// RPC did exclusively until now.
+	//
+	// It exists because §22's J3 — "iterate a prompt by sampling: sample, read
+	// the verdicts, edit the prompt, sample again" — was not actually possible:
+	// Sample took only a feed_id, so trying a prompt meant first SAVING it over
+	// the working recipe, and disliking the result meant you had already
+	// overwritten the thing that worked. A preview you have to commit before
+	// you can see is not a preview.
+	//
+	// Nothing here is persisted. The draft overrides fields on the loaded spec
+	// for the duration of one call; the `samples` row it produces is the same
+	// 24h scratch record a saved-recipe sample already writes.
+	Draft         *SampleDraft `protobuf:"bytes,4,opt,name=draft,proto3" json:"draft,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SampleServiceSampleRequest) Reset() {
@@ -381,6 +396,94 @@ func (x *SampleServiceSampleRequest) GetTemperatureOverride() float64 {
 	return 0
 }
 
+func (x *SampleServiceSampleRequest) GetDraft() *SampleDraft {
+	if x != nil {
+		return x.Draft
+	}
+	return nil
+}
+
+// SampleDraft carries the recipe fields an operator iterates on in the
+// editor, and only those.
+//
+// Deliberately NOT the whole spec: slug and kind are identity and pipeline
+// shape, not prompt-tuning knobs — sampling a "grounded" draft against a
+// generative feed would exercise a different code path than the one that
+// will actually run, which makes the preview a lie. Schedule, budgets and
+// feed window do not affect what a single sample produces at all.
+//
+// Every field is optional and an empty one means "use the saved value", so a
+// client sends only what the operator actually changed.
+type SampleDraft struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	SystemPrompt string                 `protobuf:"bytes,1,opt,name=system_prompt,json=systemPrompt,proto3" json:"system_prompt,omitempty"`
+	UserPrompt   string                 `protobuf:"bytes,2,opt,name=user_prompt,json=userPrompt,proto3" json:"user_prompt,omitempty"`
+	Model        string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
+	// Effort is the SchemaFlux Speed tier: "smart" | "fast" | "quick"
+	// (PLAN.md §8.1). Empty uses the saved/default tier.
+	Effort        string `protobuf:"bytes,4,opt,name=effort,proto3" json:"effort,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SampleDraft) Reset() {
+	*x = SampleDraft{}
+	mi := &file_aff_v1_sample_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SampleDraft) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SampleDraft) ProtoMessage() {}
+
+func (x *SampleDraft) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_sample_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SampleDraft.ProtoReflect.Descriptor instead.
+func (*SampleDraft) Descriptor() ([]byte, []int) {
+	return file_aff_v1_sample_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *SampleDraft) GetSystemPrompt() string {
+	if x != nil {
+		return x.SystemPrompt
+	}
+	return ""
+}
+
+func (x *SampleDraft) GetUserPrompt() string {
+	if x != nil {
+		return x.UserPrompt
+	}
+	return ""
+}
+
+func (x *SampleDraft) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *SampleDraft) GetEffort() string {
+	if x != nil {
+		return x.Effort
+	}
+	return ""
+}
+
 type SampleServiceSampleResponse struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	SampleId   string                 `protobuf:"bytes,1,opt,name=sample_id,json=sampleId,proto3" json:"sample_id,omitempty"`
@@ -394,7 +497,7 @@ type SampleServiceSampleResponse struct {
 
 func (x *SampleServiceSampleResponse) Reset() {
 	*x = SampleServiceSampleResponse{}
-	mi := &file_aff_v1_sample_proto_msgTypes[4]
+	mi := &file_aff_v1_sample_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -406,7 +509,7 @@ func (x *SampleServiceSampleResponse) String() string {
 func (*SampleServiceSampleResponse) ProtoMessage() {}
 
 func (x *SampleServiceSampleResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_sample_proto_msgTypes[4]
+	mi := &file_aff_v1_sample_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -419,7 +522,7 @@ func (x *SampleServiceSampleResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SampleServiceSampleResponse.ProtoReflect.Descriptor instead.
 func (*SampleServiceSampleResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_sample_proto_rawDescGZIP(), []int{4}
+	return file_aff_v1_sample_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *SampleServiceSampleResponse) GetSampleId() string {
@@ -448,13 +551,16 @@ type SampleServiceSampleStreamRequest struct {
 	FeedId              int64                  `protobuf:"varint,1,opt,name=feed_id,json=feedId,proto3" json:"feed_id,omitempty"`
 	SampleSize          int32                  `protobuf:"varint,2,opt,name=sample_size,json=sampleSize,proto3" json:"sample_size,omitempty"`
 	TemperatureOverride float64                `protobuf:"fixed64,3,opt,name=temperature_override,json=temperatureOverride,proto3" json:"temperature_override,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// The same unsaved draft the unary Sample accepts — see its doc comment.
+	// Both paths take it so the streaming preview is not a weaker one.
+	Draft         *SampleDraft `protobuf:"bytes,4,opt,name=draft,proto3" json:"draft,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SampleServiceSampleStreamRequest) Reset() {
 	*x = SampleServiceSampleStreamRequest{}
-	mi := &file_aff_v1_sample_proto_msgTypes[5]
+	mi := &file_aff_v1_sample_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -466,7 +572,7 @@ func (x *SampleServiceSampleStreamRequest) String() string {
 func (*SampleServiceSampleStreamRequest) ProtoMessage() {}
 
 func (x *SampleServiceSampleStreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_sample_proto_msgTypes[5]
+	mi := &file_aff_v1_sample_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -479,7 +585,7 @@ func (x *SampleServiceSampleStreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SampleServiceSampleStreamRequest.ProtoReflect.Descriptor instead.
 func (*SampleServiceSampleStreamRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_sample_proto_rawDescGZIP(), []int{5}
+	return file_aff_v1_sample_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *SampleServiceSampleStreamRequest) GetFeedId() int64 {
@@ -503,6 +609,13 @@ func (x *SampleServiceSampleStreamRequest) GetTemperatureOverride() float64 {
 	return 0
 }
 
+func (x *SampleServiceSampleStreamRequest) GetDraft() *SampleDraft {
+	if x != nil {
+		return x.Draft
+	}
+	return nil
+}
+
 // SampleServiceSampleStreamResponse is one increment of a streaming sample.
 // The stream ends with exactly one event carrying `done = true`.
 type SampleServiceSampleStreamResponse struct {
@@ -521,7 +634,7 @@ type SampleServiceSampleStreamResponse struct {
 
 func (x *SampleServiceSampleStreamResponse) Reset() {
 	*x = SampleServiceSampleStreamResponse{}
-	mi := &file_aff_v1_sample_proto_msgTypes[6]
+	mi := &file_aff_v1_sample_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -533,7 +646,7 @@ func (x *SampleServiceSampleStreamResponse) String() string {
 func (*SampleServiceSampleStreamResponse) ProtoMessage() {}
 
 func (x *SampleServiceSampleStreamResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_sample_proto_msgTypes[6]
+	mi := &file_aff_v1_sample_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -546,7 +659,7 @@ func (x *SampleServiceSampleStreamResponse) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use SampleServiceSampleStreamResponse.ProtoReflect.Descriptor instead.
 func (*SampleServiceSampleStreamResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_sample_proto_rawDescGZIP(), []int{6}
+	return file_aff_v1_sample_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SampleServiceSampleStreamResponse) GetSampleId() string {
@@ -595,7 +708,7 @@ type SampleServiceListSamplesRequest struct {
 
 func (x *SampleServiceListSamplesRequest) Reset() {
 	*x = SampleServiceListSamplesRequest{}
-	mi := &file_aff_v1_sample_proto_msgTypes[7]
+	mi := &file_aff_v1_sample_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -607,7 +720,7 @@ func (x *SampleServiceListSamplesRequest) String() string {
 func (*SampleServiceListSamplesRequest) ProtoMessage() {}
 
 func (x *SampleServiceListSamplesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_sample_proto_msgTypes[7]
+	mi := &file_aff_v1_sample_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -620,7 +733,7 @@ func (x *SampleServiceListSamplesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SampleServiceListSamplesRequest.ProtoReflect.Descriptor instead.
 func (*SampleServiceListSamplesRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_sample_proto_rawDescGZIP(), []int{7}
+	return file_aff_v1_sample_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SampleServiceListSamplesRequest) GetFeedId() int64 {
@@ -654,7 +767,7 @@ type SampleServiceListSamplesResponse struct {
 
 func (x *SampleServiceListSamplesResponse) Reset() {
 	*x = SampleServiceListSamplesResponse{}
-	mi := &file_aff_v1_sample_proto_msgTypes[8]
+	mi := &file_aff_v1_sample_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -666,7 +779,7 @@ func (x *SampleServiceListSamplesResponse) String() string {
 func (*SampleServiceListSamplesResponse) ProtoMessage() {}
 
 func (x *SampleServiceListSamplesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_sample_proto_msgTypes[8]
+	mi := &file_aff_v1_sample_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -679,7 +792,7 @@ func (x *SampleServiceListSamplesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SampleServiceListSamplesResponse.ProtoReflect.Descriptor instead.
 func (*SampleServiceListSamplesResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_sample_proto_rawDescGZIP(), []int{8}
+	return file_aff_v1_sample_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *SampleServiceListSamplesResponse) GetSamples() []*SampleServiceListSamplesResponse_SampleSummary {
@@ -705,7 +818,7 @@ type SampleServiceDiscardSampleRequest struct {
 
 func (x *SampleServiceDiscardSampleRequest) Reset() {
 	*x = SampleServiceDiscardSampleRequest{}
-	mi := &file_aff_v1_sample_proto_msgTypes[9]
+	mi := &file_aff_v1_sample_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -717,7 +830,7 @@ func (x *SampleServiceDiscardSampleRequest) String() string {
 func (*SampleServiceDiscardSampleRequest) ProtoMessage() {}
 
 func (x *SampleServiceDiscardSampleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_sample_proto_msgTypes[9]
+	mi := &file_aff_v1_sample_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -730,7 +843,7 @@ func (x *SampleServiceDiscardSampleRequest) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use SampleServiceDiscardSampleRequest.ProtoReflect.Descriptor instead.
 func (*SampleServiceDiscardSampleRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_sample_proto_rawDescGZIP(), []int{9}
+	return file_aff_v1_sample_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *SampleServiceDiscardSampleRequest) GetSampleId() string {
@@ -748,7 +861,7 @@ type SampleServiceDiscardSampleResponse struct {
 
 func (x *SampleServiceDiscardSampleResponse) Reset() {
 	*x = SampleServiceDiscardSampleResponse{}
-	mi := &file_aff_v1_sample_proto_msgTypes[10]
+	mi := &file_aff_v1_sample_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -760,7 +873,7 @@ func (x *SampleServiceDiscardSampleResponse) String() string {
 func (*SampleServiceDiscardSampleResponse) ProtoMessage() {}
 
 func (x *SampleServiceDiscardSampleResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_sample_proto_msgTypes[10]
+	mi := &file_aff_v1_sample_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -773,7 +886,7 @@ func (x *SampleServiceDiscardSampleResponse) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use SampleServiceDiscardSampleResponse.ProtoReflect.Descriptor instead.
 func (*SampleServiceDiscardSampleResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_sample_proto_rawDescGZIP(), []int{10}
+	return file_aff_v1_sample_proto_rawDescGZIP(), []int{11}
 }
 
 type SampleServiceListSamplesResponse_SampleSummary struct {
@@ -789,7 +902,7 @@ type SampleServiceListSamplesResponse_SampleSummary struct {
 
 func (x *SampleServiceListSamplesResponse_SampleSummary) Reset() {
 	*x = SampleServiceListSamplesResponse_SampleSummary{}
-	mi := &file_aff_v1_sample_proto_msgTypes[11]
+	mi := &file_aff_v1_sample_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -801,7 +914,7 @@ func (x *SampleServiceListSamplesResponse_SampleSummary) String() string {
 func (*SampleServiceListSamplesResponse_SampleSummary) ProtoMessage() {}
 
 func (x *SampleServiceListSamplesResponse_SampleSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_sample_proto_msgTypes[11]
+	mi := &file_aff_v1_sample_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -814,7 +927,7 @@ func (x *SampleServiceListSamplesResponse_SampleSummary) ProtoReflect() protoref
 
 // Deprecated: Use SampleServiceListSamplesResponse_SampleSummary.ProtoReflect.Descriptor instead.
 func (*SampleServiceListSamplesResponse_SampleSummary) Descriptor() ([]byte, []int) {
-	return file_aff_v1_sample_proto_rawDescGZIP(), []int{8, 0}
+	return file_aff_v1_sample_proto_rawDescGZIP(), []int{9, 0}
 }
 
 func (x *SampleServiceListSamplesResponse_SampleSummary) GetSampleId() string {
@@ -885,23 +998,31 @@ const file_aff_v1_sample_proto_rawDesc = "" +
 	"\ttokens_in\x18( \x01(\x05R\btokensIn\x12\x1d\n" +
 	"\n" +
 	"tokens_out\x18) \x01(\x05R\ttokensOut\x12,\n" +
-	"\x12estimated_cost_usd\x18* \x01(\x01R\x10estimatedCostUsd\"\x89\x01\n" +
+	"\x12estimated_cost_usd\x18* \x01(\x01R\x10estimatedCostUsd\"\xb4\x01\n" +
 	"\x1aSampleServiceSampleRequest\x12\x17\n" +
 	"\afeed_id\x18\x01 \x01(\x03R\x06feedId\x12\x1f\n" +
 	"\vsample_size\x18\x02 \x01(\x05R\n" +
 	"sampleSize\x121\n" +
-	"\x14temperature_override\x18\x03 \x01(\x01R\x13temperatureOverride\"\xb0\x01\n" +
+	"\x14temperature_override\x18\x03 \x01(\x01R\x13temperatureOverride\x12)\n" +
+	"\x05draft\x18\x04 \x01(\v2\x13.aff.v1.SampleDraftR\x05draft\"\x81\x01\n" +
+	"\vSampleDraft\x12#\n" +
+	"\rsystem_prompt\x18\x01 \x01(\tR\fsystemPrompt\x12\x1f\n" +
+	"\vuser_prompt\x18\x02 \x01(\tR\n" +
+	"userPrompt\x12\x14\n" +
+	"\x05model\x18\x03 \x01(\tR\x05model\x12\x16\n" +
+	"\x06effort\x18\x04 \x01(\tR\x06effort\"\xb0\x01\n" +
 	"\x1bSampleServiceSampleResponse\x12\x1b\n" +
 	"\tsample_id\x18\x01 \x01(\tR\bsampleId\x127\n" +
 	"\n" +
 	"candidates\x18\x02 \x03(\v2\x17.aff.v1.SampleCandidateR\n" +
 	"candidates\x12;\n" +
-	"\x1aremaining_daily_budget_usd\x18\x03 \x01(\x01R\x17remainingDailyBudgetUsd\"\x8f\x01\n" +
+	"\x1aremaining_daily_budget_usd\x18\x03 \x01(\x01R\x17remainingDailyBudgetUsd\"\xba\x01\n" +
 	" SampleServiceSampleStreamRequest\x12\x17\n" +
 	"\afeed_id\x18\x01 \x01(\x03R\x06feedId\x12\x1f\n" +
 	"\vsample_size\x18\x02 \x01(\x05R\n" +
 	"sampleSize\x121\n" +
-	"\x14temperature_override\x18\x03 \x01(\x01R\x13temperatureOverride\"\xe2\x01\n" +
+	"\x14temperature_override\x18\x03 \x01(\x01R\x13temperatureOverride\x12)\n" +
+	"\x05draft\x18\x04 \x01(\v2\x13.aff.v1.SampleDraftR\x05draft\"\xe2\x01\n" +
 	"!SampleServiceSampleStreamResponse\x12\x1b\n" +
 	"\tsample_id\x18\x01 \x01(\tR\bsampleId\x125\n" +
 	"\tcandidate\x18\x02 \x01(\v2\x17.aff.v1.SampleCandidateR\tcandidate\x12\x12\n" +
@@ -946,45 +1067,48 @@ func file_aff_v1_sample_proto_rawDescGZIP() []byte {
 	return file_aff_v1_sample_proto_rawDescData
 }
 
-var file_aff_v1_sample_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_aff_v1_sample_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_aff_v1_sample_proto_goTypes = []any{
 	(*NoveltyVerdict)(nil),                                 // 0: aff.v1.NoveltyVerdict
 	(*LinkVerdict)(nil),                                    // 1: aff.v1.LinkVerdict
 	(*SampleCandidate)(nil),                                // 2: aff.v1.SampleCandidate
 	(*SampleServiceSampleRequest)(nil),                     // 3: aff.v1.SampleServiceSampleRequest
-	(*SampleServiceSampleResponse)(nil),                    // 4: aff.v1.SampleServiceSampleResponse
-	(*SampleServiceSampleStreamRequest)(nil),               // 5: aff.v1.SampleServiceSampleStreamRequest
-	(*SampleServiceSampleStreamResponse)(nil),              // 6: aff.v1.SampleServiceSampleStreamResponse
-	(*SampleServiceListSamplesRequest)(nil),                // 7: aff.v1.SampleServiceListSamplesRequest
-	(*SampleServiceListSamplesResponse)(nil),               // 8: aff.v1.SampleServiceListSamplesResponse
-	(*SampleServiceDiscardSampleRequest)(nil),              // 9: aff.v1.SampleServiceDiscardSampleRequest
-	(*SampleServiceDiscardSampleResponse)(nil),             // 10: aff.v1.SampleServiceDiscardSampleResponse
-	(*SampleServiceListSamplesResponse_SampleSummary)(nil), // 11: aff.v1.SampleServiceListSamplesResponse.SampleSummary
-	(ErrorKind)(0),                                         // 12: aff.v1.ErrorKind
-	(*timestamppb.Timestamp)(nil),                          // 13: google.protobuf.Timestamp
+	(*SampleDraft)(nil),                                    // 4: aff.v1.SampleDraft
+	(*SampleServiceSampleResponse)(nil),                    // 5: aff.v1.SampleServiceSampleResponse
+	(*SampleServiceSampleStreamRequest)(nil),               // 6: aff.v1.SampleServiceSampleStreamRequest
+	(*SampleServiceSampleStreamResponse)(nil),              // 7: aff.v1.SampleServiceSampleStreamResponse
+	(*SampleServiceListSamplesRequest)(nil),                // 8: aff.v1.SampleServiceListSamplesRequest
+	(*SampleServiceListSamplesResponse)(nil),               // 9: aff.v1.SampleServiceListSamplesResponse
+	(*SampleServiceDiscardSampleRequest)(nil),              // 10: aff.v1.SampleServiceDiscardSampleRequest
+	(*SampleServiceDiscardSampleResponse)(nil),             // 11: aff.v1.SampleServiceDiscardSampleResponse
+	(*SampleServiceListSamplesResponse_SampleSummary)(nil), // 12: aff.v1.SampleServiceListSamplesResponse.SampleSummary
+	(ErrorKind)(0),                                         // 13: aff.v1.ErrorKind
+	(*timestamppb.Timestamp)(nil),                          // 14: google.protobuf.Timestamp
 }
 var file_aff_v1_sample_proto_depIdxs = []int32{
 	0,  // 0: aff.v1.SampleCandidate.novelty:type_name -> aff.v1.NoveltyVerdict
 	1,  // 1: aff.v1.SampleCandidate.link_verdicts:type_name -> aff.v1.LinkVerdict
-	2,  // 2: aff.v1.SampleServiceSampleResponse.candidates:type_name -> aff.v1.SampleCandidate
-	2,  // 3: aff.v1.SampleServiceSampleStreamResponse.candidate:type_name -> aff.v1.SampleCandidate
-	12, // 4: aff.v1.SampleServiceSampleStreamResponse.error_kind:type_name -> aff.v1.ErrorKind
-	11, // 5: aff.v1.SampleServiceListSamplesResponse.samples:type_name -> aff.v1.SampleServiceListSamplesResponse.SampleSummary
-	13, // 6: aff.v1.SampleServiceListSamplesResponse.SampleSummary.created_at:type_name -> google.protobuf.Timestamp
-	13, // 7: aff.v1.SampleServiceListSamplesResponse.SampleSummary.expires_at:type_name -> google.protobuf.Timestamp
-	3,  // 8: aff.v1.SampleService.Sample:input_type -> aff.v1.SampleServiceSampleRequest
-	5,  // 9: aff.v1.SampleService.SampleStream:input_type -> aff.v1.SampleServiceSampleStreamRequest
-	7,  // 10: aff.v1.SampleService.ListSamples:input_type -> aff.v1.SampleServiceListSamplesRequest
-	9,  // 11: aff.v1.SampleService.DiscardSample:input_type -> aff.v1.SampleServiceDiscardSampleRequest
-	4,  // 12: aff.v1.SampleService.Sample:output_type -> aff.v1.SampleServiceSampleResponse
-	6,  // 13: aff.v1.SampleService.SampleStream:output_type -> aff.v1.SampleServiceSampleStreamResponse
-	8,  // 14: aff.v1.SampleService.ListSamples:output_type -> aff.v1.SampleServiceListSamplesResponse
-	10, // 15: aff.v1.SampleService.DiscardSample:output_type -> aff.v1.SampleServiceDiscardSampleResponse
-	12, // [12:16] is the sub-list for method output_type
-	8,  // [8:12] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	4,  // 2: aff.v1.SampleServiceSampleRequest.draft:type_name -> aff.v1.SampleDraft
+	2,  // 3: aff.v1.SampleServiceSampleResponse.candidates:type_name -> aff.v1.SampleCandidate
+	4,  // 4: aff.v1.SampleServiceSampleStreamRequest.draft:type_name -> aff.v1.SampleDraft
+	2,  // 5: aff.v1.SampleServiceSampleStreamResponse.candidate:type_name -> aff.v1.SampleCandidate
+	13, // 6: aff.v1.SampleServiceSampleStreamResponse.error_kind:type_name -> aff.v1.ErrorKind
+	12, // 7: aff.v1.SampleServiceListSamplesResponse.samples:type_name -> aff.v1.SampleServiceListSamplesResponse.SampleSummary
+	14, // 8: aff.v1.SampleServiceListSamplesResponse.SampleSummary.created_at:type_name -> google.protobuf.Timestamp
+	14, // 9: aff.v1.SampleServiceListSamplesResponse.SampleSummary.expires_at:type_name -> google.protobuf.Timestamp
+	3,  // 10: aff.v1.SampleService.Sample:input_type -> aff.v1.SampleServiceSampleRequest
+	6,  // 11: aff.v1.SampleService.SampleStream:input_type -> aff.v1.SampleServiceSampleStreamRequest
+	8,  // 12: aff.v1.SampleService.ListSamples:input_type -> aff.v1.SampleServiceListSamplesRequest
+	10, // 13: aff.v1.SampleService.DiscardSample:input_type -> aff.v1.SampleServiceDiscardSampleRequest
+	5,  // 14: aff.v1.SampleService.Sample:output_type -> aff.v1.SampleServiceSampleResponse
+	7,  // 15: aff.v1.SampleService.SampleStream:output_type -> aff.v1.SampleServiceSampleStreamResponse
+	9,  // 16: aff.v1.SampleService.ListSamples:output_type -> aff.v1.SampleServiceListSamplesResponse
+	11, // 17: aff.v1.SampleService.DiscardSample:output_type -> aff.v1.SampleServiceDiscardSampleResponse
+	14, // [14:18] is the sub-list for method output_type
+	10, // [10:14] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_aff_v1_sample_proto_init() }
@@ -999,7 +1123,7 @@ func file_aff_v1_sample_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_aff_v1_sample_proto_rawDesc), len(file_aff_v1_sample_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

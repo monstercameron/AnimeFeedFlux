@@ -115,6 +115,19 @@ message AuthServiceSessionResponse {
   // than treating an empty response as an error (PLAN.md §12: /login "must
   // never break").
   Session session = 1;
+  // RemainingRecoveryCodes is how many single-use codes are still unused.
+  //
+  // §12.5 requires Settings to show "regenerate recovery codes WITH remaining
+  // count", and §12.2 nags at <=2 — but until this field existed the count
+  // had no read path at all: it was reported only in the response to
+  // RecoverWithCode, i.e. only to someone already locked out and using one.
+  // The Security panel could therefore never show it, which is the one place
+  // an operator would look BEFORE they need it.
+  //
+  // Zero is a real, alarming value (no way back in but break-glass), so it
+  // is not overloaded to mean "unknown" — a caller with no session simply
+  // gets no session, and this field is only meaningful alongside one.
+  int32 remaining_recovery_codes = 2;
 }
 
 message AuthServiceChangePasswordRequest {

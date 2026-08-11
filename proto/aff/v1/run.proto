@@ -89,10 +89,53 @@ message RunServiceWatchRequest {
 }
 
 message RunServiceWatchResponse {
+  // Sent on the initial snapshot and on every subsequent poll tick
+  // (RunServer.watchPoll) while the run is in flight, and exactly once more
+  // as the terminal message when the run reaches a terminal RunStatus
+  // (PLAN.md §22 J9: "the stream terminates when the run does"). Always the
+  // authoritative row from `runs` — items_added/items_rejected here are
+  // never ahead of what §9's commit transaction has actually persisted.
   Run run = 1;
   // Incremental log lines since the previous event, so the client appends
   // rather than re-fetching the whole log each tick.
   repeated string log_lines = 2;
+  // Set only on a live progress tick pushed through RunProgressReporter
+  // (internal/rpc/run.go) between polls of `run`; unset on every `run`
+  // snapshot above, including the terminal one, which already carries the
+  // authoritative counts. A response has at most one of `run` (unset
+  // log_lines/progress) or `progress` populated — never both in the same
+  // message.
+  RunProgress progress = 3;
+}
+
+// RunProgress is a live, in-flight-only signal — it is never persisted and
+// never authoritative. It exists so the UI can show forward motion between
+// the coarser `run` snapshots above, not to replace them.
+//
+// PLAN.md §22 J9 / TODOS.md BF-43: "progress events never claim items that
+// were not committed." Enforced by keeping the two counts on strictly
+// separate events rather than one mutable running total: a candidate tick
+// (candidates_seen set, items_committed always 0) reports work in progress
+// that may still be rejected by novelty or link-integrity checks (§9 steps
+// 5-6) and can never be read as "items added"; a committed tick
+// (items_committed set, candidates_seen always 0, phase empty) is only ever
+// emitted by the caller AFTER §9's commit transaction — the one that closes
+// the run row and inserts its items atomically — has returned success. See
+// RunProgressReporter's doc comment in internal/rpc/run.go for the exact
+// contract the emitting side (internal/generate's runner) must follow;
+// nothing on the wire can enforce that a caller obeys it.
+message RunProgress {
+  // Free-form on purpose — e.g. "acquiring_context", "calling_model",
+  // "validating", "novelty_check", "link_check", "persisting". New phases
+  // must never require a proto change. Empty on a committed tick.
+  string phase = 1;
+  // Candidates evaluated so far THIS RUN. Tentative — set only on a
+  // candidate tick, always 0 on a committed tick.
+  int32 candidates_seen = 2;
+  // Items actually committed so far THIS RUN, i.e. persisted inside §9's
+  // commit transaction. Set only on a committed tick, always 0 on a
+  // candidate tick.
+  int32 items_committed = 3;
 }
 
 message RunServiceDeleteRequest {
