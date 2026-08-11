@@ -91,6 +91,58 @@ func TestGateRefusesAFeedSwitchedOffAfterBoot(t *testing.T) {
 	}
 }
 
+func TestGateHonoursTheKillSwitchRowNotJustTheBootDefault(t *testing.T) {
+	// Two ways generation can be off, and they are different code paths.
+	//
+	// AFF_GENERATION_ENABLED=false is the boot default and is already
+	// covered. The switch an OPERATOR flips is the settings row that
+	// SystemService.SetGenerationEnabled writes, and until now nothing
+	// asserted the production gate against it: internal/e2e's kill-switch
+	// journey flips the real switch but checks dispatch through its own
+	// settingsGate stand-in, while the existing unit test here uses the
+	// config default. Both halves were tested; the join was not — which is
+	// the same shape as every real defect this codebase has had.
+	//
+	// §13's promise is that flipping this stops new generation while feeds
+	// keep serving, so a gate that ignored the row would keep spending
+	// against a switch the operator believes is off.
+	st := openTestStore(t)
+	feedID := seedFeed(t, st, "trivia-daily", true)
+	cfg := wireTestConfig(t, "127.0.0.1:0", "127.0.0.1:0", true) // boot default: ENABLED
+	gate := &genGate{st: st, cfg: cfg, prices: budget.NewTable(), log: discardLogger()}
+
+	if allowed, reason := gate.Allowed(feedID); !allowed {
+		t.Fatalf("refused before the switch was touched: %q", reason)
+	}
+
+	writeGenerationSetting(t, st, `{"enabled":false}`)
+
+	allowed, reason := gate.Allowed(feedID)
+	if allowed {
+		t.Fatal("the gate ignored the settings row — generation continues against a switch the operator turned off")
+	}
+	if reason != "generation_disabled" {
+		t.Errorf("reason = %q, want generation_disabled", reason)
+	}
+
+	// And back on, without a restart.
+	writeGenerationSetting(t, st, `{"enabled":true}`)
+	if allowed, reason := gate.Allowed(feedID); !allowed {
+		t.Errorf("re-enabling via the settings row did not take effect: %q", reason)
+	}
+}
+
+// writeGenerationSetting writes the row SystemService.SetGenerationEnabled
+// writes, with the same key and the same encoding/json shape wire.go reads.
+func writeGenerationSetting(t *testing.T, st *store.Store, raw string) {
+	t.Helper()
+	if _, err := st.Writer().ExecContext(context.Background(),
+		`INSERT INTO settings (key, value) VALUES ('generation', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, raw); err != nil {
+		t.Fatalf("writing the generation setting: %v", err)
+	}
+}
+
 func TestGateEnforcesTheMonthlyCeilingIndependentlyOfTheDailyOne(t *testing.T) {
 	// A month of small, under-the-daily-cap spends is exactly the case the
 	// monthly ceiling exists for, and exactly the case a daily cap cannot
