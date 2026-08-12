@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -40,9 +41,36 @@ import (
 // Both are properties of GWC's native build, not of this package, and both
 // are covered in a browser by e2eweb.
 
-func render(t *testing.T, n Node) string {
+// renderComponent renders body as a real component, so hooks called inside it
+// have a fiber to attach to.
+//
+// This replaced a plain render(t, Node) helper on 2026-08-11, and the
+// difference is not stylistic. Passing an already-built Node means every hook
+// the primitive calls has ALREADY FIRED, outside any component, by the time the
+// renderer sees it. GWC's native build tolerates that; the browser build — the
+// runtime this code actually ships to — panics with "GoUseState called outside
+// component context". Half these tests were therefore passing only because the
+// host renderer is more forgiving than production, which is exactly the class
+// of gap that makes a green suite worthless. Taking a closure defers
+// construction into a real component, so the primitives are exercised the way
+// the app exercises them and the tests are valid in both builds.
+func renderComponent(t *testing.T, body func() Node) string {
 	t.Helper()
-	out, err := gwcui.RenderToString(n)
+	// Host-only, and the reason is in this file's header: several assertions
+	// below are written against GWC's NATIVE stubs. AccessibleOverlay emits its
+	// children bare on the host and wraps them in a backdrop with
+	// role="dialog" in a browser; UseCompositeNavigation().ActiveIndex()
+	// returns -1 on the host and a real index in a browser. Running these under
+	// wasm does not test more, it tests different markup — and asserting the
+	// browser's shape here would duplicate what e2eweb already covers through
+	// an actual browser, using a renderer that is not the one the app mounts.
+	//
+	// The skip lives in the shared helper rather than in 30 test bodies so it
+	// cannot be forgotten by the next test added to this file.
+	if runtime.GOOS == "js" {
+		t.Skip("asserts GWC's native-build markup; browser rendering is covered by e2eweb")
+	}
+	out, err := gwcui.RenderToString(gwcui.CreateElement(func(struct{}) Node { return body() }, struct{}{}))
 	if err != nil {
 		t.Fatalf("RenderToString: %v", err)
 	}
@@ -117,13 +145,13 @@ func TestButtonDefaultsToTypeButton(t *testing.T) {
 	// A <button> inside a form defaults to type="submit", which submits the
 	// form on click. Every primitive button here is an action button, so the
 	// default must be explicit.
-	got := render(t, Button(ButtonProps{T: testT, LabelKey: "action.save"}))
+	got := renderComponent(t, func() Node { return Button(ButtonProps{T: testT, LabelKey: "action.save"}) })
 	mustContain(t, got, `type="button"`)
 	mustContain(t, got, "T[action.save]")
 }
 
 func TestButtonBusyDisablesAndAnnounces(t *testing.T) {
-	got := render(t, Button(ButtonProps{T: testT, LabelKey: "action.save", Busy: true}))
+	got := renderComponent(t, func() Node { return Button(ButtonProps{T: testT, LabelKey: "action.save", Busy: true}) })
 	mustContain(t, got, "disabled")
 	mustContain(t, got, `aria-busy="true"`)
 }
@@ -132,13 +160,15 @@ func TestButtonDisabledIsNotBusy(t *testing.T) {
 	// Disabled and Busy both disable, but only Busy means "in flight" — a
 	// screen reader that hears aria-busy on a merely-unavailable control is
 	// told to wait for something that is never coming.
-	got := render(t, Button(ButtonProps{T: testT, LabelKey: "action.save", Disabled: true}))
+	got := renderComponent(t, func() Node { return Button(ButtonProps{T: testT, LabelKey: "action.save", Disabled: true}) })
 	mustContain(t, got, "disabled")
 	mustContain(t, got, `aria-busy="false"`)
 }
 
 func TestButtonExplicitTypeWins(t *testing.T) {
-	got := render(t, Button(ButtonProps{T: testT, LabelKey: "action.save", Type: "submit", ID: "save-btn"}))
+	got := renderComponent(t, func() Node {
+		return Button(ButtonProps{T: testT, LabelKey: "action.save", Type: "submit", ID: "save-btn"})
+	})
 	mustContain(t, got, `type="submit"`)
 	mustContain(t, got, `id="save-btn"`)
 }
@@ -147,18 +177,20 @@ func TestButtonNilTranslatorRendersKeyNotEnglish(t *testing.T) {
 	// labels.go's rule: a missing T surfaces as an unresolved key, never as a
 	// hardcoded English literal, so a wiring bug is visible rather than
 	// invisible-but-untranslatable.
-	got := render(t, Button(ButtonProps{LabelKey: "action.save"}))
+	got := renderComponent(t, func() Node { return Button(ButtonProps{LabelKey: "action.save"}) })
 	mustContain(t, got, "action.save")
 }
 
 func TestButtonLabelArgsReachTheTranslator(t *testing.T) {
-	got := render(t, Button(ButtonProps{T: testT, LabelKey: "action.deleteNamed", LabelArgs: []any{"one-piece"}}))
+	got := renderComponent(t, func() Node {
+		return Button(ButtonProps{T: testT, LabelKey: "action.deleteNamed", LabelArgs: []any{"one-piece"}})
+	})
 	mustContain(t, got, "T[action.deleteNamed:one-piece]")
 }
 
 func TestButtonVariantsAllRender(t *testing.T) {
 	for _, v := range []ButtonVariant{ButtonSecondary, ButtonPrimary, ButtonGhost, ButtonDanger} {
-		got := render(t, Button(ButtonProps{T: testT, LabelKey: "k", Variant: v, FullWidth: true}))
+		got := renderComponent(t, func() Node { return Button(ButtonProps{T: testT, LabelKey: "k", Variant: v, FullWidth: true}) })
 		mustContain(t, got, "<button")
 	}
 }
@@ -166,7 +198,7 @@ func TestButtonVariantsAllRender(t *testing.T) {
 // --- Input ----------------------------------------------------------------
 
 func TestInputLabelIsWiredToTheField(t *testing.T) {
-	got := render(t, Input(InputProps{T: testT, ID: "slug", LabelKey: "field.slug"}))
+	got := renderComponent(t, func() Node { return Input(InputProps{T: testT, ID: "slug", LabelKey: "field.slug"}) })
 	mustContain(t, got, `for="slug"`)
 	mustContain(t, got, `id="slug"`)
 	mustContain(t, got, "T[field.slug]")
@@ -175,10 +207,12 @@ func TestInputLabelIsWiredToTheField(t *testing.T) {
 func TestInputErrorSetsAriaInvalidAndReplacesHelp(t *testing.T) {
 	// The point of the primitive: a validation message that is announced, not
 	// merely colored red.
-	got := render(t, Input(InputProps{
-		T: testT, ID: "slug", LabelKey: "field.slug",
-		HelpKey: "field.slugHelp", ErrorKey: "field.slugTaken", ErrorArgs: []any{"one-piece"},
-	}))
+	got := renderComponent(t, func() Node {
+		return Input(InputProps{
+			T: testT, ID: "slug", LabelKey: "field.slug",
+			HelpKey: "field.slugHelp", ErrorKey: "field.slugTaken", ErrorArgs: []any{"one-piece"},
+		})
+	})
 	mustContain(t, got, `aria-invalid="true"`)
 	mustContain(t, got, `aria-describedby="slug-help"`)
 	mustContain(t, got, `id="slug-help"`)
@@ -190,26 +224,28 @@ func TestInputDescribedbyAlwaysResolvesToARealElement(t *testing.T) {
 	// helpOrError renders an empty span rather than nothing, so
 	// aria-describedby never points at an id that does not exist — a dangling
 	// reference is an accessibility error, not a harmless no-op.
-	got := render(t, Input(InputProps{T: testT, ID: "slug", LabelKey: "field.slug"}))
+	got := renderComponent(t, func() Node { return Input(InputProps{T: testT, ID: "slug", LabelKey: "field.slug"}) })
 	mustContain(t, got, `aria-describedby="slug-help"`)
 	mustContain(t, got, `id="slug-help"`)
 	mustContain(t, got, `aria-invalid="false"`)
 }
 
 func TestInputHelpShowsWhenThereIsNoError(t *testing.T) {
-	got := render(t, Input(InputProps{T: testT, ID: "slug", LabelKey: "l", HelpKey: "field.slugHelp"}))
+	got := renderComponent(t, func() Node { return Input(InputProps{T: testT, ID: "slug", LabelKey: "l", HelpKey: "field.slugHelp"}) })
 	mustContain(t, got, "T[field.slugHelp]")
 }
 
 func TestInputTypeDefaultsToTextAndCarriesOptionals(t *testing.T) {
-	got := render(t, Input(InputProps{T: testT, ID: "a", LabelKey: "l"}))
+	got := renderComponent(t, func() Node { return Input(InputProps{T: testT, ID: "a", LabelKey: "l"}) })
 	mustContain(t, got, `type="text"`)
 
-	got = render(t, Input(InputProps{
-		T: testT, ID: "pw", LabelKey: "l", Type: "password",
-		PlaceholderKey: "field.pwPlaceholder", AutoComplete: "current-password",
-		Required: true, Disabled: true, Mono: true, Value: "hunter",
-	}))
+	got = renderComponent(t, func() Node {
+		return Input(InputProps{
+			T: testT, ID: "pw", LabelKey: "l", Type: "password",
+			PlaceholderKey: "field.pwPlaceholder", AutoComplete: "current-password",
+			Required: true, Disabled: true, Mono: true, Value: "hunter",
+		})
+	})
 	mustContain(t, got, `type="password"`)
 	mustContain(t, got, `placeholder="T[field.pwPlaceholder]"`)
 	mustContain(t, got, `autocomplete="current-password"`)
@@ -220,7 +256,18 @@ func TestInputTypeDefaultsToTextAndCarriesOptionals(t *testing.T) {
 func TestInputWithoutIDStillWiresLabelToField(t *testing.T) {
 	// The generated id must be the SAME one the label points at; a mismatch
 	// would leave the field unlabeled and the failure is invisible by eye.
-	got := render(t, Input(InputProps{T: testT, LabelKey: "l"}))
+	//
+	// Rendered through ui.CreateElement rather than by calling Input directly,
+	// which every other test in this file can do safely because every other
+	// test passes an explicit ID. This is the one case that does not, so it is
+	// the one case that reaches gwcui.UseId() — and a hook called outside a
+	// component context is a framework-misuse PANIC in the browser build
+	// ("GoUseId called outside component context"), while the native build's
+	// stub tolerates it. Calling it the illegal way happened to work here only
+	// because the host renderer is more forgiving than the runtime this code
+	// actually ships to; wrapping it in a component makes the test valid in
+	// both builds and exercises the id generation the way the app does.
+	got := renderComponent(t, func() Node { return Input(InputProps{T: testT, LabelKey: "l"}) })
 	id := attrValue(t, got, `<input`, "id")
 	if id == "" {
 		t.Fatalf("input has no id: %s", got)
@@ -233,13 +280,15 @@ func TestInputWithoutIDStillWiresLabelToField(t *testing.T) {
 // --- Select ---------------------------------------------------------------
 
 func TestSelectMarksTheMatchingOptionSelected(t *testing.T) {
-	got := render(t, Select(SelectProps{
-		T: testT, ID: "fmt", LabelKey: "field.format", Value: "atom",
-		Options: []SelectOption{
-			{Value: "rss", LabelKey: "format.rss"},
-			{Value: "atom", LabelKey: "format.atom"},
-		},
-	}))
+	got := renderComponent(t, func() Node {
+		return Select(SelectProps{
+			T: testT, ID: "fmt", LabelKey: "field.format", Value: "atom",
+			Options: []SelectOption{
+				{Value: "rss", LabelKey: "format.rss"},
+				{Value: "atom", LabelKey: "format.atom"},
+			},
+		})
+	})
 	mustContain(t, got, "T[format.rss]")
 	mustContain(t, got, "T[format.atom]")
 	mustContain(t, got, "selected")
@@ -250,11 +299,13 @@ func TestSelectMarksTheMatchingOptionSelected(t *testing.T) {
 }
 
 func TestSelectErrorWiring(t *testing.T) {
-	got := render(t, Select(SelectProps{
-		T: testT, ID: "fmt", LabelKey: "l", ErrorKey: "err.pick", ErrorArgs: []any{"x"},
-		Options:  []SelectOption{{Value: "a", LabelKey: "a"}},
-		Required: true, Disabled: true,
-	}))
+	got := renderComponent(t, func() Node {
+		return Select(SelectProps{
+			T: testT, ID: "fmt", LabelKey: "l", ErrorKey: "err.pick", ErrorArgs: []any{"x"},
+			Options:  []SelectOption{{Value: "a", LabelKey: "a"}},
+			Required: true, Disabled: true,
+		})
+	})
 	mustContain(t, got, `aria-invalid="true"`)
 	mustContain(t, got, `aria-describedby="fmt-help"`)
 	mustContain(t, got, "T[err.pick:x]")
@@ -262,8 +313,10 @@ func TestSelectErrorWiring(t *testing.T) {
 }
 
 func TestSelectWithoutIDGeneratesOne(t *testing.T) {
-	got := render(t, Select(SelectProps{T: testT, LabelKey: "l", HelpKey: "h",
-		Options: []SelectOption{{Value: "a", LabelKey: "a"}}}))
+	got := renderComponent(t, func() Node {
+		return Select(SelectProps{T: testT, LabelKey: "l", HelpKey: "h",
+			Options: []SelectOption{{Value: "a", LabelKey: "a"}}})
+	})
 	mustContain(t, got, "T[h]")
 	mustContain(t, got, "<select")
 }
@@ -271,7 +324,7 @@ func TestSelectWithoutIDGeneratesOne(t *testing.T) {
 // --- Textarea -------------------------------------------------------------
 
 func TestTextareaDefaultsToFourRows(t *testing.T) {
-	got := render(t, Textarea(TextareaProps{T: testT, ID: "prompt", LabelKey: "field.prompt"}))
+	got := renderComponent(t, func() Node { return Textarea(TextareaProps{T: testT, ID: "prompt", LabelKey: "field.prompt"}) })
 	mustContain(t, got, "<textarea")
 	mustContain(t, got, `rows="4"`)
 	mustContain(t, got, `for="prompt"`)
@@ -281,12 +334,14 @@ func TestTextareaSharesInputsErrorConvention(t *testing.T) {
 	// The reason this primitive exists: multi-line fields used to be bare
 	// shorthand tags with no label, no error text and no aria wiring, unlike
 	// every single-line field. That gap is what these assertions pin.
-	got := render(t, Textarea(TextareaProps{
-		T: testT, ID: "prompt", LabelKey: "l", HelpKey: "h",
-		ErrorKey: "err.tooLong", ErrorArgs: []any{4000},
-		Rows: 10, Mono: true, Required: true, Disabled: true,
-		PlaceholderKey: "ph", Value: "body",
-	}))
+	got := renderComponent(t, func() Node {
+		return Textarea(TextareaProps{
+			T: testT, ID: "prompt", LabelKey: "l", HelpKey: "h",
+			ErrorKey: "err.tooLong", ErrorArgs: []any{4000},
+			Rows: 10, Mono: true, Required: true, Disabled: true,
+			PlaceholderKey: "ph", Value: "body",
+		})
+	})
 	mustContain(t, got, `rows="10"`)
 	mustContain(t, got, `aria-invalid="true"`)
 	mustContain(t, got, `aria-describedby="prompt-help"`)
@@ -297,7 +352,7 @@ func TestTextareaSharesInputsErrorConvention(t *testing.T) {
 }
 
 func TestTextareaWithoutIDGeneratesOne(t *testing.T) {
-	got := render(t, Textarea(TextareaProps{T: testT, LabelKey: "l"}))
+	got := renderComponent(t, func() Node { return Textarea(TextareaProps{T: testT, LabelKey: "l"}) })
 	id := attrValue(t, got, "<textarea", "id")
 	if id == "" {
 		t.Fatalf("textarea has no id: %s", got)
@@ -308,12 +363,14 @@ func TestTextareaWithoutIDGeneratesOne(t *testing.T) {
 // --- Toggle ---------------------------------------------------------------
 
 func TestToggleIsASwitchWithState(t *testing.T) {
-	got := render(t, Toggle(ToggleProps{T: testT, ID: "enabled", LabelKey: "field.enabled", Checked: true}))
+	got := renderComponent(t, func() Node {
+		return Toggle(ToggleProps{T: testT, ID: "enabled", LabelKey: "field.enabled", Checked: true})
+	})
 	mustContain(t, got, `role="switch"`)
 	mustContain(t, got, `aria-checked="true"`)
 	mustContain(t, got, `for="enabled"`)
 
-	got = render(t, Toggle(ToggleProps{T: testT, ID: "enabled", LabelKey: "l"}))
+	got = renderComponent(t, func() Node { return Toggle(ToggleProps{T: testT, ID: "enabled", LabelKey: "l"}) })
 	mustContain(t, got, `aria-checked="false"`)
 }
 
@@ -322,48 +379,54 @@ func TestToggleReasonOnlyShowsWhileActuallyDisabled(t *testing.T) {
 	// whenever the key was set, so every screen with a toggle carried a
 	// permanent, false "Reconnecting to the server — these controls are
 	// unavailable" under a control that was working fine.
-	working := render(t, Toggle(ToggleProps{
-		T: testT, ID: "kill", LabelKey: "l",
-		DisabledReasonKey: "state.reconnecting",
-	}))
+	working := renderComponent(t, func() Node {
+		return Toggle(ToggleProps{
+			T: testT, ID: "kill", LabelKey: "l",
+			DisabledReasonKey: "state.reconnecting",
+		})
+	})
 	mustNotContain(t, working, "T[state.reconnecting]")
 	mustNotContain(t, working, `aria-describedby="kill-reason"`)
 
-	stopped := render(t, Toggle(ToggleProps{
-		T: testT, ID: "kill", LabelKey: "l", Disabled: true,
-		DisabledReasonKey: "state.reconnecting",
-	}))
+	stopped := renderComponent(t, func() Node {
+		return Toggle(ToggleProps{
+			T: testT, ID: "kill", LabelKey: "l", Disabled: true,
+			DisabledReasonKey: "state.reconnecting",
+		})
+	})
 	mustContain(t, stopped, "T[state.reconnecting]")
 	mustContain(t, stopped, `aria-describedby="kill-reason"`)
 	mustContain(t, stopped, `id="kill-reason"`)
 }
 
 func TestToggleDisabledWithoutAReasonHasNoDanglingDescribedby(t *testing.T) {
-	got := render(t, Toggle(ToggleProps{T: testT, ID: "kill", LabelKey: "l", Disabled: true}))
+	got := renderComponent(t, func() Node { return Toggle(ToggleProps{T: testT, ID: "kill", LabelKey: "l", Disabled: true}) })
 	mustContain(t, got, "disabled")
 	mustNotContain(t, got, "aria-describedby")
 }
 
 func TestToggleWithoutIDGeneratesOne(t *testing.T) {
-	got := render(t, Toggle(ToggleProps{T: testT, LabelKey: "l", OnChange: func(bool) {}}))
+	got := renderComponent(t, func() Node { return Toggle(ToggleProps{T: testT, LabelKey: "l", OnChange: func(bool) {}}) })
 	mustContain(t, got, `role="switch"`)
 }
 
 // --- Table ----------------------------------------------------------------
 
 func TestTableIsSemanticAndCaptioned(t *testing.T) {
-	got := render(t, Table(TableProps{
-		T: testT, ID: "runs", CaptionKey: "table.runs",
-		Columns: []TableColumn{
-			{ID: "when", LabelKey: "col.when"},
-			{ID: "cost", LabelKey: "col.cost", Mono: true},
-		},
-		Rows: []map[string]Node{
-			{"when": textNode("yesterday"), "cost": textNode("$0.01")},
-			{"when": textNode("today"), "cost": textNode("$0.02")},
-		},
-		RowKeys: []string{"r1", "r2"},
-	}))
+	got := renderComponent(t, func() Node {
+		return Table(TableProps{
+			T: testT, ID: "runs", CaptionKey: "table.runs",
+			Columns: []TableColumn{
+				{ID: "when", LabelKey: "col.when"},
+				{ID: "cost", LabelKey: "col.cost", Mono: true},
+			},
+			Rows: []map[string]Node{
+				{"when": textNode("yesterday"), "cost": textNode("$0.01")},
+				{"when": textNode("today"), "cost": textNode("$0.02")},
+			},
+			RowKeys: []string{"r1", "r2"},
+		})
+	})
 	mustContain(t, got, "<caption")
 	mustContain(t, got, "T[table.runs]")
 	mustContain(t, got, `scope="col"`)
@@ -382,20 +445,24 @@ func TestTableScrollContainerIsKeyboardReachable(t *testing.T) {
 	// An overflow:auto box with no tabindex is scrollable with a mouse and
 	// unreachable with a keyboard — the exact failure the container's doc
 	// comment says it exists to avoid.
-	got := render(t, Table(TableProps{T: testT, CaptionKey: "c",
-		Columns: []TableColumn{{ID: "a", LabelKey: "a"}}}))
+	got := renderComponent(t, func() Node {
+		return Table(TableProps{T: testT, CaptionKey: "c",
+			Columns: []TableColumn{{ID: "a", LabelKey: "a"}}})
+	})
 	mustContain(t, got, `tabIndex="0"`)
 }
 
 func TestTableToleratesMissingRowKeysAndCells(t *testing.T) {
 	// RowKeys shorter than Rows, and a row with no entry for a declared
 	// column, must still render a well-formed table rather than panicking.
-	got := render(t, Table(TableProps{
-		T: testT, CaptionKey: "c",
-		Columns: []TableColumn{{ID: "a", LabelKey: "a"}, {ID: "b", LabelKey: "b"}},
-		Rows:    []map[string]Node{{"a": textNode("only-a")}},
-		RowKeys: nil,
-	}))
+	got := renderComponent(t, func() Node {
+		return Table(TableProps{
+			T: testT, CaptionKey: "c",
+			Columns: []TableColumn{{ID: "a", LabelKey: "a"}, {ID: "b", LabelKey: "b"}},
+			Rows:    []map[string]Node{{"a": textNode("only-a")}},
+			RowKeys: nil,
+		})
+	})
 	mustContain(t, got, "only-a")
 	mustContain(t, got, "<td")
 }
@@ -403,13 +470,15 @@ func TestTableToleratesMissingRowKeysAndCells(t *testing.T) {
 // --- Tabs -----------------------------------------------------------------
 
 func TestTabsWiresRolesAndSelection(t *testing.T) {
-	got := render(t, Tabs(TabsProps{
-		T: testT, ID: "history-tabs", LabelKey: "tabs.history", ActiveID: "items",
-		Tabs: []Tab{
-			{ID: "runs", LabelKey: "tab.runs", PanelID: "runs-panel"},
-			{ID: "items", LabelKey: "tab.items", PanelID: "items-panel", LabelArgs: []any{"3"}},
-		},
-	}))
+	got := renderComponent(t, func() Node {
+		return Tabs(TabsProps{
+			T: testT, ID: "history-tabs", LabelKey: "tabs.history", ActiveID: "items",
+			Tabs: []Tab{
+				{ID: "runs", LabelKey: "tab.runs", PanelID: "runs-panel"},
+				{ID: "items", LabelKey: "tab.items", PanelID: "items-panel", LabelArgs: []any{"3"}},
+			},
+		})
+	})
 	mustContain(t, got, `role="tablist"`)
 	mustContain(t, got, `aria-label="T[tabs.history]"`)
 	mustContain(t, got, `role="tab"`)
@@ -423,8 +492,10 @@ func TestTabsWiresRolesAndSelection(t *testing.T) {
 }
 
 func TestTabsWithNoActiveIDSelectsNothing(t *testing.T) {
-	got := render(t, Tabs(TabsProps{T: testT, ID: "t", LabelKey: "l",
-		Tabs: []Tab{{ID: "a", LabelKey: "a", PanelID: "pa"}}}))
+	got := renderComponent(t, func() Node {
+		return Tabs(TabsProps{T: testT, ID: "t", LabelKey: "l",
+			Tabs: []Tab{{ID: "a", LabelKey: "a", PanelID: "pa"}}})
+	})
 	mustNotContain(t, got, `aria-selected="true"`)
 }
 
@@ -434,10 +505,12 @@ func TestKebabTriggerHasAnAccessibleName(t *testing.T) {
 	// A bare "⋯" with no accessible name is unusable with a screen reader,
 	// and the glyph itself must stay out of the accessibility tree so it is
 	// not read as prose.
-	got := render(t, Kebab(KebabProps{
-		T: testT, ID: "row-7", LabelKey: "kebab.actionsFor", LabelArgs: []any{"One Piece"}, Open: true,
-		Items: []KebabItem{{ID: "edit", LabelKey: "action.edit"}},
-	}))
+	got := renderComponent(t, func() Node {
+		return Kebab(KebabProps{
+			T: testT, ID: "row-7", LabelKey: "kebab.actionsFor", LabelArgs: []any{"One Piece"}, Open: true,
+			Items: []KebabItem{{ID: "edit", LabelKey: "action.edit"}},
+		})
+	})
 	mustContain(t, got, `aria-label="T[kebab.actionsFor:One Piece]"`)
 	mustContain(t, got, `aria-haspopup="menu"`)
 	mustContain(t, got, `aria-expanded="true"`)
@@ -447,21 +520,25 @@ func TestKebabTriggerHasAnAccessibleName(t *testing.T) {
 }
 
 func TestKebabClosedReportsCollapsed(t *testing.T) {
-	got := render(t, Kebab(KebabProps{T: testT, ID: "row-7", LabelKey: "l",
-		Items: []KebabItem{{ID: "edit", LabelKey: "action.edit"}}}))
+	got := renderComponent(t, func() Node {
+		return Kebab(KebabProps{T: testT, ID: "row-7", LabelKey: "l",
+			Items: []KebabItem{{ID: "edit", LabelKey: "action.edit"}}})
+	})
 	mustContain(t, got, `aria-expanded="false"`)
 }
 
 func TestKebabPutsDestructiveItemsLast(t *testing.T) {
-	got := render(t, Kebab(KebabProps{
-		T: testT, ID: "k", LabelKey: "l", Open: true,
-		Items: []KebabItem{
-			{ID: "purge", LabelKey: "action.purge", Danger: true},
-			{ID: "edit", LabelKey: "action.edit"},
-			{ID: "delete", LabelKey: "action.delete", Danger: true, Disabled: true},
-			{ID: "copy", LabelKey: "action.copy"},
-		},
-	}))
+	got := renderComponent(t, func() Node {
+		return Kebab(KebabProps{
+			T: testT, ID: "k", LabelKey: "l", Open: true,
+			Items: []KebabItem{
+				{ID: "purge", LabelKey: "action.purge", Danger: true},
+				{ID: "edit", LabelKey: "action.edit"},
+				{ID: "delete", LabelKey: "action.delete", Danger: true, Disabled: true},
+				{ID: "copy", LabelKey: "action.copy"},
+			},
+		})
+	})
 	order := []string{`id="edit"`, `id="copy"`, `id="purge"`, `id="delete"`}
 	last := -1
 	for _, want := range order {
@@ -513,10 +590,12 @@ func ids(items []KebabItem) []string {
 // --- Modal / Confirm ------------------------------------------------------
 
 func TestModalTitleIsTheDialogsAccessibleName(t *testing.T) {
-	got := render(t, Modal(ModalProps{
-		T: testT, ID: "purge", TitleKey: "modal.purgeTitle", Open: true,
-		Children: []Node{textNode("body copy")},
-	}))
+	got := renderComponent(t, func() Node {
+		return Modal(ModalProps{
+			T: testT, ID: "purge", TitleKey: "modal.purgeTitle", Open: true,
+			Children: []Node{textNode("body copy")},
+		})
+	})
 	mustContain(t, got, `id="purge-title"`)
 	mustContain(t, got, "T[modal.purgeTitle]")
 	mustContain(t, got, "body copy")
@@ -527,17 +606,21 @@ func TestModalTitleIsTheDialogsAccessibleName(t *testing.T) {
 func TestConfirmKeepsTheDestructiveButtonDisabledUntilThePhraseMatches(t *testing.T) {
 	// The safety property: there is no separate "are you sure" click to race
 	// past, so the button's disabled state IS the gate.
-	mismatch := render(t, Confirm(ConfirmProps{
-		T: testT, ID: "purge", TitleKey: "t", MessageKey: "m",
-		RequiredPhrase: "one-piece", Typed: "one-pie", Open: true,
-	}))
+	mismatch := renderComponent(t, func() Node {
+		return Confirm(ConfirmProps{
+			T: testT, ID: "purge", TitleKey: "t", MessageKey: "m",
+			RequiredPhrase: "one-piece", Typed: "one-pie", Open: true,
+		})
+	})
 	mustContain(t, mismatch, "disabled")
 	mustContain(t, mismatch, "T[confirm.typePhrase:one-piece]")
 
-	match := render(t, Confirm(ConfirmProps{
-		T: testT, ID: "purge", TitleKey: "t", MessageKey: "m",
-		RequiredPhrase: "one-piece", Typed: "  one-piece  ", Open: true,
-	}))
+	match := renderComponent(t, func() Node {
+		return Confirm(ConfirmProps{
+			T: testT, ID: "purge", TitleKey: "t", MessageKey: "m",
+			RequiredPhrase: "one-piece", Typed: "  one-piece  ", Open: true,
+		})
+	})
 	// Cancel is still enabled in both; the destructive button is the one that
 	// changes, so compare the counts rather than looking for "disabled" at all.
 	if strings.Count(match, "disabled") >= strings.Count(mismatch, "disabled") {
@@ -546,10 +629,12 @@ func TestConfirmKeepsTheDestructiveButtonDisabledUntilThePhraseMatches(t *testin
 }
 
 func TestConfirmBusyDisablesBothButtons(t *testing.T) {
-	busy := render(t, Confirm(ConfirmProps{
-		T: testT, ID: "purge", TitleKey: "t", MessageKey: "m",
-		RequiredPhrase: "x", Typed: "x", Open: true, Busy: true,
-	}))
+	busy := renderComponent(t, func() Node {
+		return Confirm(ConfirmProps{
+			T: testT, ID: "purge", TitleKey: "t", MessageKey: "m",
+			RequiredPhrase: "x", Typed: "x", Open: true, Busy: true,
+		})
+	})
 	mustContain(t, busy, `aria-busy="true"`)
 	if n := strings.Count(busy, "disabled"); n < 2 {
 		t.Errorf("want cancel and confirm both disabled while busy, got %d disabled controls\n%s", n, busy)
@@ -580,13 +665,15 @@ func TestConfirmMatchesIsExactApartFromSurroundingSpace(t *testing.T) {
 // --- Toast ----------------------------------------------------------------
 
 func TestToastCardsAreStatusRegions(t *testing.T) {
-	got := render(t, Toast(ToastProps{
-		T: testT, ID: "toasts", OnDismiss: func(string) {},
-		Items: []ToastItem{
-			{ID: "t1", Kind: ToastSuccess, MessageKey: "toast.saved"},
-			{ID: "t2", Kind: ToastDanger, MessageKey: "toast.runFailed", MessageArgs: []any{"one-piece"}},
-		},
-	}))
+	got := renderComponent(t, func() Node {
+		return Toast(ToastProps{
+			T: testT, ID: "toasts", OnDismiss: func(string) {},
+			Items: []ToastItem{
+				{ID: "t1", Kind: ToastSuccess, MessageKey: "toast.saved"},
+				{ID: "t2", Kind: ToastDanger, MessageKey: "toast.runFailed", MessageArgs: []any{"one-piece"}},
+			},
+		})
+	})
 	if n := strings.Count(got, `role="status"`); n != 2 {
 		t.Errorf("want one status region per toast, got %d\n%s", n, got)
 	}
@@ -596,8 +683,10 @@ func TestToastCardsAreStatusRegions(t *testing.T) {
 }
 
 func TestToastWithoutDismissRendersNoCloseControl(t *testing.T) {
-	got := render(t, Toast(ToastProps{T: testT, ID: "toasts",
-		Items: []ToastItem{{ID: "t1", MessageKey: "m"}}}))
+	got := renderComponent(t, func() Node {
+		return Toast(ToastProps{T: testT, ID: "toasts",
+			Items: []ToastItem{{ID: "t1", MessageKey: "m"}}})
+	})
 	mustNotContain(t, got, "action.dismiss")
 }
 
@@ -605,7 +694,7 @@ func TestToastEmptyStackStillRendersTheLiveRegion(t *testing.T) {
 	// The announcer region must exist BEFORE the first toast arrives:
 	// a live region inserted at the same moment as its content is not
 	// reliably announced.
-	got := render(t, Toast(ToastProps{T: testT, ID: "toasts"}))
+	got := renderComponent(t, func() Node { return Toast(ToastProps{T: testT, ID: "toasts"}) })
 	mustContain(t, got, `id="toasts"`)
 }
 
@@ -684,7 +773,7 @@ func TestStatePanelRendersTheOneMatchingView(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := render(t, StatePanel(tc.props))
+			got := renderComponent(t, func() Node { return StatePanel(tc.props) })
 			for _, w := range tc.want {
 				mustContain(t, got, w)
 			}

@@ -124,6 +124,7 @@ func guardUnary[T any](conn *Conn, ctx context.Context, timeout time.Duration, c
 	}()
 	select {
 	case r := <-done:
+		conn.noteSessionExpiry(r.err)
 		return r.val, r.err
 	case <-time.After(timeout):
 		var zero T
@@ -144,7 +145,9 @@ func guardCall[T any](conn *Conn, call func() (T, error)) (T, error) {
 		var zero T
 		return zero, ErrDisconnected
 	}
-	return call()
+	v, err := call()
+	conn.noteSessionExpiry(err)
+	return v, err
 }
 
 // ---------------------------------------------------------------------

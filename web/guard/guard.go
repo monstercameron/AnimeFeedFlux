@@ -92,3 +92,58 @@ func DecideUnknown(state appstate.State) string {
 	}
 	return DefaultAnon
 }
+
+// SessionChange is what the shell should do when the SESSION STATE changes
+// underneath a route that is already open, as opposed to when someone
+// navigates to a new one.
+//
+// Decide answers "may this person open this page". It runs on BeforeEnter and
+// only there, which leaves the case that actually happens uncovered: the
+// session dying under a page the admin is already looking at. Nothing re-ran
+// Decide when the state changed, so an expired session left the admin parked
+// on /generate — state correctly ANON, header inert, every RPC failing, page
+// still on screen looking like a working application that had stopped working.
+type SessionChange struct {
+	// RedirectTo is where to send the admin, or "" to leave them alone.
+	RedirectTo string
+	// ExplainExpiry is true when the redirect is happening because an
+	// authed session went away under them, rather than because they asked
+	// for a page they were never entitled to. Only that case earns the
+	// "your session expired" notice: telling someone who deep-linked into
+	// /settings while signed out that their session expired would be a lie.
+	ExplainExpiry bool
+	// ClearNotice is true once the admin is legitimately somewhere, so a
+	// stale explanation does not follow them into the next session.
+	ClearNotice bool
+}
+
+// DecideSessionChange re-evaluates Decide for an already-open route.
+//
+// holdingUnsavedWork is D0-08's hold: while the expiry modal is up because
+// the page reported unsaved work, this reports "stay put" no matter what the
+// state says. Redirecting then would yank the page out from under an admin
+// who has just been told their work is being kept — the exact loss the hold
+// exists to prevent. Acknowledging the modal clears the hold, and the next
+// evaluation performs the redirect.
+//
+// known is false for a path with no RouteInfo (the router's "*" catch-all).
+// Its own guard already redirects unconditionally on entry, and inventing a
+// RouteInfo for it here would be a second rule for the same question.
+func DecideSessionChange(state appstate.State, r RouteInfo, known, holdingUnsavedWork bool) SessionChange {
+	if holdingUnsavedWork || !known {
+		return SessionChange{}
+	}
+
+	if d := Decide(state, r); !d.Allow {
+		return SessionChange{
+			RedirectTo: d.RedirectTo,
+			// An authed route + ANON is precisely "you had a session and now
+			// you do not". Every other refusal is a routing rule, not a loss.
+			ExplainExpiry: r.RequiresAuth && state == appstate.Anon,
+		}
+	}
+
+	// Allowed to be here. Clear any explanation once the session is real
+	// again — the notice describes an event, not a permanent condition.
+	return SessionChange{ClearNotice: appstate.IsAuthedIsh(state)}
+}

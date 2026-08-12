@@ -13,6 +13,7 @@ import (
 // override lands on a selector that can match the element ui.SetTheme
 // actually stamps (:root itself, not some ancestor of it).
 func TestEmit_CustomPropertiesSurvive(t *testing.T) {
+	skipIfWasm(t)
 	css.Reset()
 	Emit()
 	out := css.Harvest()

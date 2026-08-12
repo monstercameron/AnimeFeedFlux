@@ -14,6 +14,7 @@ import (
 // tokens.Duration) must collapse under the media query without that
 // component doing anything itself.
 func TestReducedMotion_HonouredAtTokenLayer(t *testing.T) {
+	skipIfWasm(t)
 	css.Reset()
 	Emit()
 	out := css.Harvest()
@@ -42,6 +43,7 @@ func TestReducedMotion_HonouredAtTokenLayer(t *testing.T) {
 // additive (scoped inside @media) rather than replacing the unconditional
 // :root durations components read the rest of the time.
 func TestReducedMotion_DoesNotAlterDefaultDurations(t *testing.T) {
+	skipIfWasm(t)
 	css.Reset()
 	Emit()
 	out := css.Harvest()

@@ -120,8 +120,29 @@ func Modal(p ModalProps) Node {
 		BackgroundInert:     true,
 		Backdrop:            true,
 		BaseZIndex:          50,
+		// The backdrop is what makes a modal FLOAT.
+		//
+		// gwcui.Overlay sets only z-index and some data- attributes on the
+		// surfaces it renders; positioning is the caller's job (the library's
+		// own example passes `fixed left-… top-…` through SurfaceClass). This
+		// backdrop carried a background colour and nothing else, so the whole
+		// dialog sat in normal flow: opening it pushed the page down by its
+		// own height instead of covering it — measured at 1556px → 1879px on
+		// /generate, with the "dialog" appearing inline halfway down the
+		// document.
+		//
+		// Fixed, full-viewport, and a flex centring context for the surface
+		// inside it (the library nests surface within backdrop), which is
+		// also what gives the dialog its position without the surface needing
+		// to know anything about the viewport.
 		BackdropStyle: map[string]string{
-			"background": string(tokens.Color(tokens.RoleScrim)),
+			"background":      string(tokens.Color(tokens.RoleScrim)),
+			"position":        "fixed",
+			"inset":           "0",
+			"display":         "flex",
+			"align-items":     "center",
+			"justify-content": "center",
+			"padding":         string(tokens.Space(4)),
 		},
 		SurfaceClass: string(css.New(surfaceRules...)),
 		Children:     body,

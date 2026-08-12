@@ -283,3 +283,43 @@ func (c *Conn) Close() error {
 	}
 	return c.cc.Close()
 }
+
+// noteSessionExpiry turns "that RPC came back Unauthenticated because the
+// session is gone" into the appstate event the shell already knows how to
+// act on.
+//
+// Every RPC this package hands a page passes through guardUnary or guardCall
+// (see clients.go's opening comment on why the guard is on every method
+// rather than applied ad hoc), so putting the detection there means session
+// expiry is noticed no matter which call happens to be the one that finds
+// out — a background poll, a click, or a page's first load. A page cannot
+// forget to check, and a page added later inherits it.
+//
+// Emitting is all this does. Whether that means a redirect, a "you have
+// unsaved work" hold, or nothing at all is the shell's decision (see
+// web/shell/session.go's applyEvent and sessionroute.go) — wsconn knows about
+// transports, not about routing.
+func (c *Conn) noteSessionExpiry(err error) {
+	if !IsSessionExpired(err) {
+		return
+	}
+	// Emitted on the JS event loop, NOT from this goroutine, and that is the
+	// difference between working and silently doing nothing.
+	//
+	// noteSessionExpiry runs on whatever goroutine made the RPC — a page's
+	// loader, a background poll. A state update made off-loop is not applied
+	// immediately by GWC v5.0.1: it is queued, and the drain that would apply
+	// it defers itself while a render is in flight and only re-books if one is
+	// not already marked scheduled. web/ui/pump.go documents this defect at
+	// length, having been written to work around the same thing making Save
+	// look hung.
+	//
+	// The symptom here was precise and confusing: the expiry was DETECTED
+	// (markers proved noteSessionExpiry ran and matched), the event was
+	// emitted, and the session state never changed — the shell's watcher kept
+	// observing AUTH while every RPC came back "session expired".
+	//
+	// AfterFunc(0) hands the emit to the JS timer queue, so the state write
+	// happens on-loop as its own task, applies immediately, and renders.
+	time.AfterFunc(0, func() { c.emit(appstate.EvSessionExpired) })
+}
