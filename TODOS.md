@@ -567,7 +567,7 @@ ships, against what this app calls. Usage counts are from the tree, not
 estimates. `A8-44`…`A8-48` above are the markup findings; these are the
 framework affordances left on the table.
 
-- [ ] `A8-49` **The wasm bundle is 34 MB raw / 7.0 MB gzipped, and the build passes no
+- [x] `A8-49` **DONE 2026-08-11 — flags added, and the estimate in this ticket was wrong.** — original report: **The wasm bundle is 34 MB raw / 7.0 MB gzipped, and the build passes no
       `-ldflags "-s -w"`.** `web/build.sh:68` builds with `-trimpath` and an ldflags string that is
       empty on the release path, so the binary ships its full symbol table and DWARF. Stripping both
       typically takes 20–30% off a Go/wasm binary — on this one that is on the order of a megabyte
@@ -578,6 +578,22 @@ framework affordances left on the table.
       a stripped wasm binary gives worse stack traces, which matters less here than elsewhere
       because Go/wasm panics already surface poorly and the app's real diagnostics are server-side.
       Measure before and after rather than assuming the 20–30%.
+      Measured, on this tree, 2026-08-11:
+      | build | raw | gzip -9 |
+      |---|---|---|
+      | `-trimpath` (before) | 42,452,178 | 8,495,810 |
+      | `-trimpath -ldflags "-s -w"` | 40,922,158 | 8,274,009 |
+      That is **3.6% raw and 2.6% gzipped — not 20–30%.** The estimate came from native Go binaries,
+      where the symbol table and DWARF are a much larger share; a Go/wasm binary is overwhelmingly
+      code, and the linker already omits most of what `-w` would drop. Recorded so the number is not
+      re-guessed upward next time.
+      The flags are kept anyway: 222 KB of transfer on every cold load, for free, on a release path
+      whose stack traces this codebase does not read (Go/wasm panics surface poorly through the JS
+      glue and the real diagnostics are server-side). `DEV=1` keeps its symbols, because that is the
+      build where a trace is worth having.
+      Also worth noting: the bundle has grown since this ticket was written — 34 MB / 7.0 MB then,
+      42.5 MB / 8.5 MB now. The flags do not reverse that, and nothing in this section will; if the
+      transfer size matters, the lever is what the binary contains, not how it is linked.
 - [x] `A8-50` **FIXED 2026-08-11.** — original report: **`UseEffectOf` is 2.6× cheaper than variadic `UseEffect` in wasm, and 19 call sites
       still use the variadic form** (6 already use the typed one). This is not a guess: the
       library's own perf log (`docs/DEVNOTES_PERF_LOOP.md`, iteration 3) measures the untyped hook

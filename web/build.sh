@@ -64,8 +64,21 @@ echo "web/build.sh: building in isolated scratch dir $scratch"
 		devldflags="-X ${pkg}.devPasswordB64=${pw_b64} -X ${pkg}.devTOTPSecretB64=${totp_b64}"
 		echo "web/build.sh: DEV BUILD — login form will be pre-filled. Never deploy this bundle."
 	fi
-	# shellcheck disable=SC2086  # devtags/devldflags are intentionally word-split
-	GOOS=js GOARCH=wasm go build -trimpath $devtags -ldflags "$devldflags" -o "$scratch/app.wasm" ./web
+	# -s -w strips the symbol table and DWARF (TODOS.md A8-49). Every other
+	# performance item in this codebase is worth microseconds per render; this
+	# is worth seconds on a cold load over a slow connection, which is the only
+	# performance number an operator actually experiences.
+	#
+	# The cost is worse stack traces, and it is smaller here than it looks:
+	# Go/wasm panics already surface poorly through the JS glue, and this app's
+	# real diagnostics are server-side. A dev build keeps its symbols, because
+	# that is the build where a trace is worth reading.
+	stripflags="-s -w"
+	if [ "${DEV:-}" = "1" ]; then
+		stripflags=""
+	fi
+	# shellcheck disable=SC2086  # devtags/devldflags/stripflags are intentionally word-split
+	GOOS=js GOARCH=wasm go build -trimpath $devtags -ldflags "$stripflags $devldflags" -o "$scratch/app.wasm" ./web
 )
 
 # --- 2. Gzip it (also inside the scratch dir). ---
