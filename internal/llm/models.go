@@ -51,8 +51,32 @@ type OpenAIModelLister struct {
 // server can start without a provider key and simply report the model list
 // as unavailable — the same degraded state PLAN.md §12.5 already describes
 // for the key-presence indicator.
-func NewOpenAIModelLister(apiKey string) *OpenAIModelLister {
-	return &OpenAIModelLister{client: openai.NewClient(apiKey)}
+//
+// baseURL points the lister at an OpenAI-COMPATIBLE endpoint instead of
+// OpenAI's own — a local llama.cpp shim, an Azure deployment, a gateway.
+// Empty means the library default, which is what every caller did before
+// provider profiles existed (TODOS.md A4-42). A profile that names an
+// endpoint must list the models THAT endpoint serves; listing OpenAI's
+// catalogue for a local shim is how an operator picks a model the endpoint
+// has never heard of.
+func NewOpenAIModelLister(apiKey, baseURL string) *OpenAIModelLister {
+	return &OpenAIModelLister{client: openai.NewClientWithConfig(openAIClientConfig(apiKey, baseURL))}
+}
+
+// openAIClientConfig builds the go-openai config for a key and an optional
+// base URL. Separate from the constructor because go-openai's Client exposes
+// no way to read its own base URL back, so this is the only place a test can
+// check that the URL was applied rather than accepted and dropped — which is
+// precisely the failure A4-42 was.
+func openAIClientConfig(apiKey, baseURL string) openai.ClientConfig {
+	cfg := openai.DefaultConfig(apiKey)
+	if baseURL = strings.TrimSpace(baseURL); baseURL != "" {
+		// A trailing slash produces "…/v1//models", which some gateways
+		// serve and some 404. Normalised here so the operator does not have
+		// to know which kind theirs is.
+		cfg.BaseURL = strings.TrimRight(baseURL, "/")
+	}
+	return cfg
 }
 
 // listModelsTimeout bounds the call.

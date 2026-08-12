@@ -174,12 +174,13 @@ func TestNewOpenAIModelListerAcceptsAnEmptyKey(t *testing.T) {
 	// Documented behaviour: an empty key fails at call time, not at
 	// construction, so the server can boot without a provider key and simply
 	// report the model list as unavailable.
-	if l := NewOpenAIModelLister(""); l == nil || l.client == nil {
+	if l := NewOpenAIModelLister("", ""); l == nil || l.client == nil {
 		t.Fatal("NewOpenAIModelLister(\"\") did not build a lister")
 	}
-	if l := NewOpenAIModelLister("not-a-real-key"); l == nil || l.client == nil {
+	if l := NewOpenAIModelLister("not-a-real-key", ""); l == nil || l.client == nil {
 		t.Fatal("NewOpenAIModelLister did not build a lister")
 	}
+
 }
 
 func modelIDs(ms []Model) []string {
@@ -188,4 +189,27 @@ func modelIDs(ms []Model) []string {
 		out = append(out, m.ID)
 	}
 	return out
+}
+
+// A profile's base URL must reach the client rather than being accepted and
+// dropped — that dropping is exactly how A4-42 presented: a setting saved,
+// displayed, and read by nobody.
+func TestOpenAIClientConfigAppliesTheBaseURL(t *testing.T) {
+	deflt := openai.DefaultConfig("k")
+
+	if got := openAIClientConfig("k", ""); got.BaseURL != deflt.BaseURL {
+		t.Errorf("an empty base URL changed the default to %q", got.BaseURL)
+	}
+	if got := openAIClientConfig("k", "   "); got.BaseURL != deflt.BaseURL {
+		t.Errorf("a whitespace base URL changed the default to %q", got.BaseURL)
+	}
+	// The trailing slash is stripped: "…/v1//models" is served by some
+	// gateways and 404s on others, and the operator should not have to know
+	// which kind theirs is.
+	if got := openAIClientConfig("k", "http://127.0.0.1:11434/v1/"); got.BaseURL != "http://127.0.0.1:11434/v1" {
+		t.Errorf("base URL = %q", got.BaseURL)
+	}
+	if got := openAIClientConfig("k", "https://openrouter.ai/api/v1"); got.BaseURL != "https://openrouter.ai/api/v1" {
+		t.Errorf("base URL = %q", got.BaseURL)
+	}
 }

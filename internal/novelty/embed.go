@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -46,12 +47,33 @@ type OpenAIEmbedder struct {
 // mismatch between the caller's expectation and the actual API response is
 // something Embed can detect and fail loudly on, rather than silently
 // storing vectors under the wrong dimension.
-func NewOpenAIEmbedder(apiKey string, model openai.EmbeddingModel, dim int) *OpenAIEmbedder {
+// baseURL points the embedder at an OpenAI-COMPATIBLE endpoint instead of
+// OpenAI's own; empty means the library default, which is what every caller
+// did before provider profiles existed (TODOS.md A4-42). It must match the
+// endpoint the STORED vectors came from — cosine similarity between two
+// models' vectors is a number with no meaning, so changing this without
+// clearing the vector store silently degrades the novelty gate rather than
+// failing it.
+func NewOpenAIEmbedder(apiKey, baseURL string, model openai.EmbeddingModel, dim int) *OpenAIEmbedder {
 	return &OpenAIEmbedder{
-		client: openai.NewClient(apiKey),
+		client: openai.NewClientWithConfig(openAIClientConfig(apiKey, baseURL)),
 		model:  model,
 		dim:    dim,
 	}
+}
+
+// openAIClientConfig builds the go-openai config for a key and an optional
+// base URL. Separate from the constructor because go-openai's Client exposes
+// no way to read its own base URL back, so this is the only place a test can
+// check the URL was applied rather than accepted and dropped.
+func openAIClientConfig(apiKey, baseURL string) openai.ClientConfig {
+	cfg := openai.DefaultConfig(apiKey)
+	if baseURL = strings.TrimSpace(baseURL); baseURL != "" {
+		// See internal/llm's copy: a trailing slash yields "…/v1//embeddings",
+		// which some gateways serve and some refuse.
+		cfg.BaseURL = strings.TrimRight(baseURL, "/")
+	}
+	return cfg
 }
 
 // Model reports the model id used for every vector this embedder produces.

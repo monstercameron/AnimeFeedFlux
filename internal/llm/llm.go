@@ -124,6 +124,17 @@ type Config struct {
 	// to "openai", the only one PLAN.md §8 calls live-verified.
 	ProviderName string
 
+	// BaseURL points calls at an OpenAI-COMPATIBLE endpoint instead of the
+	// provider's own — a local llama.cpp/Ollama shim, an Azure deployment, a
+	// gateway. Empty means the library default, which is what every caller
+	// did before provider profiles were wired (TODOS.md A4-42).
+	//
+	// SchemaFlux honours this through ProviderConfig.BaseURL, which the
+	// library uses verbatim; no endpoint policy is applied by default, so
+	// the URL that reaches here is the URL that gets called. It is validated
+	// on the way in (internal/rpc's sysValidateProfiles), not here.
+	BaseURL string
+
 	// Logger receives the WARN/ERROR line Generate emits on failure (§15.0,
 	// TODOS A0-L07). Nil defaults to slog.Default() so a caller that has not
 	// wired its own logger through still gets the level distinction rather
@@ -166,8 +177,16 @@ func NewSchemaFluxProvider(cfg Config) (*SchemaFluxProvider, error) {
 	}
 
 	client := schemaflux.NewClient(cfg.APIKey)
-	if providerName != "openai" {
-		client = client.WithProviderConfig(providerName, schemaflux.ProviderConfig{APIKey: cfg.APIKey})
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+	// A base URL has to go through WithProviderConfig even for "openai" —
+	// NewClient alone takes only a key, so without this an operator pointing
+	// the app at a local shim would have kept talking to api.openai.com with
+	// the setting saved and apparently in force.
+	if providerName != "openai" || baseURL != "" {
+		client = client.WithProviderConfig(providerName, schemaflux.ProviderConfig{
+			APIKey:  cfg.APIKey,
+			BaseURL: baseURL,
+		})
 	}
 	if err := client.Err(); err != nil {
 		return nil, &Error{Kind: Fatal, Scope: ScopeRecipe, Err: fmt.Errorf("llm: configuring provider %q: %w", providerName, err)}

@@ -417,7 +417,7 @@ an incident — which is exactly when it is switched on.
       which models those are or what they currently cost, and a wrong rate is worse than none — it
       makes a ceiling that trips at the wrong number instead of one that visibly does not trip.
 
-- [ ] `A4-42` **NEW, and an honest half-finish: provider profiles are stored, editable and shown, but
+- [x] `A4-42` **FIXED 2026-08-11.** — original report: **provider profiles are stored, editable and shown, but
       NOTHING READS THEM at generation time.** /settings/provider now lets an operator add an
       OpenAI-compatible endpoint (name + base URL + the env var holding its key) and pick which one
       is active, and the server validates and persists all of it — but `internal/llm` and
@@ -433,6 +433,23 @@ an incident — which is exactly when it is switched on.
       the pinned v1.1.0 source before promising the feature works.
       Until then the Connection panel is honest about what it stores and dishonest about what it
       does, which is the wrong way round; either wire it or mark the control as not-yet-active.
+      Fixed by wiring it. `internal/rpc.ResolveProviderEndpoint` answers "where does this call go and
+      with which key" from the stored settings plus a getenv, and is the single definition all three
+      call sites use. `llm.Config` and both `openai.NewClient` call sites (`NewOpenAIModelLister`,
+      `NewOpenAIEmbedder`) take a base URL; SchemaFlux honours it through `ProviderConfig.BaseURL`,
+      confirmed against the pinned v1.1.0 source — note `WithProviderConfig` is now called for
+      `openai` too, since `NewClient` alone takes only a key.
+      Resolution happens per call, not at boot: `ListModels` resolves inline, and generation and
+      embeddings go through `resolvingProvider`/`resolvingEmbedder` in `cmd/animefeedflux`, which
+      cache built clients by (base URL, key) and fall back to the boot-time default whenever no
+      profile is active, the settings row will not read, or the client will not build. A profile
+      whose `api_key_env` is unset yields NO key rather than the deployment default — lending the
+      OpenAI credential to a third-party base URL would be a disclosure dressed up as a convenience,
+      and that is what the fallback would have been.
+      Note for whoever changes an active profile later: the embedder's `Model`/`Dim` deliberately do
+      not vary with the endpoint. They describe the vectors already in the store, and two models'
+      vectors are not comparable, so switching endpoints changes where the call goes and never what
+      it claims to have produced.
 - [x] `A4-44` **DONE 2026-08-10: /generate rebuilt as a workbench, and it now previews unsaved
       drafts against a chosen model.** The strip owns every input that changes what a preview
       produces (feed, model, effort, candidate count, temperature override) beside the button that

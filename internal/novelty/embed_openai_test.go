@@ -163,7 +163,7 @@ func TestEmbedWrapsAProviderFailure(t *testing.T) {
 }
 
 func TestNewOpenAIEmbedderRecordsItsModelAndDim(t *testing.T) {
-	e := NewOpenAIEmbedder("not-a-real-key", openai.SmallEmbedding3, 1536)
+	e := NewOpenAIEmbedder("not-a-real-key", "", openai.SmallEmbedding3, 1536)
 	if got := e.Model(); got != string(openai.SmallEmbedding3) {
 		t.Errorf("Model() = %q, want %q", got, openai.SmallEmbedding3)
 	}
@@ -213,4 +213,16 @@ func TestEmbedRejectsAnUnusableIndex(t *testing.T) {
 			t.Fatal("want an error when two vectors claim the same index")
 		}
 	})
+}
+
+// The endpoint a profile names must reach the client. See internal/llm's
+// TestOpenAIClientConfigAppliesTheBaseURL for the same check on the other
+// direct go-openai caller (A4-42).
+func TestOpenAIClientConfigAppliesTheBaseURL(t *testing.T) {
+	if got := openAIClientConfig("k", ""); got.BaseURL != openai.DefaultConfig("k").BaseURL {
+		t.Errorf("an empty base URL changed the default to %q", got.BaseURL)
+	}
+	if got := openAIClientConfig("k", "http://127.0.0.1:11434/v1/"); got.BaseURL != "http://127.0.0.1:11434/v1" {
+		t.Errorf("base URL = %q", got.BaseURL)
+	}
 }

@@ -1770,12 +1770,26 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 		return exitRuntimeFail
 	}
 
-	provider, err := llm.NewSchemaFluxProvider(llm.Config{APIKey: cfg.ProviderAPIKey.Reveal()})
+	defaultProvider, err := llm.NewSchemaFluxProvider(llm.Config{APIKey: cfg.ProviderAPIKey.Reveal(), Logger: log})
 	if err != nil {
 		log.Error("building llm provider", slog.Any("error", err))
 		return exitRuntimeFail
 	}
-	embedder := novelty.NewOpenAIEmbedder(cfg.ProviderAPIKey.Reveal(), embeddingModel, embeddingDim)
+	defaultEmbedder := novelty.NewOpenAIEmbedder(cfg.ProviderAPIKey.Reveal(), "", embeddingModel, embeddingDim)
+
+	// A provider profile chosen in /settings/provider used to change a stored
+	// setting and nothing else — generation kept going to the library default
+	// (A4-42). These wrappers resolve the active profile on every call and
+	// fall back to the two clients above whenever no profile is active, its
+	// key env var is unset, or the settings row cannot be read.
+	//
+	// The resolver gets its own SystemServer rather than the one
+	// buildControlPlane builds below, because that one does not exist yet at
+	// this point and this needs nothing from it beyond the settings read.
+	endpoints := rpc.NewProviderEndpointResolver(rpc.NewSystemServer(st, log), st.Reader())
+	provider := newResolvingProvider(endpoints, defaultProvider, log)
+	embedder := newResolvingEmbedder(endpoints, defaultEmbedder, embeddingModel, embeddingDim, log)
+
 	nov := noveltyAdapter{st: st, embedder: embedder, threshold: defaultNoveltyThreshold, window: defaultNoveltyWindow}
 	prices := budget.NewTable()
 	if err := loadPriceTableAtBoot(ctx, st.Reader(), prices); err != nil {

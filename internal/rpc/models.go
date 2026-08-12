@@ -31,7 +31,21 @@ import (
 // genuinely broken request (nothing here can produce one) would be an
 // error.
 func (s *SystemServer) ListModels(ctx context.Context, _ *affv1.SystemServiceListModelsRequest) (*affv1.SystemServiceListModelsResponse, error) {
-	apiKey := s.getenv(sysProviderAPIKeyEnv)
+	// Resolve the active profile on every call rather than at boot: an
+	// operator who points the app at a local shim must see THAT endpoint's
+	// models on the next refresh, not after a restart (A4-42). A read
+	// failure degrades to the deployment default rather than emptying the
+	// menu, which is the same judgement the stale-cache path below makes.
+	endpoint := ProviderEndpoint{APIKey: s.getenv(sysProviderAPIKeyEnv)}
+	if s.st != nil {
+		if p, err := s.sysLoadProvider(ctx, s.st.Reader()); err != nil {
+			s.log.WarnContext(ctx, "reading provider settings for the model list", "error", err.Error())
+		} else {
+			endpoint = ResolveProviderEndpoint(p, s.getenv)
+		}
+	}
+
+	apiKey := endpoint.APIKey
 	if apiKey == "" {
 		// Not an error: a deployment can legitimately run without a
 		// provider key (feeds keep serving; only generation stops — §13's
@@ -45,7 +59,7 @@ func (s *SystemServer) ListModels(ctx context.Context, _ *affv1.SystemServiceLis
 
 	lister := s.modelLister
 	if lister == nil {
-		lister = llm.NewOpenAIModelLister(apiKey)
+		lister = llm.NewOpenAIModelLister(apiKey, endpoint.BaseURL)
 	}
 
 	if cached, ok := s.cachedModels(); ok {
