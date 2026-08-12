@@ -13,6 +13,403 @@ Newest entries at the top.
 
 ---
 
+## 2026-08-11 — The container was fine; the harness had never run
+
+Docker on this project was in the state that reads as done and isn't: a multi-stage build into
+distroless, a compose file with real hardening, an nginx vhost, deploy scripts, two CI workflows,
+and `scripts/check-container.sh` written specifically to verify C0-08/C0-09/C0-19. Every box ticked
+except the three that needed a running daemon. Nothing had ever been built.
+
+Starting the daemon and running the script found four things, and the shape of them is the lesson:
+**none were defects in the container, and all four would have surfaced first on the droplet.**
+
+**The one that cost the most time looked exactly like the trap the code warns about.** The container
+came up and died with SQLite `unable to open database file (14)`. The Dockerfile has a paragraph
+about named-volume ownership — a directory created as root yields a volume the nonroot process
+cannot write, failing at first write, long after healthy — and this is precisely what that failure
+looks like. It was not that. MSYS rewrites anything path-shaped in a command-line argument before
+the program sees it, so `-v vol:/var/lib/animefeedflux` reached docker as
+`-v vol:C:/Program Files/Git/var/lib/animefeedflux`, and the container booted with nothing mounted
+where `AFF_DB_PATH` points.
+
+What separated the two was having a second instrument. `scripts/check-compose.sh` — written an hour
+earlier for an unrelated reason — passed against the same image at the same moment. Compose reads
+its paths from YAML, which MSYS never touches. One tool failing and another succeeding against the
+identical artifact localised the fault to the argument path in about a minute; without it the next
+hour would have gone into volume ownership, which was never wrong.
+
+**The same run proved the script had never executed.** It omitted `AFF_PUBLIC_BASE_URL` and
+`AFF_ALLOWED_ORIGINS`, both required by `config.Load`. A script that cannot have worked had been
+sitting in the tree as the thing that verifies the container.
+
+**C0-09 was reporting a pass it had not earned.** It keyed on the exit code of
+`docker run <arm64-image> healthcheck`, and `healthcheck` is a CLIENT — in a one-shot container with
+no server it exits nonzero with a dial error whether or not the binary could execute at all. So a
+perfectly emulated arm64 run was being read as the architecture mismatch reproducing. The honest
+finding is the opposite: Docker Desktop emulates arm64 via QEMU and the mismatch does NOT reproduce
+here. It classifies on the loader's output now, and says plainly that the signature to expect on the
+droplet is `exec format error` at run, not at build. A check that passes for the wrong reason is
+worse than no check, because it retires the question.
+
+**Two real defects, both invisible without running it.** `.dockerignore`'s `*.db` never matched
+`.devrun/aff.db`: Docker's patterns are `filepath.Match`-style, so `*` does not cross a `/` and a
+pattern is not applied per-directory the way `.gitignore` applies one. `AFF_SECRET_KEY`, the dev
+credentials and a live database were going into the build context. And the image seeded its data
+directory by copying the build stage's `/tmp` — a neat trick for getting an owned empty directory
+into an image with no shell, except `/tmp` is where `apk`, `go build` and the web build all work, so
+every fresh named volume started life containing whatever they happened to leave.
+
+**The design decision worth keeping.** The obvious way to test compose is a second compose file with
+test-shaped values. That was rejected: the hardening lines — `read_only`, `cap_drop: ALL`,
+`no-new-privileges`, the tmpfs, the limits — are exactly what needs testing, and a copy diverges
+from production the first time either file changes, quietly turning the test green against a
+configuration nobody runs. `deploy/compose.test.yaml` is an overlay that changes four things
+(build-not-image, container name, volume name, base URL) and inherits every hardening line from the
+file that actually ships. Making that possible cost one variable in production
+(`${AFF_ENV_FILE:-/etc/...}`) and nothing else. `check-compose.sh` then asserts the security options
+back out of `docker inspect` rather than trusting the merge, because a merge that silently dropped
+`read_only` would leave every other check passing.
+
+The remaining gap is unchanged and worth stating: the image builds and boots on a laptop. It has
+never run on the droplet, Docker is not installed there, no deploy has happened, and no rollback has
+ever been exercised. C0 is closed. C2 and C5 are not, and closing them is not a code problem.
+
+---
+
+## 2026-08-11 — Three bugs stacked behind one another, under "reroute on expiry"
+
+Cam asked for a redirect to /login when the session expires, because the app stops being useful.
+That is a five-line change on top of working machinery. The machinery was not working, and finding
+out why took peeling three layers, each of which looked like the answer.
+
+**Layer one: the redirect did not exist.** The route guard runs on `BeforeEnter` — during navigation
+evaluation, and only there. That is right for "may this person open this page" and blind to the case
+that actually happens: the session dying under a page already open. Nothing re-ran the guard when
+the state changed, and nothing anywhere navigated on expiry. Even the expiry modal's "Sign in"
+button did not go to the login screen; `AcknowledgeExpiry` clears the hold and applies the
+transition, leaving the admin on the same dead page with the modal gone.
+
+Fixed by re-running `guard.Decide` — the same pure function, against the same route table entry —
+when the session state changes rather than only when the path does. Reusing the decision instead of
+writing a second one is what makes the negative cases free: DISCONNECTED is authed-ish, so a dropped
+socket still shows the reconnect banner and stays put, and ELEVATED still goes to /recover.
+
+**Layer two: nothing ever emitted the event.** `EvSessionExpired` has a transition, a hold, a modal,
+and catalogue copy in two languages. `web/wsconn` emitted exactly two events, both derived from
+grpc-go connectivity state. A session dying server-side is invisible to connectivity — the socket
+stays perfectly healthy and the RPCs over it start returning `Unauthenticated`. So the entire expiry
+apparatus was complete, tested at its edges, and unreachable. It is worth sitting with that: four
+files of correct code, and the one line that would have triggered any of it was never written.
+
+The detection had to distinguish a dead session from a wrong password, since both are
+`Unauthenticated` and treating them alike would sign an admin out for a typo in Change Password.
+That is possible only because of an unrelated decision made for a different reason: §12.1 forbids a
+login oracle, so every credential failure returns one generic message while session failures name
+themselves. A privacy rule three months old is what makes this safe today.
+
+**Layer three, and the one I would have sworn was impossible: the state still did not change.**
+Detection fired, the event was emitted, `applyEvent` ran — markers proved all of it — and the
+watcher kept observing AUTH. The cause is already documented in this repository, in
+`web/ui/pump.go`: GWC v5.0.1 queues state updates made off-loop and defers the drain while a render
+is in flight, re-booking only if one is not already scheduled. My emit ran on the RPC's goroutine.
+Same defect that made Save look hung, found the same way, one file over. Emitting through
+`time.AfterFunc(0, …)` puts the write on the JS timer queue where it applies immediately.
+
+And then the navigation itself needed the same treatment for a different reason:
+`Router.NavigateReplace` opens a guard attempt and returns **silently** if one is already in flight,
+which it is when you call it from inside the render the router just triggered. Detected, noticed,
+notice rendered, URL unmoved. Deferred to the next tick, it works.
+
+**What the browser found that the tests could not.** Every unit test I wrote for this passed on the
+first run — the decision table, the error classification, the state machine. All of them were right.
+Not one of them could see any of the three bugs, because all three live in the seam between correct
+components: who calls whom, on which goroutine, in which phase of the framework's cycle. This is the
+third time on this project that the answer came from driving a real browser (see `tokens.Emit` never
+being called, and `h.Value` on a `<select>`).
+
+**The thing left undone, because it is Cam's call.** `/generate` reports genuine draft dirtiness.
+`/history` and `/settings` both report `wired` — which is not "page has unsaved work" and is not even
+"page is mounted", but "Init was called", true forever after boot. So the unsaved-work hold fires on
+*every* expiry on those pages, and the automatic redirect never runs there: you get a modal claiming
+your unsaved changes are being kept when there are none. Both files admit the substitute in their own
+comments. Making them accurate means either accepting that a half-typed settings field is lost on
+expiry, or tracking dirtiness per panel — a data-loss trade, not a cleanup, so it is written down
+rather than decided here.
+
+---
+
+## 2026-08-11 — The browser half of this app is at 26% coverage, and nothing could see it
+
+Cam asked whether the >80% figure held per file. It does not, and answering properly turned up
+something worse than the 51 host files sitting under 80%: **62 files under `web/` were not being
+measured at all**, and their real coverage is 25.7%.
+
+The mechanism is quiet enough to be worth stating precisely. Those files carry
+`//go:build js && wasm`. A host build does not compile them, so they are not "0% covered" in any
+profile — they are absent from the package entirely, contributing neither statements nor misses. The
+number that results looks fine and is measuring the leftovers: `web/pages/settings` reports 81.7% on
+the host from its handful of untagged helpers (`screenstate.go`, `format.go`, `validate.go`), while
+every render function, every panel and every control in it sits at 15.5%. `web/shell` reports 100%
+and is actually at 5.6%. `web/wsconn` reports 100% and is actually at 4.1%.
+
+`scripts/coverage-wasm.sh` now measures it, which took two Windows-specific workarounds worth
+recording because both look like dead ends at first. `GOROOT/lib/wasm/go_js_wasm_exec` is a bash
+script and `go test -exec` needs something Windows can execute, so the script generates a `.cmd`
+shim. And the wasm process cannot generate its own coverage report: Go's js syscall layer has no
+`O_DIRECTORY`, so the in-process step that reads back the counter directory fails — *after* having
+written every counter file correctly. Asking for raw counters with `-test.gocoverdir` and converting
+them on the host with `go tool covdata textfmt` sidesteps the read entirely. So `go test` reports
+FAIL on that step while the run itself succeeded, and the script distinguishes the two.
+
+**Running the existing tests under wasm found four failures that the host build hides**, which is
+the more interesting half. Three are environment mismatches with honest answers (a source-tree walk
+cannot run where directory reads are unsupported; two tests assert on the string `css.Harvest()`
+returns, and in a browser the rules go straight into the document stylesheet so there is nothing to
+harvest). The fourth is real: `web/ui`'s `TestInputWithoutIDStillWiresLabelToField` calls
+`Input(...)` directly, outside any component, so it reaches `gwcui.UseId()` with no fiber. The native
+build tolerates that. The browser build — the runtime this code actually ships to — panics with
+`GoUseId called outside component context`. The test was passing only because the host renderer is
+more forgiving than production. It now renders through `ui.CreateElement` and passes in both builds.
+
+**Why the 62 files cannot simply be brought over 80%.** I spiked it: render one panel under wasm via
+`gwcui.RenderToString`. It panics with `GoUseFunc dom adapter is nil` — any component wiring an event
+handler needs a DOM adapter, and GWC installs one only from `ensureInitialized()`, which builds a
+`jsdom.NewWASMDOMAdapter()` against a real `document`. Node has none, GWC exposes no seam to install a
+test adapter (the config lives behind `internal/runtime`), and jsdom is not present in this
+environment. So unit-testing the render layer needs a jsdom-class harness that boots GWC's real
+runtime — a project in its own right, before a single assertion gets written. That is a decision for
+Cam, not something to start unilaterally at the end of a coverage pass.
+
+The alternative worth weighing is architectural rather than infrastructural: much of the render code
+is a pure function of props to a node tree and is only `js && wasm`-tagged because it shares a file
+with something that touches `syscall/js`. `web/ui` is the existence proof — it is untagged, it uses
+`RenderToString` on the host, and it sits at 84%. Splitting the page packages the same way would make
+the render layer host-testable with no new infrastructure at all. It is also a refactor across 62
+files, which is why it is written down here rather than done.
+
+---
+
+## 2026-08-11 — The repository was not at 62% coverage; it was measuring the wrong thing
+
+Cam asked for coverage above 80% across the repository. The first measurement said 61.9%, and the
+stored ratchet baseline said 80.1 — which meant the CI ratchet had been failing, loudly, and the
+number in the baseline file described a population that no longer existed.
+
+The entire gap was `gen/aff/v1`: 3,574 statements of protoc output at 0%, against 12,851 statements
+of hand-written code at 79.2%. Nothing had regressed. Generated code had been added to a metric that
+had never been scoped to exclude it.
+
+There are only two honest responses to that, and one of them is a trap. The trap is to "fix" the
+number by writing a reflection walk that calls all 1,191 generated getters — perfectly achievable,
+would have taken twenty minutes, would have moved the headline number over 80% in one commit, and
+would have asserted nothing whatsoever. `scripts/coverage-ratchet.sh`'s own opening paragraph
+already argues against exactly this: "chasing a target percentage produces tests written to touch
+lines rather than assert behaviour." Taking the easy route here would have been writing tests
+against the file that warns you not to. So: generated code is excluded from the measurement (in the
+Makefile, in CI, and documented in the ratchet script so the three cannot drift apart), and the
+remaining work was real tests for real gaps.
+
+**Where the gaps actually were.** Every library package was already 80–100%. What was thin was the
+edges nobody exercises from a unit test: `cmd/affseed` at 0%, `aff admin reset-password` at 0%,
+`aff admin reset` at 21%, `animefeedflux healthcheck` at 0%. That is a recognisable shape — the code
+you only run when something has gone wrong, or when you are setting something up, is the code that
+never gets a test, and it is also the code whose failure costs the most.
+
+**Writing the first test for cmd/affseed found a bug three layers deep.** `--force` had never
+worked. Not "worked with a caveat" — every `affseed --force` run against a seeded database exited 1.
+And it failed three times in a row as each blocker was cleared: the feed slug already existed; then
+every `published_at` collided, because they are derived from a day-truncated `now` and two runs on
+the same date compute identical timestamps; then the correction's `content_hash` collided, because
+its wording was a fixed string. Each fix revealed the next. The flag's own help text said "seed even
+if the database already has feeds" and the refusal message promised it "will happily add more
+feeds/items/runs" — both describing behaviour that did not exist in any version of this command.
+
+That is the argument for testing a dev-only tool, made better than I could have made it in advance:
+nobody had ever run `--force` successfully, and nobody had noticed, because the failure mode of a
+seeder is "I'll just delete the database and start over."
+
+**A flake fixed while it was in the way.** `TestSchedulerFiresOncePerDayAndRunsBackup` failed about
+one run in three, which matters more than it sounds: it fails inside CI's coverage step, so a red
+run means the ratchet never executes at all. The test advances a fake clock in a loop, then polls
+without advancing. The scheduler re-registers its next wait only after the real VACUUM finishes, and
+computes it from the clock as it stands at that moment — so on a loaded machine the next target can
+land beyond the loop's advance budget, and a poll that only waits can never reach a target in the
+fake future. The poll now advances too. Eight consecutive runs green.
+
+**Final state:** 81.6% over hand-written code (12,889 statements), up from 79.2%, with the ratchet
+floor raised to 81.0. The all-in number including generated code is about 64% and will drift with
+every `.proto` change, which is precisely why it is not the number anything gates on.
+
+---
+
+## 2026-08-11 — A second locale cost an afternoon, because §12.6 had already been paid for
+
+Cam asked whether the settings had a language selector. They did not, and the reason recorded in
+three places was emphatic: `catalog.go` said `en` was "the only locale this app ships", `TODOS.md`
+2107 said "one locale ships (`en`); the point is not other languages", and `PLAN.md` §12.6 said the
+i18n work "is not about shipping other languages — it is about where strings live." He asked for the
+selector anyway. Building it is what showed those statements were describing the *motivation*
+correctly and the *capability* wrongly.
+
+Nothing structural was missing. `Bundle.Register` has always taken a locale. Plural rules are
+already selected per locale family (and Spanish falls into the default one/other branch, so it
+needed no new rule). `FormatNumber` and `FormatDate` already take a locale and already produce
+`1.234,56` for `es` through `x/text`. `gwci18n.Provider` already had a `CurrentLocale` prop. Every
+piece of multi-locale machinery was present, tested, and being handed one constant.
+
+That constant was the whole thing. `web/main.go`'s two translator adapters and `adapter.go`'s five
+formatters all called `Translate(afi18n.DefaultLocale, ...)` — the parameter named "which locale do
+you want" received the answer "the only one" at every site. The fix is a package-level atomic in
+`web/i18n/locale.go` that those sites read at call time instead. Read at CALL time, not at wiring
+time, is the part with teeth: `wirePages` runs once at boot and hands every page a translator it
+keeps for the life of the tab, so a locale captured in the adapter struct would have pinned the app
+to whatever language it started in. Same trap in `NewLabelResolver`, which returns a closure.
+
+**What made "every page and every control" cheap.** The re-render is one subscription, in
+`renderShellRoot`. GWC's reconciler has no props-equality bailout for function components — I read
+`internal/runtime` to confirm rather than assuming, because the whole design depends on it — so
+re-rendering the component that mounts the Provider re-runs the entire tree beneath it. No page
+subscribes to anything. A page added next year gets the behaviour without knowing the mechanism
+exists. The alternative I did not take was a `window.location.reload()` on switch, which is what a
+lot of apps do; it would have worked, and it would have thrown away unsaved form state to change a
+display preference.
+
+**The bug the browser found and no test could have.** `h.Value` on a `<select>` does nothing in this
+renderer — the element ships with no `value` attribute and falls back to `selectedIndex` 0. So with
+the app fully switched to Spanish (`<html lang="es">`, every string translated, preference stored),
+the language control itself read "English". A control that misreports the setting it exists to show
+is worse than no control. The fix is `h.SelectedIf` on each `<option>`, which is already the idiom in
+`web/pages/generate/render_workbench.go` and `web/pages/history/filters_ui.go` — I had copied the
+wrong precedent. Two other selects in the app still have the original pattern and the same latent
+defect: `web/pages/settings/render_data.go`'s feed picker and `web/pages/history/items_ui.go`'s
+deleted-items filter, both of which will display their first option regardless of state.
+
+Worth stating plainly: this was found by driving a real browser, not by a test. The unit tests were
+all green — key parity, placeholder parity, plural forms, negotiation — and every one of them was
+green *because they test the catalogue*, which was correct. The defect was in how a DOM element
+receives a value. That is the second time on this project that a screenshot or a browser session has
+found what the suite could not (see the 2026-08-10 entry on `tokens.Emit` never being called).
+
+**What I got wrong on the way.** I removed the theme control from the header, because Cam chose "one
+preference, one home" and Appearance is that home. The comment I deleted argued the opposite and
+argued it well: the header control was there so an operator working at night could reach it BEFORE
+signing in, since `/settings` is behind the session. That cost is now real and it extends to the
+language too — `/login` renders in whatever was last stored (which does work: verified) with no way
+to change either from that screen. If it turns out to matter, the fix is to render the Appearance
+controls on the auth routes, not to put a second theme switch back in the header. Recorded here
+because the argument was good and the next person to notice deserves to know it was weighed.
+
+**On the translations themselves.** They are model-written and unreviewed by a native speaker, and
+the catalogue says so in its own doc comment and in the UI, in Spanish, under the selector. The one
+judgement call worth flagging: the typed-confirmation words are translated (REGENERAR, REVOCAR TODO,
+IMPORTAR, COMPACTAR). Safe because the gate compares input against the same catalogue lookup it
+displays, and necessary because the mechanism is a comprehension check — asking a Spanish speaker to
+type "REGENERATE" asks them to copy a shape, and a gate you pass without reading is not a gate.
+
+---
+
+## 2026-08-11 — "There is no feed CRUD", and the framework bug hiding under it
+
+Cam's report was one sentence and it was right in a bigger way than it sounded. Delete had never
+been wired to anything — the RPC was written, version-checked and tested months of work ago, and no
+screen ever called it. Create was worse: it was wired, and it could not succeed, because the new-feed
+draft carried no cron and no timezone and the validator rejects both. So of the four letters in
+CRUD, two did not work, and the list that would have made that obvious was nested inside a
+disclosure labelled "Recipe settings".
+
+The interesting part was underneath. Chasing why Save hung, I built the same three-layer
+instrumentation as the /history hunt — and this time it paid off immediately, because the layers
+disagreed in a way that pointed straight at the answer. A marker written directly to `window` from
+the save goroutine showed the whole handler running: goroutine entered, RPC called, RPC returned,
+result applied. The database showed the feed row written. The screen showed "Saving…" forever. Go
+ran; nothing rendered.
+
+That is a framework bug, not an app bug. GWC queues state updates made off the event loop and books
+a drain; the drain politely defers itself while a render pass is in flight, and `PostAsync` will not
+book a second drain while one is outstanding. If the booked drain is ever lost, every subsequent
+update joins a queue that nothing will come back for. The state is stored, correctly, and never
+shown. What confirmed it was an accident: an unrelated heartbeat goroutine I added for
+instrumentation made the bug disappear, because regular renders give the deferred drain its turn.
+
+The workaround is a scoped heartbeat — `web/ui/pump.go` — that runs only while a mutation is in
+flight. Two details of it were learned the hard way. It needs a grace period after the operation
+reports done, because a mutation's last act is usually a refetch whose update lands afterwards
+(without the grace, the feed was created and the list still did not show it). And it must be a hook,
+so the state cell belongs to the component's fiber rather than to a closure that outlives it.
+
+Two smaller lessons worth keeping. `h.Tag` is variadic, so passing it a `[]any` makes the slice one
+argument: GWC stringified it and put `0x58930000` in the page's body text — a pointer rendered as
+copy is a loud symptom of a quiet mistake, which is that the element also got none of its props. And
+`h.Show` keeps its child in the DOM with `hidden`, so a test that scrapes text finds strings that are
+not on screen: I spent a few minutes convinced sign-out was failing on every page load because my
+probe read a hidden alert.
+
+
+**Postscript, same day.** I reported feed CRUD as done and verified end to end. The reply was "where
+is the option to CRUD a feed?????" — and he was right. Every operation worked; not one of them was
+visible. Save sat at the bottom of a collapsed disclosure, Delete inside a ⋯ inside a row inside a
+second collapsed disclosure, and the feed list collapsed itself the moment a feed was selected, so
+the management surface vanished exactly when work began.
+
+What made me miss it is worth writing down, because it is a trap in how I verify UI. My CRUD test
+began with `for (const d of document.querySelectorAll('details')) d.open = true;`. I wrote that line
+to get at the form, and in doing so I deleted the only part of the test that could have caught the
+actual complaint. The test proved the operations were *possible*, then reported that as proof they
+were *usable*. There is now a second test that touches nothing but visible controls and fails if a
+panel has to be forced open — and it is the one I trust.
+
+Two real defects fell out of doing it properly. Deleting a feed burned its slug forever, because the
+delete is soft and slugs are unique across deleted rows too: recreate the feed you just deleted and
+the server tells you it already exists, about a feed in no list that cannot be restored. And a new
+feed was created disabled — while a disabled feed cannot even be previewed — so the first thing a
+brand-new feed did was tell you three times that it was switched off, without ever saying that you
+had to switch it on.
+
+## 2026-08-10 — Seventeen reviewers, and the two bugs that wasted the most time were both mine
+
+A fleet of sixteen correctness reviewers plus one adversarial design critic went over every page.
+The findings are in `TODOS.md` (A5/A6); what belongs here is what the exercise taught, which is not
+what I expected going in.
+
+**The dominant defect class was not broken code. It was settings that are stored, shown, and read by
+nobody.** Eleven of them: the public base URL, the cache-control default, four feed-identity
+defaults, three per-feed budget defaults, the staleness threshold, and the price table. Every one
+persisted correctly, round-tripped through the UI correctly, and changed nothing about the running
+system. Each showed "Saved." — true of the database, false of the product. That is worse than an
+unimplemented feature, because an unimplemented feature does not claim to be in effect. Four
+independent reviewers found four instances without knowing about each other's, which is how I know
+it was a pattern rather than an oversight: the UI layer was built against the settings proto, and
+nobody ever went back to make the runtime read it.
+
+**The `/history` cold-load hang cost hours, and the two things that made it expensive were both
+self-inflicted.** The first attempt at the eventual fix did not compile — a hook declared after its
+use — and `web/build.sh` aborts on a failed build, so the browser kept being served the previous
+bundle. The fix looked like it had been tried and failed. It had not been tried at all. Second, I
+trusted a debug marker that "never advanced" and concluded the RPC was wedged in the transport,
+which sent me into GoGRPCBridge's dialer, into gRPC deadline semantics, and into writing a watchdog
+for a hang that did not exist. The marker was itself a stale render. The rule I want to keep: when
+an instrument disagrees with another instrument, stop reasoning and instrument the layer between
+them. What finally settled it was three separate probes — an off-loop `time.Sleep` loop proving
+renders work, a stage marker in `guardUnary` proving three RPCs completed end to end, and a log line
+in `RunServer.History` proving the request never arrived — and then an isolation test that put the
+two concurrent requests back and reproduced the hang immediately.
+
+**The most embarrassing find was in a primitive nobody suspected.** `web/ui/toggle.go` rendered its
+`DisabledReasonKey` whenever the key was set, ignoring `Disabled` entirely. So every screen with a
+toggle carried a permanent "Reconnecting to the server — these controls are unavailable until it
+comes back" underneath a control that worked fine. I spent a round chasing a stuck DISCONNECTED
+state, wrote a self-healing correction into the transport for it, and then found the real cause was
+nine lines of markup. The transport change was reverted, because a fix whose premise turned out to
+be false does not get to stay just because it compiled.
+
+**On the reviewers themselves.** Sixteen at once against one dev server was noisy — several read a
+stale bundle and reported a bug I had already fixed, one overwrote a scratch file another was using,
+and their summaries needed checking rather than trusting. But the hit rate on real defects was high,
+and three of the blockers (item creation impossible, new feeds unsaveable, import always rejected)
+were things a human would only find by trying to do the task rather than by reading the code. The
+design critic earned its place too: its central complaint — one systemic layout decision repeated
+across five tabs, rather than five separate bugs — was correct, and fixing it once fixed all five.
+
 ## 2026-08-10 — Two hours of "broken UI" that was neither broken nor UI
 
 The `/generate` rebuild was working. The browser said otherwise, and it took an embarrassingly long

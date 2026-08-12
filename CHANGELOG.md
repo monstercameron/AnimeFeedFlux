@@ -18,6 +18,244 @@ The number stays in the `0.0.x-dev` range through the build phases, and the firs
 
 ## [Unreleased]
 
+### Fixed — 2026-08-11, an expired session no longer strands you on a dead page
+
+- **The session-expiry pathway was never reachable.** `EvSessionExpired` had a state transition, an
+  unsaved-work hold, a blocking modal and copy in two languages — and **nothing in the client ever
+  emitted it**. `web/wsconn` only ever reported socket drops and reconnects, and a session dying
+  server-side is invisible to connectivity: the socket stays healthy while every RPC over it starts
+  coming back `Unauthenticated`. The observed result was a page that rendered fine, a header that
+  still looked signed in, and every action failing.
+- **Every RPC now notices.** Expiry is detected at the two chokepoints all calls already pass
+  through, so no page can forget to check and a page added later inherits it. A wrong password is
+  deliberately *not* treated as expiry — that would sign you out for a typo — which the server makes
+  possible by keeping credential failures generic and naming session failures explicitly.
+- **The shell reroutes to `/login`, and says why.** It re-runs the same guard the router uses on
+  navigation, rather than inventing a second rule, so the cases that must NOT redirect fall out for
+  free: a dropped WebSocket still shows the reconnect banner and stays put, and a recovery session
+  still goes to `/recover`. The login screen now carries an explanation instead of appearing for no
+  stated reason.
+- **The expiry modal's own button works.** It used to clear the hold and leave you on the same dead
+  page with the modal gone; it now lands on the login screen.
+
+
+### Added — 2026-08-11, the browser half of the app can be coverage-measured at all
+
+- **`make cover-wasm`** runs `web/`'s packages under `GOOS=js GOARCH=wasm` and writes a real coverage
+  profile. 62 files carry `//go:build js && wasm`, so a host build excludes them from their packages
+  entirely — they were never 0%, they were absent. **Browser code measures 25.7%**, against host
+  numbers that implied 84–100% (`web/shell` reports 100% on the host and is actually at 5.6%).
+- Running the existing suite under wasm surfaced **a test that only passes on the host**:
+  `web/ui`'s input test called a hook outside a component, which the native renderer tolerates and
+  the browser runtime rejects with a panic. Fixed to render through a component, so it now exercises
+  the same path the app does.
+
+### Fixed — 2026-08-11, `aff runs` silently ignored a positional argument
+
+- `aff runs daily` reads as "the runs of the daily feed" and was not that — the argument was dropped
+  and every run for every feed was listed, which looks exactly like a busy feed. It is a usage error
+  now, naming `--feed <id>` as the filter. Every other command in the CLI already rejected strays.
+
+### Fixed — 2026-08-11, `affseed --force` never worked
+
+- **`aff`'s dev seeder refused every `--force` run**, in three different places in a row: the feed
+  slug already existed, then every seeded `published_at` collided (they are derived from a
+  day-truncated clock, so two runs on the same date computed identical timestamps), then the
+  correction's content hash collided because its wording was fixed. All three now give way —
+  existing feeds are reused, timestamps carry a per-run offset, and a correction names the item it
+  corrects. Found by the first test ever written for that command.
+
+### Changed — 2026-08-11, coverage is measured over hand-written code only
+
+- **Generated protobuf (`gen/`) is excluded from the coverage profile.** It is ~3,600 statements of
+  protoc output, and counting it reported the repository at 62% while the code anyone actually wrote
+  was at 79%. The CI ratchet, `make cover`, and the baseline now all measure
+  `go list ./... | grep -v /gen/`. Repository coverage on that basis is **81.6%**, and the ratchet
+  floor moved from 80.1 to 81.0.
+
+### Added — 2026-08-11, the admin interface can be switched to Spanish
+
+- **Settings → Appearance** is a new section carrying two per-browser preferences: **Language**
+  (English / Español) and **Theme** (Match system / Light / Dark). Both apply immediately, with no
+  Save step, and persist across reloads in `localStorage`.
+- **Switching language changes every screen and control at once** — the header, the reconnect
+  banner, the session-expiry modal, `/login`, `/recover`, `/generate`, `/history`, and all seven
+  settings sections — plus number, date and currency formatting, which follow the selected locale.
+  Feed content is untouched: each feed still publishes in the language its own recipe specifies.
+- **A browser configured for Spanish gets Spanish on first visit**, without signing in and without
+  finding the setting. An explicit choice always wins over the browser's, including choosing English
+  on a Spanish browser.
+- `<html lang>` now tracks the selected language, so screen readers pick the right voice.
+- The Spanish catalogue is **model-written and has not been reviewed by a native speaker**. The app
+  says so under the selector, in Spanish, whenever a translated locale is active.
+
+### Removed — 2026-08-11, the theme switch is no longer in the header
+
+- It moved to Settings → Appearance, so one preference has one home. **Consequence worth knowing:**
+  `/login` and `/recover` now render in whatever theme and language were last stored, with no way to
+  change either from those screens — previously the theme could be changed before signing in.
+
+### Changed — 2026-08-11, Settings → About explains the app before it reports on it
+
+- **About is readable by someone who did not build this.** The section opened on a version string, a
+  build hash, an uptime counter and a table of slugs — four readouts with no statement of what the
+  app is or what any of them mean. It now leads with two cards of plain prose (what the app does,
+  and what it runs on), and the readouts follow, each labelled with what it is for: the build hash
+  says it identifies the compiled code, uptime says it resets on restart and says nothing about your
+  feeds, and the feed table says a slug is the short name in the feed's address.
+
+### Fixed — 2026-08-11, feeds can now be created, edited and deleted from the UI
+
+- **The container is real now: it builds, boots, and is verified under the configuration that ships.**
+  `deploy/compose.test.yaml` is an overlay on the production compose file rather than a second copy of
+  it, so `read_only: true`, `cap_drop: ALL`, `no-new-privileges`, the tmpfs and the limits are all
+  exercised exactly as written; `scripts/check-compose.sh` runs it and asserts the security options
+  from `docker inspect`, that the database is actually written on the volume, that the admin shell and
+  `app.wasm` are served, and that a restart against the same volume comes back healthy. Two defects
+  found and fixed on the way: `.dockerignore`'s `*.db` never matched `.devrun/aff.db` (Docker's
+  patterns are filepath.Match-style, so `*` does not cross a `/` and nothing is applied per-directory),
+  which put `AFF_SECRET_KEY` and a live database in the build context; and the image seeded its data
+  directory from the build stage's `/tmp`, which `apk`, `go build` and the web build all write to, so
+  every fresh volume started life containing whatever they left behind.
+- **QA pass over every route and state, in both themes and down to 900px.** Sign-in's Back button was
+  filled exactly like Sign in (the commit and the retreat, identical, on the screen where a wrong
+  click costs you the code you just typed); the sign-in page had a horizontal scrollbar below
+  ~1180px because nothing clipped the ring signature; pressing "New feed" looked like nothing had
+  happened; the item form's single-line fields were 1400px wide and its Save was disabled with no
+  explanation; every row checkbox was unnamed and 13px; an expanded run with no log showed a heading
+  over an empty box; and run durations printed as raw Go durations ("13.261957s", "508.6µs").
+- **"Run now" reports what it did.** It used to start a billable run and say nothing at all; there is
+  now a status line — starting, running, then items added/rejected, tokens and cost — with a link to
+  that feed's runs. Every feed also links to `/history/runs?feed=<id>`, which the Runs tab reads from
+  the URL, so per-feed generation history is a link rather than a navigation exercise.
+- **The recipe's Model field is a menu of the provider's models**, like the strip's. It was free text
+  — on the field that gets saved and used by every scheduled run, where a typo disables the feed.
+- **Item search matches prefixes.** "triv" found nothing while "trivia" found everything, because
+  the search box's contents went straight into an FTS5 `MATCH`, which matches whole tokens — and the
+  same passthrough leaked FTS5's operator syntax, so an unbalanced quote failed the request outright.
+  The query is built now: each word becomes a quoted prefix term, ANDed, with everything else treated
+  as a separator.
+- **The first search after the Items tab loaded used to hang on "Loading…" forever**, and the Items
+  tab could come up empty on a direct load. Both tabs now keep the renderer alive for the duration of
+  a request (so the retry timer actually fires), serialise their two cold-load requests, and converge
+  on the latest filter rather than losing one changed mid-request.
+- **`/settings/data` was four operations with four different layouts**, two of them with an unlabeled
+  glyph as their only control. It is now a stat strip over one row per operation: name, consequence,
+  and a labelled action on a shared axis.
+- **`/history`'s tabs are addressable** — `/history/runs` and `/history/items` survive a reload and
+  can be linked to — and its controls are one size again: filter fields were 29px, 35px and 37px
+  side by side in the same row, with three different label treatments on the Items tab alone.
+- **Overlays float instead of reflowing the page.** `gwcui.Overlay` sets a z-index and leaves
+  placement to the caller, which neither `web/ui.Kebab` nor `web/ui.Modal` ever did — so kebab menus
+  rendered `position: static` and modals `position: relative`, both in normal flow. Opening the
+  delete confirmation grew the document by its own height and drew the "dialog" inline. Modals now
+  centre in a fixed backdrop; kebabs measure their trigger and position fixed, flipping above when
+  there is no room below and clamping to the viewport.
+- **Clicking an open kebab reopened it.** The overlay dismisses on a captured `pointerdown` and
+  counts the trigger as "outside", so the dismissal closed the menu and the trigger's own click
+  immediately reopened it — visible as a flash, ending with a menu that would not close.
+- **`/history`'s kebabs were a second, hand-rolled implementation that opened on CSS `:hover`** —
+  unusable by touch, and clipped by the table's own scroll container. Both tables use the shared
+  primitive now, and the correction form moved out of the dropdown into a panel under its row.
+
+- **The CRUD controls are now on screen.** Save was at the bottom of a collapsed disclosure, Delete
+  was inside a ⋯ inside a row inside another collapsed disclosure, and the feed list collapsed itself
+  as soon as you selected a feed. The strip now carries New feed, Save (which doubles as the
+  unsaved-changes indicator) and a ⋯ menu with Run now, Enable/Disable and Delete; the feed list
+  stays open; and the recipe drawer opens itself for a new draft, whose required fields live there.
+- **Deleting a feed no longer burns its slug.** Deletion is soft and slugs are unique across deleted
+  rows too, so a deleted feed's name could never be used again — the server said it "already exists"
+  about a feed in no list that could not be restored. The tombstone takes a suffixed name.
+- **A new feed is created enabled.** It was created disabled, and a disabled feed cannot be
+  previewed, so a brand-new feed's first act was to report three times that it was switched off.
+- **The sampler no longer renders `generate.This feed is disabled.`** — a resolved sentence was being
+  passed where a translation key was expected.
+
+- **A feed could not be deleted from anywhere.** `FeedService.Delete` existed, version-checked and
+  tested, and no screen ever called it. Each feed row now has a ⋯ menu with Delete behind a typed
+  confirmation that asks for the feed's own slug — with a fixed word like "DELETE", the failure mode
+  is confirming the right-looking wrong row. The call carries `expected_version`.
+- **A feed could not be created either.** The new-feed draft had no cron and no timezone, both of
+  which the spec validator rejects, so every first save failed — on top of the zero budgets and
+  unset kind fixed the day before. New feeds start at 09:00 daily UTC.
+- **The feed list was hidden inside "Recipe settings"**, which is why the app appeared to have no
+  feed management. It is now its own `Feeds (N)` section, open when no feed is selected.
+- **A slice passed to a variadic `h.Tag` printed `0x58930000` as body text** above the feed list,
+  and silently dropped that element's props.
+- **An in-flight save on `/generate` could never finish visibly.** GWC v5.0.1 queues state updates
+  made from a goroutine and, under a condition this page reliably hit, never drains the queue: the
+  save completed, the row was written, and the button stayed on "Saving…" forever. `web/ui/pump.go`
+  keeps renders flowing for the duration of a mutation. It is a workaround for a framework defect,
+  documented as such, and every mutation on that page now runs through it.
+
+### Fixed — 2026-08-10, a seventeen-reviewer sweep of every page, and the repairs from it
+
+Seventeen parallel reviewers audited every surface against `PLAN.md`; 53 findings were filed as
+`TODOS.md`'s A5 (correctness) and A6 (design) series and most were repaired in the same pass. The
+recurring theme was not broken widgets — it was **settings that were stored, displayed, and read by
+nothing**, which is worse than a missing feature because the screen claims the setting is in effect.
+
+**Things that could not work at all**
+
+- **A new feed could never be saved.** `/generate`'s "+ New" draft set neither daily budget, and
+  `internal/feedspec` rejects a zero for both — so the first save of every new feed failed
+  validation on two fields the operator was never shown. It also left `kind` unset, which the
+  Kind menu displayed as "Generative" while validation rejected it, and `ttl_minutes` at 0, which
+  renders `<ttl>0</ttl>`. New drafts now start from the admin's configured defaults.
+- **An item could never be created from `/history`.** The form had no feed picker and never set
+  `feed_id`, which the server rejects. It has one now (create only — an existing item cannot move
+  between feeds, its guid is already published, §5.5).
+- **Recipe import could never succeed.** The request omitted `expected_version`, so the server's
+  optimistic-concurrency check refused every import into an existing feed.
+- **The Preview cost estimate could never appear**, because the price table it needs was hardcoded
+  `nil`; and the rates themselves reached nothing that charges money — real cost and §13's ceilings
+  come from `internal/budget.Table`, which the settings RPC never touched. The table is now loaded
+  at boot and republished on save, with the 1K↔1M unit conversion done in exactly one place.
+- **`/settings/publishing`'s public base URL affected nothing.** Every guid, `atom:link`, subscribe
+  URL and JSON Feed URL came from the env var the process booted with. The publish plane now reads
+  the configured value per request, seeded at boot and updated on save.
+- **The global daily spend ceiling did not exist on a fresh install** — it seeded as 0, and
+  `internal/budget` reads 0 as "no limit". Both readers of that row now use one set of constants.
+
+**Things that lied to the operator**
+
+- **Every enabled toggle in the app displayed "Reconnecting to the server — these controls are
+  unavailable until it comes back."** The shared Toggle rendered its disabled *reason* whenever the
+  key was set, regardless of whether it was disabled.
+- **The sampler's remaining budget read `$0.0000` forever** — the state was never updated by any
+  response. Removed until something can fill it.
+- **A failed run's log rendered as an empty log**, which reads as "this run logged nothing" — the
+  most misleading thing that row can say to someone expanding it to find out why a run failed.
+- **`/settings/security` could show "Password changed" beside a failure**, because the success flag
+  was never reset.
+- **Novelty similarity printed as a raw float** (`0.8734222` where it meant 87%).
+
+**Things that did not work**
+
+- `/history` sat on "Loading…" forever on a cold load: `FeedService.List` and `RunService.History`
+  were issued concurrently while the tunnel was being replaced with the authenticated one, and the
+  run query never came back. Serialising them fixes it; the underlying tunnel defect is filed.
+- The Runs filter was a bare numeric feed-id box asking for an id shown nowhere in the UI. It is now
+  feed, status (including SKIPPED, so "what did the budget stop?" is answerable) and a date range.
+- Every unary RPC could hang forever; all 47 now carry a deadline and a watchdog.
+- The item search fired a full FTS5 query per keystroke.
+- The backdating check compared against every loaded feed rather than the one being edited.
+- Bulk delete and restore were plain buttons, against this repo's own rule that destructive actions
+  live behind the kebab.
+- Error views offered no way out: `StatePanel.OnRetry` existed and was set by nobody, anywhere.
+- Session revoke had no in-flight guard and swallowed its failures.
+
+**Design**
+
+- Every settings tab was a ~480px column of fields in a 64rem page. Cards are now a responsive grid.
+- `/settings/generation`'s six undifferentiated zeros are grouped into Global ceilings / Per-feed
+  defaults / Staleness, with units in every label.
+- Status carries colour (never colour alone), the Cost column carries weight, the `/generate` strip
+  separates configuring from acting, and the recipe's slug, schedule and budget — the facts that
+  decide whether a Preview is safe — are visible above the prompt instead of behind a disclosure.
+- A white flash on every reload for operators who chose Dark, and three sub-24px hit targets
+  including the shared toggle.
+
 ### Changed — 2026-08-10, /generate rebuilt as a workbench: the prompt and its output, side by side
 
 - **The page is now a strip, two equal columns and a collapsed drawer.** The three-column layout
