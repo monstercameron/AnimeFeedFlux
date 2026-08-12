@@ -224,9 +224,14 @@ func renderProvider() ui.Node {
 			renderProfileEditor(profiles.Get(), disconnected, func(next []*affv1.ProviderProfile) {
 				profiles.Set(next)
 			}),
+			// An empty box under a bare heading reads as a broken field
+			// rather than an optional override, which is what it is: leaving
+			// it empty selects OpenAI (A8-29).
 			affui.Input(affui.InputProps{
 				T: t, ID: "settings-provider-active", LabelKey: "settings.provider.activeProvider",
-				Value: activeProvider.Get(), OnChange: func(v string) { activeProvider.Set(v) },
+				PlaceholderKey: "settings.provider.activeProvider.placeholder",
+				HelpKey:        "settings.provider.activeProvider.help",
+				Value:          activeProvider.Get(), OnChange: func(v string) { activeProvider.Set(v) },
 				Disabled: disconnected,
 			}),
 			h.P(h.Text(t("settings.provider.apiKeyPresent", boolYesNo(apiKeyPresent.Get())))),

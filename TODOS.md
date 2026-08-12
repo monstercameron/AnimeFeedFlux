@@ -845,9 +845,17 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       unlabeled ⋯ glyphs**, and its fields sit in a ~333px column in a 64rem page. Same two defects
       that `/settings/data` had before its rework (`A7-16`) — the fix is the same shape and was left
       out of this pass only because another session is actively editing the settings package.
-- [ ] `A8-29` **`/settings/provider`'s "Active provider" is an unexplained empty text box.** It sits
+- [x] `A8-29` **FIXED 2026-08-11.** — original report: **`/settings/provider`'s "Active provider" is an unexplained empty text box.** It sits
       under a labelled heading with no placeholder and no help text, so it reads as a broken field
       rather than an optional override. Another session's area; noted, not touched.
+      Fixed, and it turned out to be more than a caption: `active_provider` was stored and read by
+      nothing, exactly like the profiles in `A4-42`. It now selects the SchemaFlux backend
+      (`llm.Config.ProviderName`) — a different axis from a profile's base URL, since a backend can
+      be chosen with no base URL (use its own default) and a base URL with no backend (an
+      OpenAI-compatible shim). The seven names SchemaFlux v1.1.0 actually registers are validated on
+      save, because a typo would otherwise fall through to the library's default env-var set and fail
+      authentication at run time, a long way from the field that caused it. The field now carries a
+      placeholder and help text naming the seven and saying that empty means openai.
 - [x] `A8-30` **FIXED 2026-08-11.** — original report: **Reject reasons render as raw identifiers** — "novelty_duplicate: 1",
       "tags_not_lowercase: 2". They are diagnostic, so this is defensible, but they are the only
       machine identifiers left on an operator surface.

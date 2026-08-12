@@ -176,14 +176,16 @@ var settingsMessages = gwci18n.NamespaceCatalog{
 	// {arg1} day count, {arg2} total — the chart's accessible summary.
 	"settings.provider.cost.chartLabel": {Text: "Daily spend over {arg1} days, {arg2} in total"},
 
-	"settings.provider.title":                {Text: "Provider"},
-	"settings.provider.activeProvider":       {Text: "Active provider"},
-	"settings.provider.defaultModel":         {Text: "Default model"},
-	"settings.provider.embeddingModel":       {Text: "Embedding model"},
-	"settings.provider.apiKeyPresent":        {Text: "API key present: {arg1}"},
-	"settings.provider.priceTable.title":     {Text: "Price table"},
-	"settings.provider.priceTable.caption":   {Text: "Price table"},
-	"settings.provider.priceTable.col.model": {Text: "Model"},
+	"settings.provider.title":                      {Text: "Provider"},
+	"settings.provider.activeProvider":             {Text: "Active provider"},
+	"settings.provider.activeProvider.placeholder": {Text: "openai"},
+	"settings.provider.activeProvider.help":        {Text: "Which backend to call: openai, anthropic, openrouter, cerebras, deepseek, qwen or zai. Leave it empty for openai. This picks the wire protocol; a profile below picks the address."},
+	"settings.provider.defaultModel":               {Text: "Default model"},
+	"settings.provider.embeddingModel":             {Text: "Embedding model"},
+	"settings.provider.apiKeyPresent":              {Text: "API key present: {arg1}"},
+	"settings.provider.priceTable.title":           {Text: "Price table"},
+	"settings.provider.priceTable.caption":         {Text: "Price table"},
+	"settings.provider.priceTable.col.model":       {Text: "Model"},
 	// PER 1K, not per 1M. The wire field is usd_per_1k_tokens_in/out and its
 	// only consumer (web/pages/generate/logic.go) divides by 1000, so a
 	// header reading "$/1M" invited an operator to enter a figure a thousand

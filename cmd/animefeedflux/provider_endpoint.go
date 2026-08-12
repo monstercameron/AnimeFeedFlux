@@ -36,6 +36,7 @@ import (
 type endpointKey struct {
 	baseURL string
 	apiKey  string
+	backend string
 }
 
 // resolvingProvider is an llm.Provider that picks its endpoint per call.
@@ -80,27 +81,32 @@ func (p *resolvingProvider) current(ctx context.Context) llm.Provider {
 			slog.Any("error", err))
 		return p.fallback
 	}
-	if endpoint.BaseURL == "" || endpoint.APIKey == "" {
-		// No profile, or a profile whose key env var is unset. The resolver
-		// deliberately does NOT substitute the default key for a custom base
-		// URL (that would disclose it), so an incomplete profile lands here.
-		if endpoint.Profile != "" && endpoint.APIKey == "" {
+	if endpoint.APIKey == "" {
+		// A profile whose key env var is unset. The resolver deliberately
+		// does NOT substitute the default key for a custom base URL (that
+		// would disclose it), so an incomplete profile lands here.
+		if endpoint.Profile != "" {
 			p.log.WarnContext(ctx, "the active provider profile names an environment variable that is not set; using the default endpoint",
 				slog.String("profile", endpoint.Profile))
 		}
 		return p.fallback
 	}
+	if endpoint.BaseURL == "" && (endpoint.Backend == "" || endpoint.Backend == "openai") {
+		// Nothing to override: this IS the boot-time configuration.
+		return p.fallback
+	}
 
-	key := endpointKey{baseURL: endpoint.BaseURL, apiKey: endpoint.APIKey}
+	key := endpointKey{baseURL: endpoint.BaseURL, apiKey: endpoint.APIKey, backend: endpoint.Backend}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if built, ok := p.cache[key]; ok {
 		return built
 	}
 	built, err := llm.NewSchemaFluxProvider(llm.Config{
-		APIKey:  endpoint.APIKey,
-		BaseURL: endpoint.BaseURL,
-		Logger:  p.log,
+		APIKey:       endpoint.APIKey,
+		BaseURL:      endpoint.BaseURL,
+		ProviderName: endpoint.Backend,
+		Logger:       p.log,
 	})
 	if err != nil {
 		p.log.WarnContext(ctx, "building a provider for the active profile; using the default endpoint",
@@ -123,8 +129,20 @@ func (p *resolvingProvider) Embed(ctx context.Context, texts []string) ([][]floa
 	return p.current(ctx).Embed(ctx, texts)
 }
 
-// Name implements llm.Provider.
-func (p *resolvingProvider) Name() string { return p.fallback.Name() }
+// Name implements llm.Provider. It reports the backend a call would reach
+// right now, because the name is recorded against runs and "openai" on a run
+// that went to Anthropic is a lie in the audit trail. Resolution failures
+// report the fallback's name, which is what the call would actually use.
+func (p *resolvingProvider) Name() string {
+	if p.resolver == nil {
+		return p.fallback.Name()
+	}
+	endpoint, err := p.resolver.Resolve(context.Background())
+	if err != nil || endpoint.Backend == "" {
+		return p.fallback.Name()
+	}
+	return endpoint.Backend
+}
 
 // resolvingEmbedder is the same idea for novelty.Embedder.
 //

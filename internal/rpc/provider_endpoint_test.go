@@ -114,3 +114,42 @@ func TestResolveProviderEndpointToleratesNoGetenv(t *testing.T) {
 		t.Fatalf("got %+v, want the zero endpoint", got)
 	}
 }
+
+// active_provider selects the SchemaFlux backend, which is a different axis
+// from a profile's base URL: a backend can be chosen with no base URL (use
+// its own default endpoint) and a base URL with no backend (an
+// OpenAI-compatible shim). Both reach the caller (A8-29).
+func TestResolveProviderEndpointCarriesTheBackend(t *testing.T) {
+	env := envMap(map[string]string{sysProviderAPIKeyEnv: "sk-default", "OR_KEY": "sk-or"})
+
+	got := ResolveProviderEndpoint(&affv1.Settings_Provider{ActiveProvider: "Anthropic "}, env)
+	if got.Backend != "anthropic" {
+		t.Errorf("backend = %q, want it trimmed and lowercased", got.Backend)
+	}
+	if got.BaseURL != "" || got.APIKey != "sk-default" {
+		t.Errorf("a backend alone changed the endpoint: %+v", got)
+	}
+
+	got = ResolveProviderEndpoint(&affv1.Settings_Provider{
+		ActiveProvider: "openrouter",
+		ActiveProfile:  "or",
+		Profiles:       []*affv1.ProviderProfile{{Name: "or", BaseUrl: "https://openrouter.ai/api/v1", ApiKeyEnv: "OR_KEY"}},
+	}, env)
+	if got.Backend != "openrouter" || got.BaseURL != "https://openrouter.ai/api/v1" || got.APIKey != "sk-or" {
+		t.Errorf("backend and profile together resolved to %+v", got)
+	}
+}
+
+// A typo resolves to SchemaFlux's default env-var set and fails
+// authentication at run time, a long way from the field that caused it. It is
+// refused at the point of saving instead.
+func TestSaveSettingsRefusesAnUnknownBackend(t *testing.T) {
+	if validProviderBackends["opeanai"] {
+		t.Fatal("a typo is in the accepted set")
+	}
+	for _, name := range []string{"openai", "anthropic", "openrouter", "cerebras", "deepseek", "qwen", "zai"} {
+		if !validProviderBackends[name] {
+			t.Errorf("%q is registered by SchemaFlux v1.1.0 but rejected here", name)
+		}
+	}
+}

@@ -25,6 +25,13 @@ type ProviderEndpoint struct {
 	// deployment-wide default did. For logs and error messages, so an
 	// operator can tell WHICH endpoint refused them.
 	Profile string
+	// Backend is the SchemaFlux provider name — "anthropic", "openrouter",
+	// and so on — or "" for the library default, "openai". It selects which
+	// wire protocol and default endpoint the library uses, which is a
+	// different axis from BaseURL: a backend can be chosen with no base URL
+	// (use its own default) and a base URL with no backend (an
+	// OpenAI-compatible shim).
+	Backend string
 }
 
 // ResolveProviderEndpoint picks the endpoint and credential for a call.
@@ -47,6 +54,7 @@ func ResolveProviderEndpoint(p *affv1.Settings_Provider, getenv func(string) str
 	if getenv == nil {
 		getenv = func(string) string { return "" }
 	}
+	backend := strings.ToLower(strings.TrimSpace(p.GetActiveProvider()))
 	active := strings.TrimSpace(p.GetActiveProfile())
 	if active != "" {
 		for _, prof := range p.GetProfiles() {
@@ -57,10 +65,11 @@ func ResolveProviderEndpoint(p *affv1.Settings_Provider, getenv func(string) str
 				BaseURL: strings.TrimRight(strings.TrimSpace(prof.GetBaseUrl()), "/"),
 				APIKey:  getenv(prof.GetApiKeyEnv()),
 				Profile: prof.GetName(),
+				Backend: backend,
 			}
 		}
 	}
-	return ProviderEndpoint{APIKey: getenv(sysProviderAPIKeyEnv)}
+	return ProviderEndpoint{APIKey: getenv(sysProviderAPIKeyEnv), Backend: backend}
 }
 
 // ProviderEndpointResolver reads the stored provider settings and resolves

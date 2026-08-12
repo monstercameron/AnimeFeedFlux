@@ -343,6 +343,23 @@ const (
 // would then have to translate at the call site.
 var validProviderEfforts = map[string]bool{"smart": true, "fast": true, "quick": true}
 
+// validProviderBackends are the backend names SchemaFlux v1.1.0 registers,
+// read off its own provider switch rather than guessed. Empty is also
+// accepted and means "openai", which is what the library defaults to.
+//
+// Validated rather than passed through because a typo — "opeanai" — resolves
+// to SchemaFlux's default env-var set and produces an authentication failure
+// at run time, a long way from the settings field that caused it.
+var validProviderBackends = map[string]bool{
+	"openai":     true,
+	"anthropic":  true,
+	"openrouter": true,
+	"cerebras":   true,
+	"deepseek":   true,
+	"qwen":       true,
+	"zai":        true,
+}
+
 // Cold-start ceilings for a fresh install. See sysLoadGeneration.
 //
 // Exported because cmd/animefeedflux has its OWN reader for the same row
@@ -578,12 +595,18 @@ func (s *SystemServer) UpdateSettings(ctx context.Context, req *affv1.SystemServ
 			return nil, status.Errorf(codes.InvalidArgument,
 				"provider.effort %q is not one of smart, fast, quick", p.GetEffort())
 		}
+		backend := strings.ToLower(strings.TrimSpace(p.GetActiveProvider()))
+		if backend != "" && !validProviderBackends[backend] {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"provider.active_provider %q is not a backend this build knows; leave it empty for openai",
+				p.GetActiveProvider())
+		}
 		profiles, perr := sysValidateProfiles(p.GetProfiles(), p.GetActiveProfile())
 		if perr != nil {
 			return nil, status.Error(codes.InvalidArgument, perr.Error())
 		}
 		toStore := &affv1.Settings_Provider{
-			ActiveProvider: p.GetActiveProvider(),
+			ActiveProvider: backend,
 			DefaultModel:   p.GetDefaultModel(),
 			EmbeddingModel: p.GetEmbeddingModel(),
 			PriceTable:     p.GetPriceTable(),
