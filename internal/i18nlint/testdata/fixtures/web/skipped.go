@@ -30,6 +30,17 @@ func renderSkipped(cond bool) h.Node {
 	_ = h.Value("42")
 	_ = h.Tag("div", h.ClassStr("wrapper"))
 
+	// ARIA attributes whose value is a token or an id reference, not prose.
+	_ = h.Aria("live", "assertive")
+	_ = h.Aria("hidden", "true")
+	_ = h.Aria("current", "page")
+	_ = h.Aria("describedby", "feed-name-hint")
+	_ = h.Aria("labelledby", "feed-name-label")
+	_ = h.Aria("controls", "feed-panel")
+	// A non-literal attribute name is left alone: the tool cannot tell what
+	// it resolves to, and guessing either way is worse than the miss.
+	_ = h.Aria(ariaAttr, "Close this dialog")
+
 	_ = i18n.T("feed.create.title")
 	_ = i18n.MustT("feed.create.subtitle")
 

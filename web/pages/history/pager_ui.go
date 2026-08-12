@@ -73,6 +73,7 @@ func renderPager(p pagerProps) ui.Node {
 	// The numbered window.
 	first, last := jumpWindow(p.Page, p.TotalPages, maxJumpButtons)
 	if first > 1 {
+		//nolint:i18n -- a typographic gap marker, not a word; identical in every locale
 		nodes = append(nodes, h.Span(h.ClassStr("history-pager__gap"), h.Text("…")))
 	}
 	for page := first; page <= last; page++ {
@@ -99,6 +100,7 @@ func renderPager(p pagerProps) ui.Node {
 		))
 	}
 	if last < p.TotalPages {
+		//nolint:i18n -- see the leading gap above
 		nodes = append(nodes, h.Span(h.ClassStr("history-pager__gap"), h.Text("…")))
 	}
 

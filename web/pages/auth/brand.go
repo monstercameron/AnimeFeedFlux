@@ -39,6 +39,7 @@ func renderAuthBrand() ui.Node {
 	return h.Div(
 		h.ClassStr("af-auth-brand"),
 		h.Role("img"),
+		//nolint:i18n -- the product name, identical in every locale
 		h.Aria("label", "AnimeFeedFlux"),
 		h.Img(h.ClassStr("af-auth-brand__mark"), h.Src(authMarkSrc), h.Alt(""), h.Aria("hidden", "true")),
 		h.Span(

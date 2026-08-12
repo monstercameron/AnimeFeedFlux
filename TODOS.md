@@ -1290,9 +1290,23 @@ worse than a missing feature, because the screen says the setting is in effect.
 - [x] `A5-36` **PARTLY FIXED (Save is disabled without a title; indeterminate checkbox still open).** No client-side required-field validation on the item form (the server enforces
       title-required, the UI does not), and the select-all checkbox never shows an indeterminate state
       for a partial selection.
-- [ ] `A5-37` **STILL OPEN.** `/login` announces a failed login twice to screen readers (two aria-live regions with
+- [x] `A5-37` **FIXED 2026-08-11.** — original report: `/login` announces a failed login twice to screen readers (two aria-live regions with
       identical content) and uses `aria-live` without `role="alert"`, inconsistent with the shell.
-- [ ] `A5-38` **STILL OPEN (tooling).** The i18n lint tool has no coverage for prose inside `h.Aria(...)`.
+      Fixed by removing the live region from the VISIBLE error paragraph, not from the announcer.
+      `handleSubmit` already announces the same string through `announcer.Assertive`, and that is the
+      copy worth keeping: two wrong passwords in a row produce identical text, and a live region whose
+      content has not changed may announce nothing at all — so the repeat failure would go silent
+      exactly when it matters. The paragraph keeps its id, which the failure branch focuses.
+- [x] `A5-38` **FIXED 2026-08-11 (tooling).** — original report: The i18n lint tool has no coverage for prose inside `h.Aria(...)`.
+      Fixed: `classifyAria` reads `h.Aria`'s FIRST argument to decide whether the second is prose,
+      which is the only way to tell `aria-label="Close this dialog"` from `aria-live="assertive"`.
+      `AriaProseAttrNames` is deliberately five entries — label, description, roledescription,
+      valuetext, placeholder; every other ARIA value is a token or an id reference, and admitting one
+      of those would fire on every call site, which is how a lint tool gets ignored. A call whose
+      attribute name is not a plain literal is left alone rather than guessed at.
+      It found one real literal (`brand.go`'s `aria-label="AnimeFeedFlux"`, the product name) and the
+      ratchet was already red on two `"…"` pager gap markers; all three are now `//nolint:i18n` with
+      reasons, so the baseline stays at 0 rather than rising (D6-21).
 - [x] `A5-39` **FIXED (size, temperature and selection reset with the feed).** Switching to a fresh feed on `/generate` leaks the previous feed's candidate count and
       temperature override; only `candidates`/`sampleID` reset.
 - [x] `A5-40` **PARTLY FIXED (the field now says it is inert; effort default still hardcoded).** The temperature override is a documented no-op under §8.1 with no disclosure in the UI,

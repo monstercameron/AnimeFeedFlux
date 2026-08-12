@@ -220,11 +220,24 @@ func LoginPage(props LoginPageProps) ui.Node {
 		return nil
 	}, blocked)
 
+	// This paragraph is the SIGHTED error only: it carries no aria-live and
+	// no role="alert" on purpose (A5-37). handleSubmit already announces the
+	// same string through announcer.Assertive, and a live region here made a
+	// screen reader read every failed login twice.
+	//
+	// The announcer, not this node, is the one that stays: two wrong
+	// passwords in a row produce identical text, and a live region whose
+	// content has not changed may announce nothing at all — so the failure a
+	// sighted user sees repeated would go silent exactly when it matters. The
+	// announcer re-announces unconditionally.
+	//
+	// It keeps its id because handleSubmit's failure branch moves focus to
+	// it, which is the other half of getting the error read out — and,
+	// unlike a live region, does not fire a second time on its own.
 	var errorNode ui.Node
 	if errKey.Get() != "" {
 		errorNode = h.P(
 			h.ID(errorID),
-			h.Aria("live", "assertive"),
 			h.ClassStr("af-form-error"),
 			tc.T(errKey.Get()),
 		)
@@ -304,7 +317,12 @@ func LoginPage(props LoginPageProps) ui.Node {
 			h.P(h.ID(totpID+"-hint"), h.ClassStr("af-field-hint"), t.T(afi18n.KeyLoginTOTPHint)),
 			h.Div(
 				h.ClassStr("af-login-actions"),
-				h.Button(h.Type("button"), h.OnClick(handleBack), h.Disabled(f.Submitting), tc.T(afi18n.KeyCommonBack)),
+				// Marked secondary. Back and Sign in were both filled primary
+				// buttons side by side, so the one that commits and the one
+				// that retreats looked identical — on the screen where a
+				// wrong click costs you the code you just typed.
+				h.Button(h.Type("button"), h.ClassStr("af-login-back"),
+					h.OnClick(handleBack), h.Disabled(f.Submitting), tc.T(afi18n.KeyCommonBack)),
 				h.Button(h.Type("submit"), h.Disabled(!f.CanSubmit(now)), submitLabel),
 			),
 		)
@@ -327,7 +345,9 @@ func LoginPage(props LoginPageProps) ui.Node {
 		),
 		h.Nav(
 			h.ClassStr("af-auth-links"),
-			h.A(h.Href("/recover"), t.T(afi18n.KeyLoginRecoverLink)),
+			// A real target: this was a 17px-tall line of text, which is under
+			// the floor for a pointer and well under it for a thumb.
+			h.A(h.ClassStr("af-login-recover"), h.Href("/recover"), t.T(afi18n.KeyLoginRecoverLink)),
 		),
 	)
 }

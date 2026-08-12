@@ -60,9 +60,13 @@ func TestFindLiterals_Flagged(t *testing.T) {
 		{"web/flagged.go", 10, "attribute-text", "Search feeds"},
 		{"web/flagged.go", 10, "attribute-text", "icon description"},
 		{"web/flagged.go", 11, "text-call", "Hello, "},
-		{"web/flagged.go", 15, "text-call", "Unsuppressed literal"},
-		{"web/flagged.go", 17, "bare-nolint", "//nolint:i18n"},
-		{"web/flagged.go", 18, "text-call", "Bare nolint above this line, should still be flagged"},
+		// A5-38: prose inside aria-label/aria-description is read aloud just
+		// as a text node is, and was invisible to this tool.
+		{"web/flagged.go", 12, "attribute-text", "Close this dialog"},
+		{"web/flagged.go", 12, "attribute-text", "What this control does"},
+		{"web/flagged.go", 16, "text-call", "Unsuppressed literal"},
+		{"web/flagged.go", 18, "bare-nolint", "//nolint:i18n"},
+		{"web/flagged.go", 19, "text-call", "Bare nolint above this line, should still be flagged"},
 	}
 
 	sortWant(got)

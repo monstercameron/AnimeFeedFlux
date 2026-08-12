@@ -66,6 +66,25 @@ var ProseAttrFuncNames = map[string]bool{
 	"Alt":         true,
 }
 
+// AriaProseAttrNames are the ARIA attributes whose VALUE is prose read
+// aloud to a screen-reader user, as opposed to the majority, whose values
+// are tokens ("true", "polite", "page") or id references
+// ("describedby", "labelledby", "controls"). h.Aria takes the attribute
+// name as its first argument, so classifyCall has to look at that name
+// before it can say whether the second argument is text (TODOS.md A5-38).
+//
+// Deliberately short. An attribute admitted here that turns out to carry a
+// token produces a false positive on every call site, and the cost of
+// missing one is a single untranslated string; the cost of noise is that
+// the whole tool gets ignored.
+var AriaProseAttrNames = map[string]bool{
+	"label":           true,
+	"description":     true,
+	"roledescription": true,
+	"valuetext":       true,
+	"placeholder":     true,
+}
+
 // AttributeFuncNames are identifier/attribute/CSS builder functions whose
 // string arguments are never prose: class tokens, element/attribute
 // identifiers, route-shaped values, and raw CSS property names/values.
@@ -372,6 +391,9 @@ func classifyCall(call *ast.CallExpr, arg ast.Node, value string) (Finding, bool
 	if AttributeFuncNames[name] {
 		return Finding{}, false // class/id/route/CSS token, not prose
 	}
+	if name == "Aria" {
+		return classifyAria(call, idx, value)
+	}
 	if ProseAttrFuncNames[name] {
 		return Finding{Text: value, Rule: "attribute-text"}, true
 	}
@@ -382,6 +404,38 @@ func classifyCall(call *ast.CallExpr, arg ast.Node, value string) (Finding, bool
 		return Finding{Text: value, Rule: "text-child"}, true
 	}
 	return Finding{}, false
+}
+
+// classifyAria decides whether a literal inside h.Aria(name, value) is
+// prose.
+//
+// Argument 0 is the attribute name — "live", "label" — and is never prose.
+// Argument 1 is prose only for the handful of ARIA attributes whose value is
+// read aloud rather than parsed; everything else is a token or an id
+// reference, and flagging those would bury the real findings.
+//
+// A call whose attribute name is not a plain literal (a variable, a
+// constant, a concatenation) is left alone. The tool cannot tell what it
+// resolves to, and guessing wrong in either direction is worse than the miss.
+func classifyAria(call *ast.CallExpr, idx int, value string) (Finding, bool) {
+	if idx != 1 || len(call.Args) < 2 {
+		return Finding{}, false
+	}
+	nameLit, ok := call.Args[0].(*ast.BasicLit)
+	if !ok || nameLit.Kind != token.STRING {
+		return Finding{}, false
+	}
+	attr, err := unquote(nameLit.Value)
+	if err != nil {
+		return Finding{}, false
+	}
+	// "aria-label" and "label" both reach here depending on the call site's
+	// habit; GWC prefixes the attribute itself, so accept either spelling.
+	attr = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(attr), "aria-"))
+	if !AriaProseAttrNames[attr] {
+		return Finding{}, false
+	}
+	return Finding{Text: value, Rule: "attribute-text"}, true
 }
 
 // unquote decodes a Go string-literal token (double-quoted or raw

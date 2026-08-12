@@ -9,6 +9,7 @@ func renderFlagged(name string) h.Node {
 	_ = h.Button("Save", h.ClassStr("primary"))
 	_ = h.Div(h.Title("Tooltip text"), h.Input(h.Placeholder("Search feeds"), h.Alt("icon description")))
 	_ = h.Text("Hello, " + name)
+	_ = h.Div(h.Aria("label", "Close this dialog"), h.Aria("description", "What this control does"))
 
 	// nolint:i18n -- reason not required to be on this exact literal; this
 	// one has no comment attached and must still be flagged.
