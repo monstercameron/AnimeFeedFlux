@@ -649,6 +649,7 @@ func init() {
 	emitGenerateStyles()
 	emitWorkbenchStyles()
 	emitURLPanelStyles()
+	emitScheduleStyles()
 }
 
 // emitWorkbenchStyles is /generate's rebuilt layout (render_workbench.go).
@@ -801,6 +802,54 @@ func emitWorkbenchStyles() {
 		css.FontWeight.Medium,
 	)
 
+	// The run-status line: what "Run now" did, next to the feed it did it to.
+	// Sits with the stakes line under the strip, because that is where the
+	// answer to "did that work?" belongs — not on another page.
+	css.Global(".af-run-status",
+		css.Display.Flex,
+		css.Items.Center,
+		css.Raw("flex-wrap", "wrap"),
+		css.Gap(tokens.Space(3)),
+		css.PaddingY(tokens.Space(2)),
+		css.PaddingX(tokens.Space(3)),
+		css.Rounded(tokens.Radius(tokens.RadiusSm)),
+		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
+		css.Bg(tokens.Color(tokens.RoleSurface)),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+	)
+	css.Global(".af-run-status__text", css.TextColor(tokens.Color(tokens.RoleText)))
+	css.Global(".af-run-status__text--ok", css.TextColor(tokens.Color(tokens.RoleSuccess)))
+	css.Global(".af-run-status__text--warn", css.TextColor(tokens.Color(tokens.RoleWarning)))
+	css.Global(".af-run-status__text--error", css.TextColor(tokens.Color(tokens.RoleDanger)))
+	css.Global(".af-run-status__link",
+		css.TextColor(tokens.Color(tokens.RoleAccent)),
+		css.Raw("text-decoration", "underline"),
+	)
+	css.Global(".af-run-status__dismiss",
+		css.Raw("margin-inline-start", "auto"),
+		css.Raw("min-height", "24px"),
+		css.Raw("min-width", "24px"),
+		css.Raw("border", "0"),
+		css.Bg(css.Transparent),
+		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
+		css.Cursor.Pointer,
+	)
+	// The recipe form's model menu, matching the width of the fields around
+	// it rather than the strip's compact one.
+	css.Global(".af-editor__model",
+		css.Raw("box-sizing", "border-box"),
+		css.W(css.Length("100%")),
+		css.Raw("max-width", "30rem"),
+		css.Raw("min-height", "34px"),
+		css.PaddingX(tokens.Space(2)),
+		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
+		css.Rounded(tokens.Radius(tokens.RadiusSm)),
+		css.Bg(tokens.Color(tokens.RoleBg)),
+		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+		monoFont(),
+	)
+
 	// Two equal columns: neither the prompt nor its output is the junior
 	// partner. The min-height keeps the preview pane from collapsing to
 	// nothing before the first sample, so the page does not visibly reflow
@@ -908,6 +957,17 @@ func emitWorkbenchStyles() {
 	)
 
 	// The set-once fields, behind a disclosure.
+	// The feeds disclosure is the management surface, so its summary reads as
+	// a section heading rather than as the quiet footnote the recipe drawer's
+	// does — it is the thing an operator opens on purpose, not the thing they
+	// tolerate at the bottom of the page.
+	css.Global(".af-gen__feeds > summary",
+		css.Cursor.Pointer,
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+		css.FontWeight.Medium,
+		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.PaddingY(tokens.Space(1)),
+	)
 	css.Global(".af-gen__recipe",
 		css.BorderTop(css.Px(1), tokens.Color(tokens.RoleBorder)),
 		css.Raw("padding-block-start", string(tokens.Space(3))),

@@ -147,4 +147,8 @@ func renderNotWired() ui.Node {
 // not-wired state above rather than a blank page.
 func init() {
 	shell.RegisterPage("/history", Render)
+	// Each tab is its own address (/history/runs, /history/items), served by
+	// the same body — History reads the tab from the URL. Bare /history still
+	// works and resolves to Runs.
+	shell.RegisterPage("/history/:tab", Render)
 }

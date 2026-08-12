@@ -183,25 +183,26 @@ func renderSamplerControls(p samplerControlsProps) ui.Node {
 func renderCandidateListGate(state ListState, p samplerProps) ui.Node {
 	t := deps.I18n
 	wt := wui.T(t.T)
-	// DisabledReasonKey below is p.DisabledReason itself — already
-	// resolved prose (SampleDisabledReason in logic.go calls t.T
-	// internally and may interpolate a failure count), not a catalogue
-	// key. wui.StatePanelProps has no DisabledReasonArgs field to
-	// interpolate a reason through properly (unlike ErrorKey/ErrorArgs
-	// below) — a real web/ui API gap for a state whose reason needs an
-	// argument (see this task's final report). This relies on the
-	// documented catalogue contract that an unrecognized key renders as
-	// itself (D6-07/i18n.go's fallbackTranslator doc comment), which
-	// happens to already be the correct, resolved text — correct in
-	// practice, but not a clean use of the key+args API.
+	// p.DisabledReason is already-resolved prose, not a key
+	// (SampleDisabledReason resolves it and may interpolate a failure
+	// count), so it goes through the passthrough key with the text as an
+	// ARGUMENT — the same treatment ErrorKey/ErrorArgs get just below.
+	//
+	// It used to be passed as DisabledReasonKey directly, on the theory that
+	// an unrecognised key renders as itself. It does not, quite: the shell's
+	// translator prefixes its namespace first, so the panel rendered
+	// "generate.This feed is disabled." to the operator. wui.StatePanelProps
+	// has had a DisabledReasonArgs field the whole time; the comment that
+	// used to sit here claiming otherwise was wrong.
 	return wui.StatePanel(wui.StatePanelProps{
-		T:                 wt,
-		State:             uiListState(state),
-		ErrorKey:          "generate.common.errorText",
-		ErrorArgs:         []any{mutationErrorText(t, p.SampleErr)},
-		EmptyKey:          "generate.sampler.empty",
-		ReconnectingKey:   "generate.sampler.disconnected",
-		DisabledReasonKey: p.DisabledReason,
+		T:                  wt,
+		State:              uiListState(state),
+		ErrorKey:           "generate.common.errorText",
+		ErrorArgs:          []any{mutationErrorText(t, p.SampleErr)},
+		EmptyKey:           "generate.sampler.empty",
+		ReconnectingKey:    "generate.sampler.disconnected",
+		DisabledReasonKey:  "generate.common.errorText",
+		DisabledReasonArgs: []any{p.DisabledReason},
 		Populated: func() []ui.Node {
 			return []ui.Node{ui.CreateElement(renderCandidateResults, p)}
 		},

@@ -64,6 +64,8 @@
 package generatepage
 
 import (
+	"time"
+
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
@@ -84,7 +86,14 @@ type editorProps struct {
 	// normal, successful response reporting per-field problems.
 	ValidateErr    error
 	ConflictTheirs *affv1.Feed
-	Resolution     ConflictResolution
+
+	// Models/ModelsUnavailable/ModelsReason feed the Model field's menu —
+	// the provider's own list, so the value that every scheduled run uses is
+	// chosen rather than typed. See modelpicker.go.
+	Models            []*affv1.ProviderModel
+	ModelsUnavailable bool
+	ModelsReason      string
+	Resolution        ConflictResolution
 
 	OnFieldChange func(mutate func(*affv1.Feed))
 	OnValidate    func()
@@ -137,6 +146,11 @@ func fieldErrorKV(fe FieldErrors, key string) (string, []any) {
 func renderEditorForm(p editorProps) ui.Node {
 	t := deps.I18n
 	wt := wui.T(t.T)
+	// Whether the cron escape hatch is revealed. Held here rather than inside
+	// the schedule component so toggling it does not remount that component
+	// and drop focus mid-edit — the same reason the kebab's open state lives
+	// in its wrapper.
+	showCron := ui.UseState(false)
 	d := p.Draft
 	spec := d.GetSpec()
 	if spec == nil {
@@ -155,7 +169,6 @@ func renderEditorForm(p editorProps) ui.Node {
 	langErrKey, langErrArgs := fieldErrorKV(p.FieldErrs, "language")
 	cronErrKey, cronErrArgs := fieldErrorKV(p.FieldErrs, "cron")
 	tzErrKey, tzErrArgs := fieldErrorKV(p.FieldErrs, "timezone")
-	modelErrKey, modelErrArgs := fieldErrorKV(p.FieldErrs, "model")
 	tempErrKey, tempErrArgs := fieldErrorKV(p.FieldErrs, "temperature")
 	itemsErrKey, itemsErrArgs := fieldErrorKV(p.FieldErrs, "items_per_run")
 	windowErrKey, windowErrArgs := fieldErrorKV(p.FieldErrs, "feed_window")
@@ -201,33 +214,47 @@ func renderEditorForm(p editorProps) ui.Node {
 		}),
 		renderKindSelect(t, d, p),
 
-		h.Fieldset(
-			h.Legend(h.Text(t.T("generate.editor.schedule"))),
-			wui.Input(wui.InputProps{
-				T: wt, ID: "generate-editor-cron", LabelKey: "generate.editor.cron", Value: spec.GetCron(),
-				ErrorKey: cronErrKey, ErrorArgs: cronErrArgs,
-				OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Cron = v }) },
-			}),
-			wui.Input(wui.InputProps{
-				T: wt, ID: "generate-editor-timezone", LabelKey: "generate.editor.timezone", Value: spec.GetTimezone(),
-				ErrorKey: tzErrKey, ErrorArgs: tzErrArgs,
-				OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Timezone = v }) },
-			}),
-			h.P(h.ClassStr("af-field-hint"), h.Text(CronReadback(t, spec.GetCron(), spec.GetTimezone()))),
-			// D2-09: the next three runs, jittered — see render_rail.go's
-			// matching comment and logic.go's JitteredRuns doc comment for
-			// why this pane cannot compute them today (no nominal
-			// next-fire-time is available from any RPC in proto/aff/v1).
-			h.P(h.ClassStr("af-field-hint"), h.Text(t.T("generate.editor.nextRunsUnavailable"))),
-		),
+		// The schedule builder (render_schedule.go), which replaced a raw cron
+		// text field. Cron cannot express "every other Thursday", "every 3
+		// weeks" or "the second Tuesday" AT ALL, so those schedules were not
+		// merely awkward to enter here — they were unenterable, and an
+		// approximation ran on the wrong days silently.
+		//
+		// The next-runs list this now shows is what D2-09 asked for and was
+		// recorded as impossible: the note said no RPC returns nominal fire
+		// times, which is true and turned out not to matter. internal/schedule
+		// is ordinary Go, so the browser evaluates the schedule itself, live,
+		// before anything is saved.
+		ui.CreateElement(renderSchedule, scheduleProps{
+			T: t, Spec: spec, Now: time.Now(), OnChange: onFieldChange,
+			ShowCron: showCron.Get(), OnToggle: func(v bool) { showCron.Set(v) },
+			CronErrKey: cronErrKey, CronErr: cronErrArgs,
+			TZErrKey: tzErrKey, TZErr: tzErrArgs,
+		}),
 
 		h.Fieldset(
 			h.Legend(h.Text(t.T("generate.editor.modelParams"))),
-			wui.Input(wui.InputProps{
-				T: wt, ID: "generate-editor-model", LabelKey: "generate.editor.model", Value: spec.GetModel(),
-				ErrorKey: modelErrKey, ErrorArgs: modelErrArgs,
-				OnChange: func(v string) { onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Model = v }) },
-			}),
+			// A menu, not a text box. This is the field that gets SAVED onto
+			// the feed and used by every scheduled run, so it is the one where
+			// a typo costs the most: §8 classifies "model not found" as a
+			// recipe-scoped Fatal that disables the feed, and a typo looks
+			// exactly like a deprecation until a run fails at 4am. It degrades
+			// to the old text input when the provider cannot be reached — see
+			// modelpicker.go.
+			h.Div(h.ClassStr("af-field"),
+				h.Label(h.For("generate-editor-model"), h.Text(t.T("generate.editor.model"))),
+				renderModelPicker(modelPickerProps{
+					ID:          "generate-editor-model",
+					Class:       "af-editor__model",
+					LabelKey:    "generate.editor.model",
+					Value:       spec.GetModel(),
+					OnChange:    func(v string) { onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Model = v }) },
+					Models:      p.Models,
+					Unavailable: p.ModelsUnavailable,
+					Reason:      p.ModelsReason,
+				}),
+				fieldError("model"),
+			),
 			wui.Input(wui.InputProps{
 				T: wt, ID: "generate-editor-temperature", LabelKey: "generate.editor.temperature", Type: "number",
 				Value: floatStr(spec.GetTemperature()), ErrorKey: tempErrKey, ErrorArgs: tempErrArgs,

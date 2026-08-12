@@ -91,7 +91,8 @@ func ItemForm(props ItemFormProps) ui.Node {
 		h.If(props.IsCreate, renderFeedPicker(props, feedID.Get(), feedID.Set)),
 
 		h.Label(h.For("history-form-title"), props.T.T("history.items.field_title", nil)),
-		h.Input(h.ID("history-form-title"), h.Value(title.Get()), h.OnInput(func(ev ui.InputEvent) { title.Set(ev.GetValue()) })),
+		h.Input(h.ID("history-form-title"), h.Attr("required", "required"),
+			h.Value(title.Get()), h.OnInput(func(ev ui.InputEvent) { title.Set(ev.GetValue()) })),
 
 		h.Label(h.For("history-form-summary"), props.T.T("history.items.field_summary", nil)),
 		h.Textarea(h.ID("history-form-summary"), h.OnInput(func(ev ui.InputEvent) { summary.Set(ev.GetValue()) }), h.Text(summary.Get())),
@@ -111,7 +112,11 @@ func ItemForm(props ItemFormProps) ui.Node {
 		h.If(decision.Blocked, h.Div(h.ClassStr("history-backdate-block"),
 			h.P(props.T.T("history.items.backdate_blocked", nil)),
 			h.Label(
-				h.Input(h.Type("checkbox"), h.Checked(backdateOverride.Get()), h.OnChange(func() { backdateOverride.Set(!backdateOverride.Get()) })),
+				// The <label> wraps this input, so it already has a name; the
+				// class is for the size, which was the browser's 13px default
+				// on a control that overrides a §5.5 safety check.
+				h.Input(h.Type("checkbox"), h.ClassStr("history-select-row"),
+					h.Checked(backdateOverride.Get()), h.OnChange(func() { backdateOverride.Set(!backdateOverride.Get()) })),
 				props.T.T("history.items.backdate_override_confirm", nil),
 			),
 		)),
@@ -126,6 +131,10 @@ func ItemForm(props ItemFormProps) ui.Node {
 			h.Button(h.Type("button"),
 				h.Disabled(decision.Blocked || strings.TrimSpace(title.Get()) == ""),
 				h.OnClick(save), props.T.T("history.save", nil)),
+			// ...and SAY so. A disabled button with no explanation is the
+			// same dead control §12.3 objects to elsewhere in this app.
+			h.If(strings.TrimSpace(title.Get()) == "",
+				h.P(h.ClassStr("history-form-hint"), props.T.T("history.items.title_required", nil))),
 			h.Button(h.Type("button"), h.OnClick(props.OnCancel), props.T.T("history.cancel", nil)),
 		),
 	)

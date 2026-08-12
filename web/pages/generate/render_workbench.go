@@ -311,11 +311,17 @@ type stripProps struct {
 	// Dirty drives Save's enabled state, so the button doubles as the
 	// unsaved-changes indicator; Selected gates the menu, since there is
 	// nothing to run, disable or delete when no feed is loaded.
-	Dirty           bool
-	Saving          bool
-	OnSave          func()
-	OnDeleteFeed    func()
-	OnRunNow        func()
+	// Creating means an unsaved new feed is being written, which the picker
+	// and the page state both need to say out loud.
+	Creating     bool
+	Dirty        bool
+	Saving       bool
+	OnSave       func()
+	OnDeleteFeed func()
+	OnRunNow     func()
+	// OnHistory opens this feed's run history. Past generations were only
+	// reachable by going to History and re-picking the feed from a menu.
+	OnHistory       func()
 	FeedEnabled     bool
 	OnToggleEnabled func()
 	MenuOpen        bool
@@ -375,6 +381,7 @@ type feedMenuProps struct {
 	Open            bool
 	OnOpen          func(bool)
 	OnRunNow        func()
+	OnHistory       func()
 	OnToggleEnabled func()
 	OnDelete        func()
 }
@@ -396,78 +403,26 @@ func renderFeedMenu(p feedMenuProps) ui.Node {
 		OnOpenChange: p.OnOpen,
 		Items: []wui.KebabItem{
 			{ID: "gen-strip-run-now", LabelKey: "generate.workbench.menu.runNow", OnSelect: p.OnRunNow},
+			{ID: "gen-strip-history", LabelKey: "generate.workbench.menu.history", OnSelect: p.OnHistory},
 			{ID: "gen-strip-toggle", LabelKey: enableKey, OnSelect: p.OnToggleEnabled},
 			{ID: "gen-strip-delete", LabelKey: "generate.workbench.menu.delete", Danger: true, OnSelect: p.OnDelete},
 		},
 	})
 }
 
-// renderStripModel is the model control: a menu of the models this
-// deployment's key can actually call, hydrated from the provider.
-//
-// Chat models come first and are the only ones in the main group — the
-// workbench writes text — but nothing is REMOVED from the menu, because the
-// chat/embedding split is a heuristic over the model id (internal/llm's
-// ClassifyModel) and a family it guesses wrong about must still be
-// reachable. A model the recipe already names but the provider does not
-// list is pinned in as its own option, so opening a feed built on a
-// deprecated or custom id never silently retargets it.
+// renderStripModel is the strip's model control: the shared picker
+// (modelpicker.go) with the strip's own id and styling.
 func renderStripModel(p stripProps) ui.Node {
-	t := deps.I18n
-
-	if p.ModelsUnavailable || len(p.Models) == 0 {
-		return h.Input(h.ID("gen-strip-model"), h.Type("text"),
-			h.ClassStr("af-gen__model"),
-			h.Aria("label", t.T("generate.workbench.model")),
-			h.Attr("placeholder", t.T("generate.workbench.model")),
-			h.Attr("title", stripModelTitle(p)),
-			h.Value(p.Model),
-			h.OnInput(p.OnModel))
-	}
-
-	chat := make([]*affv1.ProviderModel, 0, len(p.Models))
-	other := make([]*affv1.ProviderModel, 0, len(p.Models))
-	listed := false
-	for _, m := range p.Models {
-		if m.GetId() == p.Model {
-			listed = true
-		}
-		if m.GetChat() {
-			chat = append(chat, m)
-			continue
-		}
-		other = append(other, m)
-	}
-
-	opts := make([]any, 0, len(p.Models)+6)
-	opts = append(opts,
-		h.ID("gen-strip-model"),
-		h.ClassStr("af-gen__model"),
-		h.Aria("label", t.T("generate.workbench.model")),
-		h.OnChange(ui.UseEvent(func(e ui.InputEvent) { p.OnModel(e.GetValue()) })),
-	)
-	if p.Model == "" {
-		opts = append(opts, h.Option(h.Value(""), h.SelectedIf(true),
-			h.Text(t.T("generate.workbench.modelDefault"))))
-	} else if !listed {
-		opts = append(opts, h.Option(h.Value(p.Model), h.SelectedIf(true),
-			h.Text(t.T("generate.workbench.modelUnlisted", p.Model))))
-	}
-	appendGroup := func(label string, models []*affv1.ProviderModel) {
-		if len(models) == 0 {
-			return
-		}
-		group := make([]any, 0, len(models)+1)
-		group = append(group, h.Attr("label", label))
-		for _, m := range models {
-			id := m.GetId()
-			group = append(group, h.Option(h.Value(id), h.SelectedIf(id == p.Model), h.Text(id)))
-		}
-		opts = append(opts, h.Optgroup(group...))
-	}
-	appendGroup(t.T("generate.workbench.modelGroupChat"), chat)
-	appendGroup(t.T("generate.workbench.modelGroupOther"), other)
-	return h.Select(opts...)
+	return renderModelPicker(modelPickerProps{
+		ID:          "gen-strip-model",
+		Class:       "af-gen__model",
+		LabelKey:    "generate.workbench.model",
+		Value:       p.Model,
+		OnChange:    p.OnModel,
+		Models:      p.Models,
+		Unavailable: p.ModelsUnavailable,
+		Reason:      p.ModelsReason,
+	})
 }
 
 // stripModelTitle explains the degraded state on the fallback input rather
@@ -497,7 +452,17 @@ func renderStrip(p stripProps) ui.Node {
 	// by one, and the browser keeps its selection by INDEX across a re-render
 	// — which is how the picker came to display the second feed's name while
 	// the editor below it held the first feed's prompts.
+	// The first option says what state the page is in.
+	//
+	// Pressing "New feed" used to leave the picker reading "Choose a feed…"
+	// with empty prompts below it — indistinguishable from having chosen
+	// nothing at all. The only tell that anything had happened was the Save
+	// button turning blue, which nobody reads as "you are now creating a
+	// feed".
 	placeholder := t.T("generate.workbench.chooseFeed")
+	if p.Creating {
+		placeholder = t.T("generate.workbench.newFeedOption")
+	}
 	if p.FeedsErr != nil {
 		// The strip replaced the rail, and the rail was where a failed feed
 		// list said so. Without this the picker is simply empty, which reads
@@ -570,6 +535,7 @@ func renderStrip(p stripProps) ui.Node {
 				Open:            p.MenuOpen,
 				OnOpen:          p.OnMenuOpen,
 				OnRunNow:        p.OnRunNow,
+				OnHistory:       p.OnHistory,
 				OnToggleEnabled: p.OnToggleEnabled,
 				OnDelete:        p.OnDeleteFeed,
 			})),

@@ -3,6 +3,10 @@
 package history
 
 import (
+	"strconv"
+
+	"github.com/monstercameron/GoWebComponents/v5/router"
+
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 )
@@ -42,13 +46,47 @@ const (
 	tabItems historyTab = "items"
 )
 
+// tabFromSlug maps a URL segment to a tab. Anything unrecognised — including
+// the empty segment at bare /history — is Runs, which is the tab this page
+// opens on.
+func tabFromSlug(slug string) historyTab {
+	if historyTab(slug) == tabItems {
+		return tabItems
+	}
+	return tabRuns
+}
+
+// FeedRunsPath is the address of one feed's run history. Exported so the
+// pages that link here (the feed rows on /generate) and the tab that reads it
+// cannot disagree about the spelling.
+func FeedRunsPath(feedID int64) string {
+	return TabPath(tabRuns) + "?feed=" + strconv.FormatInt(feedID, 10)
+}
+
+// TabPath is the address of one tab. Exported so a runbook or a bookmark can
+// name it, and so the tab buttons and the router cannot disagree about the
+// spelling.
+func TabPath(tab historyTab) string { return "/history/" + string(tab) }
+
 // History is the root component for the /history route (PLAN.md §12.4,
 // TODOS.md D3-01: "Two tabs over one page: Runs and Items").
 func History(props RootProps) ui.Node {
-	activeTab := ui.UseState(tabRuns)
+	// The active tab is READ FROM THE URL, not held as state.
+	//
+	// It was ui.UseState(tabRuns), so the tab existed only inside this
+	// component: a reload always landed on Runs however you got there, the
+	// back button walked out of the page instead of back to the other tab,
+	// and there was no way to send anyone a link to the Items list. Settings
+	// already worked this way (/settings/provider IS the provider panel);
+	// this is the same treatment.
+	loc := router.UseRoute()
+	nav := router.UseNavigate()
+	activeTab := tabFromSlug(loc.Param("tab"))
 
-	selectRuns := ui.UseEvent(func() { activeTab.Set(tabRuns) })
-	selectItems := ui.UseEvent(func() { activeTab.Set(tabItems) })
+	// Replace, not Push, so switching tabs does not build a history stack of
+	// tab flips that the back button then has to be clicked through.
+	selectRuns := ui.UseEvent(func() { nav.Replace(TabPath(tabRuns)) })
+	selectItems := ui.UseEvent(func() { nav.Replace(TabPath(tabItems)) })
 
 	if props.DisabledReason != "" {
 		return h.Main(
@@ -64,17 +102,17 @@ func History(props RootProps) ui.Node {
 		h.Div(
 			h.ClassStr("history-tabs"),
 			h.Attr("role", "tablist"),
-			historyTabButton(props.T, tabRuns, activeTab.Get(), selectRuns),
-			historyTabButton(props.T, tabItems, activeTab.Get(), selectItems),
+			historyTabButton(props.T, tabRuns, activeTab, selectRuns),
+			historyTabButton(props.T, tabItems, activeTab, selectItems),
 		),
-		h.If(activeTab.Get() == tabRuns, ui.CreateElement(RunsTab, RunsTabProps{
+		h.If(activeTab == tabRuns, ui.CreateElement(RunsTab, RunsTabProps{
 			Client:       props.Runs,
 			Feeds:        props.Feeds,
 			T:            props.T,
 			Disconnected: props.Disconnected,
 			Ready:        props.Ready,
 		})),
-		h.If(activeTab.Get() == tabItems, ui.CreateElement(ItemsTab, ItemsTabProps{
+		h.If(activeTab == tabItems, ui.CreateElement(ItemsTab, ItemsTabProps{
 			Client:       props.Items,
 			Feeds:        props.Feeds,
 			T:            props.T,

@@ -41,6 +41,10 @@ type Formatters interface {
 	// RelativeTime renders how long ago t was, relative to now (rail's
 	// "last build" — D2-02).
 	RelativeTime(t, now time.Time) string
+	// Number renders a count with the locale's grouping — "1,761 tokens", not
+	// "1761 tokens". Token counts are the figures on this page most likely to
+	// run to four and five digits.
+	Number(v int64) string
 	// Percent renders a 0..1 fraction as "NN%". Novelty similarity is the
 	// only caller: it was being interpolated raw, so the sampler showed
 	// "0.8734222" where it meant "87%".
@@ -83,6 +87,10 @@ func (fallbackFormatters) DateTime(t time.Time, tz string) string {
 
 func (fallbackFormatters) Currency(usd float64) string {
 	return fmt.Sprintf("$%.4f", usd)
+}
+
+func (fallbackFormatters) Number(v int64) string {
+	return strconv.FormatInt(v, 10)
 }
 
 func (fallbackFormatters) Percent(fraction float64) string {
