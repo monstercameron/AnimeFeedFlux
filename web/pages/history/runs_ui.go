@@ -429,12 +429,14 @@ func runRow(t Catalog, r *affv1.Run, rowNumber int, expanded bool, log string, t
 					t.T(expandLabelKey(expanded), nil)),
 				rowKebab(t, "history-run-kebab-"+intToStr(int(runID)), intToStr(rowNumber),
 					kebabOpen, func(open bool) { onKebabOpen(runID, open) },
-					[]affui.KebabItem{{
-						ID:       "history-run-delete-" + intToStr(int(runID)),
-						LabelKey: "history.runs.delete",
-						Danger:   true,
-						OnSelect: func() { deleteRun(runID) },
-					}}),
+					func() []affui.KebabItem {
+						return []affui.KebabItem{{
+							ID:       "history-run-delete-" + intToStr(int(runID)),
+							LabelKey: "history.runs.delete",
+							Danger:   true,
+							OnSelect: func() { deleteRun(runID) },
+						}}
+					}),
 			),
 		),
 		// colspan as a STRING, and a class of its own.

@@ -601,9 +601,11 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 		h.If(selection.Get().Count() > 0, h.Div(h.ClassStr("history-bulkbar"),
 			h.Textf(props.T.T("history.items.selected_count", nil), selection.Get().Count()),
 			rowKebab(props.T, "history-bulk-kebab", props.T.T("history.items.bulk_actions", nil),
-				bulkKebabOpen.Get(), bulkKebabOpen.Set, []affui.KebabItem{
-					{ID: "history-bulk-restore", LabelKey: "history.items.bulk_restore", OnSelect: bulkRestore},
-					{ID: "history-bulk-delete", LabelKey: "history.items.bulk_delete", Danger: true, OnSelect: bulkDelete},
+				bulkKebabOpen.Get(), bulkKebabOpen.Set, func() []affui.KebabItem {
+					return []affui.KebabItem{
+						{ID: "history-bulk-restore", LabelKey: "history.items.bulk_restore", OnSelect: bulkRestore},
+						{ID: "history-bulk-delete", LabelKey: "history.items.bulk_delete", Danger: true, OnSelect: bulkDelete},
+					}
 				}),
 		)),
 		renderScreenState(props.T, screen, func() ui.Node {
@@ -743,9 +745,10 @@ func itemRow(t Catalog, it *affv1.Item, selected bool, toggleSelect func(int64),
 			// the second encoding, never the only one.
 			h.Td(h.Span(h.ClassStr(itemStatusClass(deleted)), h.Text(t.T(statusKey, nil)))),
 			h.Td(rowKebab(t, "history-item-kebab-"+intToStr(int(it.Id)), it.Title,
-				kebabOpen.Get(), kebabOpen.Set, itemKebabItems(it, deleted,
-					onEdit, onDelete, onRestore, onToggleRev,
-					func() { correctionOpen.Set(true) }))),
+				kebabOpen.Get(), kebabOpen.Set, func() []affui.KebabItem {
+					return itemKebabItems(it, deleted, onEdit, onDelete, onRestore, onToggleRev,
+						func() { correctionOpen.Set(true) })
+				})),
 		),
 		// String, and its own class — same defect and same fix as runs_ui.go's
 		// expanded row; see that call site's comment.

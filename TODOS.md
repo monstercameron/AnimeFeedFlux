@@ -472,7 +472,7 @@ A read of the render paths: `web/ui`'s primitives, the three page packages' mark
 emitted, what recomputes per render, and what the framework actually charges for each construct
 (checked against the pinned GWC v5.0.1 source, not assumed). Ranked by cost over effort.
 
-- [ ] `A8-44` **`Kebab` builds its entire menu on every render, open or closed.** `web/ui/kebab.go`
+- [x] `A8-44` **FIXED 2026-08-11.** — original report: **`Kebab` builds its entire menu on every render, open or closed.** `web/ui/kebab.go`
       constructs `itemNodes` unconditionally: per item a ~12-entry `[]css.Rule` plus two more slices
       from the `Hover(...)`/`focusVisible()` appends, a `css.Class(...)`, a `resolve(...)` lookup and
       a closure — then hands the lot to `AccessibleOverlay` as `Children` regardless of `p.Open`.
@@ -485,6 +485,16 @@ emitted, what recomputes per render, and what the framework actually charges for
       the three that exist (`UseRef`, `UseState`, `UseEffect`) sit above it and stay unconditional,
       so positional slots do not move. Same treatment for the caller's `itemKebabItems`, which can
       be built inside the same guard.
+      Fixed at both levels. The loop moved into `buildKebabItems`, called only when `p.Open` — a
+      named function rather than an inline `if` so the hook question is answerable by reading it, and
+      so a future hook added in there is obviously wrong. The hook-safety claim was checked against
+      v5.0.1 rather than assumed: `html.OnClick` and `css.Class` are plain prop setters
+      (`sugar.go`'s `optionFunc`, `css.go`'s `Class`), not hook registrations.
+      `rowKebab` now takes a thunk instead of a slice, so the caller's five `KebabItem`s and five
+      closures per row are not built either. Note the anchor-measuring `UseEffect` reads
+      `len(ordered)` — it early-returns while closed, so an empty item set there is harmless, but a
+      guard that emptied `ordered` itself (rather than skipping the build) would have broken menu
+      positioning through that closure.
 - [ ] `A8-45` **`h.Show(false, …)` costs MORE than rendering the subtree and saves only paint — 48
       call sites.** Three charges, and the first two are easy to miss: Go evaluates arguments
       eagerly, so the hidden subtree is fully constructed before `Show` is called; `html.Show` then
