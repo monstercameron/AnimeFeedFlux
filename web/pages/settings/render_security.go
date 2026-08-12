@@ -27,7 +27,7 @@ func renderSecurity() ui.Node {
 	revokeAllVisible := ui.UseState(false)
 	revokeAllSubmitting := ui.UseState(false)
 
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		loadSessions(sessions, sessionsLoading, sessionsErr)
 		return nil
 	}, "security-sessions-mount")
@@ -58,7 +58,7 @@ func renderSecurity() ui.Node {
 	remainingHint := ui.UseState(-1)
 	regenErr := ui.UseState(error(nil))
 
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		go func() {
 			resp, err := deps.Auth.Session(bgContext(), &affv1.AuthServiceSessionRequest{})
 			if err != nil {

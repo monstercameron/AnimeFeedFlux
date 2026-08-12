@@ -1,6 +1,7 @@
 package tokens
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -89,5 +90,55 @@ func TestSpacingRadiusFontHelpers(t *testing.T) {
 	}
 	if got, want := string(Color(RoleAccent)), "var(--color-accent)"; got != want {
 		t.Errorf("Color(accent) = %q, want %q", got, want)
+	}
+}
+
+// The interning tables (A8-47) must return exactly what the concatenation
+// they replaced returned. A table that drifts from the fallback is worse than
+// no table: it produces a var reference to a custom property that was never
+// declared, which CSS resolves to nothing and renders as an unstyled element.
+func TestInternedTokensMatchTheirComputedForm(t *testing.T) {
+	for _, role := range []string{
+		RoleBg, RoleSurface, RoleSurfaceRaised, RoleBorder, RoleBorderStrong,
+		RoleText, RoleTextMuted, RoleTextInverse,
+		RoleAccent, RoleAccentStrong, RoleAccentFg,
+		RoleWarning, RoleWarningFg, RoleDanger, RoleDangerFg,
+		RoleSuccess, RoleSuccessFg, RoleFocusRing, RoleScrim,
+		RoleLive, RoleLiveFg,
+	} {
+		if _, ok := colorVars[role]; !ok {
+			t.Errorf("role %q is declared but not interned", role)
+			continue
+		}
+		if got, want := Color(role), css.Var("color-"+role); got != want {
+			t.Errorf("Color(%q) = %q, want %q", role, got, want)
+		}
+	}
+	for _, name := range []string{TextXs, TextSm, TextBase, TextMd, TextLg, TextXl, TextDisplay} {
+		if got, want := FontSize(name), css.Length(varRef("text-"+name)); got != want {
+			t.Errorf("FontSize(%q) = %q, want %q", name, got, want)
+		}
+	}
+	for _, name := range []string{RadiusSm, RadiusMd, RadiusLg, RadiusXl, RadiusFull} {
+		if got, want := Radius(name), css.Length(varRef("radius-"+name)); got != want {
+			t.Errorf("Radius(%q) = %q, want %q", name, got, want)
+		}
+	}
+	for n := range spacingScale() {
+		if got, want := Space(n), css.Length(varRef("space-"+strconv.Itoa(n))); got != want {
+			t.Errorf("Space(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+// A name outside the closed set must still resolve, not return a zero value:
+// these helpers are also called with composed names, and a zero would turn a
+// typo into a silently missing style instead of a visibly wrong one.
+func TestUninternedTokensStillResolve(t *testing.T) {
+	if got, want := Color("not-a-declared-role"), css.Var("color-not-a-declared-role"); got != want {
+		t.Errorf("Color = %q, want %q", got, want)
+	}
+	if got, want := Space(7), css.Length(varRef("space-7")); got != want {
+		t.Errorf("Space(7) = %q, want %q", got, want)
 	}
 }

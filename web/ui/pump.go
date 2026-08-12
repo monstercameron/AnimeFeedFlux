@@ -83,7 +83,7 @@ func UsePump() Pump {
 	}
 	// The heartbeat itself. Keyed on the running flag, so it exists only
 	// while work is outstanding.
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		if !p.running.Get() {
 			return nil
 		}

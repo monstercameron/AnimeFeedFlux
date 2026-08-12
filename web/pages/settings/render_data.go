@@ -58,7 +58,7 @@ func renderData() ui.Node {
 	// keyed on it rather than on a constant, so bumping it re-runs the load.
 	// §12.6 — an error with no way out is a dead end.
 	reloadTick := ui.UseState(0)
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		go func() {
 			statsLoading.Set(true)
 			resp, err := deps.System.Stats(bgContext(), &affv1.SystemServiceStatsRequest{})

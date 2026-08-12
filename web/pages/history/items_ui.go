@@ -252,7 +252,7 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 	// landing directly on /history/items showed an empty table until you
 	// typed something.
 	feedsSettled := ui.UseState(false)
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		if !props.Ready || props.Feeds == nil {
 			feedsSettled.Set(true)
 			return nil
@@ -271,7 +271,7 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 	// Keyed on Ready as well as the filter, so the first load happens when
 	// the socket can actually carry it — and re-fires if the page was opened
 	// before the session came up. See RootProps.Ready.
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		if !props.Ready || !feedsSettled.Get() {
 			return nil
 		}
@@ -279,7 +279,7 @@ func ItemsTab(props ItemsTabProps) ui.Node {
 		selection.Get().Clear()
 		load("")
 		return nil
-	}, filter.Get(), props.Ready, feedsSettled.Get())
+	}, newItemsLoadKey(filter.Get(), props.Ready, feedsSettled.Get()))
 
 	// The search box is debounced: it used to set the filter on every
 	// keystroke, and the filter is the load effect's dependency, so typing
@@ -1041,11 +1041,41 @@ func cloneItem(it *affv1.Item) *affv1.Item {
 	}
 }
 
+// formattedDates memoises FormatDate by instant (TODOS.md A8-46).
+//
+// This is a value cache rather than a UseMemo, and that is not a shortcut:
+// UseMemo is a hook, hooks are positional, and the calls this replaces happen
+// once per ROW inside a loop whose length changes with the data — exactly the
+// place a hook cannot go. The ticket's "start with the ones inside the row
+// loops" is only reachable this way.
+//
+// The saving is real: a 25-row table re-rendered on every selection toggle,
+// search keystroke and filter change ran 25 date formats each time, for a
+// string that depends on nothing but the timestamp.
+//
+// Bounded, because an operator paging through months of history would
+// otherwise accumulate one entry per distinct instant for the lifetime of the
+// tab. At the cap it is cleared rather than evicted one at a time: the access
+// pattern is a page of rows at a time, so the whole working set turns over
+// together and an LRU would cost more bookkeeping than it saves.
+var formattedDates = map[int64]string{}
+
+const formattedDatesCap = 512
+
 func formatTimestamp(ts *timestamppb.Timestamp) string {
 	if ts == nil {
 		return ""
 	}
-	return i18n.FormatDate("en", ts.AsTime(), i18n.DateOptions{Style: i18n.DateStyleMedium})
+	key := ts.AsTime().UnixNano()
+	if s, ok := formattedDates[key]; ok {
+		return s
+	}
+	s := i18n.FormatDate("en", ts.AsTime(), i18n.DateOptions{Style: i18n.DateStyleMedium})
+	if len(formattedDates) >= formattedDatesCap {
+		formattedDates = make(map[int64]string, formattedDatesCap)
+	}
+	formattedDates[key] = s
+	return s
 }
 
 // nowTimestamp/timestampOrNil are small bridges between time.Time and the

@@ -59,6 +59,14 @@ type KebabProps struct {
 // visually separated to the end (OrderKebabItems), the trigger has a real
 // accessible name, and the menu is a trapped-focus, Esc-closable
 // AccessibleOverlay rather than a hand-rolled absolutely-positioned div.
+// kebabAnchorKey collapses the anchor effect's two deps into one comparable
+// value for UseEffectOf, which is measurably cheaper than the variadic form
+// in wasm (A8-50).
+type kebabAnchorKey struct {
+	open      bool
+	triggerID string
+}
+
 func Kebab(p KebabProps) Node {
 	triggerID := p.ID + "-trigger"
 	menuID := p.ID + "-menu"
@@ -71,13 +79,13 @@ func Kebab(p KebabProps) Node {
 	// Where the menu goes. See kebabAnchor for why this is measured rather
 	// than expressed in CSS.
 	anchor := gwcui.UseState(kebabRect{})
-	gwcui.UseEffect(func() func() {
+	gwcui.UseEffectOf(func() func() {
 		if !p.Open {
 			return nil
 		}
 		anchor.Set(measureKebabAnchor(triggerID, len(ordered)))
 		return nil
-	}, p.Open, triggerID)
+	}, kebabAnchorKey{open: p.Open, triggerID: triggerID})
 
 	triggerRules := []css.Rule{
 		css.Display.InlineFlex,

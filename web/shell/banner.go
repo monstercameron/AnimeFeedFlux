@@ -79,7 +79,7 @@ func renderBanner() ui.Node {
 	// closure/slice, so identity comparison across renders is meaningful
 	// (the "UseEffect deps compare by IDENTITY" trap this shell was
 	// warned about).
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		if !visible {
 			return nil
 		}

@@ -524,15 +524,37 @@ emitted, what recomputes per render, and what the framework actually charges for
       Not converted, and why: 32 of the 55 are a single `<p>` of error or status text, where the
       construct-plus-clone is a few allocations and the conversion buys nothing measurable; the rest
       are mid-list, so rule 1 applies. Revisit if keyed children arrive.
-- [ ] `A8-46` **`UseMemo`/`UseMemoOf` exist in v5.0.1 and this app uses them exactly zero times.**
+- [x] `A8-46` **ADDRESSED 2026-08-11.** — original report: **`UseMemo`/`UseMemoOf` exist in v5.0.1 and this app uses them exactly zero times.**
       Every derived value is recomputed on every render — the per-row `originLabel`/`formatTimestamp`
       formatting, the filter comparisons, the ordered kebab partition, the visible-ID sets. Most are
       individually cheap; the point is that the framework ships the tool and no render path in
       27k lines of UI reaches for it. Start with the ones inside the row loops.
-- [ ] `A8-47` **The token helpers allocate a string on every call.** `tokens.Color(role)` is
+      **"Start with the ones inside the row loops" is not reachable with a hook, and that is the
+      finding.** `UseMemo`/`UseMemoOf` are hooks, hooks are positional, and the per-row calls sit
+      inside a loop whose length changes with the data — the one place a hook must never go. The
+      second constraint is `UseMemoOf`'s: its zero-allocation form needs a NON-CAPTURING compute
+      function, and almost every derived value here closes over the catalogue or the reducer state.
+      What was done instead: `formatTimestamp` is memoised by INSTANT in a plain bounded value cache
+      (`formattedDates`), the correct shape for a per-row computation, reaching the hot case the
+      ticket named — a 25-row table re-formatting 25 dates on every selection toggle, search
+      keystroke and filter change, for strings that depend on nothing but the timestamp. The cache
+      clears wholesale at 512 entries rather than evicting one at a time, because the access pattern
+      is a page of rows and the working set turns over together.
+      `originLabel` was left alone: a switch over four constants ending in a catalogue lookup, where
+      a cache in front would cost more than it saves.
+- [x] `A8-47` **FIXED 2026-08-11.** — original report: **The token helpers allocate a string on every call.** `tokens.Color(role)` is
       `css.Var("color-" + role)` and `Space(n)` runs `strconv.Itoa` — a concatenation per call, and
       the per-render rule slices in `web/ui` call them dozens of times per element. Precompute the
       common roles/steps as package-level vars so the hot paths reference rather than rebuild them.
+      Fixed: `Color`, `FontSize`, `Radius` and `Space` answer from tables built once in `init` over
+      the closed set of constants that file declares. The tables are written only by `init` and are
+      read-only afterwards, which is what makes an unsynchronised map safe — a mutable cache would
+      need a lock or a `sync.Map`, and the load would cost more than the concatenation it replaced.
+      An unrecognised name still falls through to the old path rather than returning a zero value:
+      these helpers are also called with composed names, and a zero would turn a typo into an
+      invisibly missing style instead of a visibly wrong one. A test asserts every interned entry
+      equals what the fallback produces, because a drifted table emits a `var()` reference to a
+      custom property that was never declared.
 - [ ] `A8-48` **The pump re-renders the entire page ~7×/second for the duration of every mutation.**
       `web/ui/pump.go` ticks at 150ms for up to 600 ticks plus a 2s grace, and each tick is a full
       render pass. It is the correct trade — without it a save sits on "Saving…" forever (`A7-06`)
@@ -556,7 +578,7 @@ framework affordances left on the table.
       a stripped wasm binary gives worse stack traces, which matters less here than elsewhere
       because Go/wasm panics already surface poorly and the app's real diagnostics are server-side.
       Measure before and after rather than assuming the 20–30%.
-- [ ] `A8-50` **`UseEffectOf` is 2.6× cheaper than variadic `UseEffect` in wasm, and 19 call sites
+- [x] `A8-50` **FIXED 2026-08-11.** — original report: **`UseEffectOf` is 2.6× cheaper than variadic `UseEffect` in wasm, and 19 call sites
       still use the variadic form** (6 already use the typed one). This is not a guess: the
       library's own perf log (`docs/DEVNOTES_PERF_LOOP.md`, iteration 3) measures the untyped hook
       walk at 1.48 ms/pass in wasm against 0.57 ms with the `*Of` variants, and notes wasm amplifies
@@ -566,6 +588,15 @@ framework affordances left on the table.
       since a struct of comparables is comparable.
       One rule the library states and this conversion must respect: `UseEffect` and `UseEffectOf`
       share a slot, so a given call site must never alternate between them across renders.
+      Fixed: all 20 remaining call sites converted — `grep` for `ui.UseEffect(` in `web/` now returns
+      nothing, which is also what enforces the no-alternating rule: no site has both forms left to
+      alternate between. The four multi-dep sites take comparable struct keys — `itemsLoadKey` and
+      `runsLoadKey` in `web/pages/history/effectkeys.go`, plus `kebabAnchorKey` and
+      `sessionRouteKey`.
+      The two history keys are a behaviour improvement rather than a translation. Both filters hold
+      `*time.Time` and the variadic deps compared the POINTERS, so a filter struct rebuilt with the
+      same dates re-fired a load that fetched exactly what was already on screen. The keys hold the
+      instant.
 - [ ] `A8-51` **`UseLayoutEffect` is used zero times, and the kebab measures its anchor in a passive
       `UseEffect`.** `web/ui/kebab.go:74` reads the trigger's geometry AFTER commit and paint, then
       sets state, forcing a second render — so the menu is painted once at stale coordinates before
@@ -594,10 +625,15 @@ framework affordances left on the table.
 - [ ] `A8-55` **`ui.Lazy` is used zero times.** Worth evaluating only AFTER `A8-49`: deferring
       subtrees matters much less once the bundle itself is smaller, and this app's routes all live
       in one binary anyway. Filed so the decision is recorded rather than re-opened.
-- [ ] `A8-56` **`UseMemoOf` is the form to prefer when acting on `A8-46`**, not `UseMemo` — same
+- [x] `A8-56` **RESOLVED 2026-08-11 by `A8-46`'s finding.** — original report: **`UseMemoOf` is the form to prefer when acting on `A8-46`**, not `UseMemo` — same
       memo slot, but a static non-capturing compute keyed by one comparable dep has zero
       steady-state allocations, where the variadic form allocates a deps slice per render. Same
       no-alternating rule as `A8-50`.
+      Moot in the direction it was written: `A8-46` found that the per-row values it targeted cannot
+      use a hook at all, and that `UseMemoOf`'s zero-allocation form needs a non-capturing compute
+      function almost nothing here can supply. The preference stands if a memo hook is ever genuinely
+      warranted; nothing in this pass warranted one. The `*Of` preference WAS acted on for effects —
+      see `A8-50`, where all 20 sites now use `UseEffectOf`.
 
 Deliberately NOT adopted, with the reason, so this is not re-litigated:
 

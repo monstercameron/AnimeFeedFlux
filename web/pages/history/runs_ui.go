@@ -133,7 +133,7 @@ func RunsTab(props RunsTabProps) ui.Node {
 	// Applied on change as well as at mount, so navigating here from another
 	// feed's row while the tab is already open re-filters instead of showing
 	// the previous feed's runs.
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		if f := filter.Get(); f.FeedID != queryFeedID {
 			f.FeedID = queryFeedID
 			filter.Set(f)
@@ -189,7 +189,7 @@ func RunsTab(props RunsTabProps) ui.Node {
 	// feedsSettled gates the runs load. See the effect below for why these two
 	// requests must not be in flight at the same time.
 	feedsSettled := ui.UseState(false)
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		if !props.Ready || props.Feeds == nil {
 			feedsSettled.Set(true)
 			return nil
@@ -220,14 +220,14 @@ func RunsTab(props RunsTabProps) ui.Node {
 	// This is a workaround at the page level for something wrong a layer down,
 	// and it is filed as such — the tunnel should not drop a concurrent stream
 	// during startup, and nothing here fixes that.
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		if !props.Ready || !feedsSettled.Get() {
 			return nil
 		}
 		store.Dispatch(runsAction{kind: NavReset})
 		load("")
 		return nil
-	}, filter.Get(), props.Ready, feedsSettled.Get())
+	}, newRunsLoadKey(filter.Get(), props.Ready, feedsSettled.Get()))
 
 	toggleExpand := func(runID int64) {
 		wasExpanding := !store.Get().expand[runID]

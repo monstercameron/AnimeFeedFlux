@@ -47,7 +47,7 @@ func renderProvider() ui.Node {
 
 	// reloadTick drives the error view's Retry control — see §12.6.
 	reloadTick := ui.UseState(0)
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		go func() {
 			loading.Set(true)
 			resp, err := deps.System.GetSettings(bgContext(), &affv1.SystemServiceGetSettingsRequest{})
@@ -89,7 +89,7 @@ func renderProvider() ui.Node {
 		return nil
 	}, costDays.Get())
 
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		go func() {
 			resp, err := deps.System.ListModels(bgContext(), &affv1.SystemServiceListModelsRequest{})
 			if err != nil {

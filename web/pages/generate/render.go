@@ -240,7 +240,7 @@ func Render() ui.Node {
 	// appstate.Anon is the zero value and `state != Disconnected` is already
 	// true there, so a bool never changes when the session actually becomes
 	// usable and the effect would never re-fire.
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		if sess.Get() == appstate.Auth || sess.Get() == appstate.Killed {
 			feedsRes.Reload()
 			settingsRes.Reload()
@@ -348,7 +348,7 @@ func Render() ui.Node {
 	// Effect-scoped (not read during render) per the "no browser/network
 	// reads in the render body" rule; keyed on the slug string so it only
 	// re-fires when the selection actually changes, not on every render.
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		slug := selectedSlug.Get()
 		if slug == "" || !wired() {
 			return nil

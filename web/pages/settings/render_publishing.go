@@ -37,7 +37,7 @@ func renderPublishing() ui.Node {
 	// keyed on it rather than on a constant, so bumping it re-runs the load.
 	// §12.6 — an error with no way out is a dead end.
 	reloadTick := ui.UseState(0)
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		go func() {
 			loading.Set(true)
 			resp, err := deps.System.GetSettings(bgContext(), &affv1.SystemServiceGetSettingsRequest{})

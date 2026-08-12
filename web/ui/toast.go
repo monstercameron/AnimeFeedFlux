@@ -44,7 +44,7 @@ type ToastProps struct {
 // routine confirmations do not interrupt a screen reader mid-sentence.
 func Toast(p ToastProps) Node {
 	announcer := gwcui.UseAnnouncer()
-	gwcui.UseEffect(func() func() {
+	gwcui.UseEffectOf(func() func() {
 		if len(p.Items) == 0 {
 			return nil
 		}

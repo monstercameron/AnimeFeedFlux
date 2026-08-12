@@ -11,6 +11,7 @@ import (
 	"github.com/monstercameron/GoWebComponents/v5/state"
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
+	"github.com/monstercameron/AnimeFeedFlux/web/appstate"
 	"github.com/monstercameron/AnimeFeedFlux/web/guard"
 	afi18n "github.com/monstercameron/AnimeFeedFlux/web/i18n"
 )
@@ -82,6 +83,15 @@ func routeInfoFor(path string) (guard.RouteInfo, bool) {
 // effect, and it is a component rather than a bare function so that its atom
 // subscriptions have a fiber of their own — a re-render here must not
 // re-render the page body beneath it.
+// sessionRouteKey collapses this effect's three deps into one comparable
+// value for UseEffectOf, whose typed single-dep form avoids the per-render
+// deps slice the variadic form allocates — measurably in wasm (A8-50).
+type sessionRouteKey struct {
+	current appstate.State
+	held    bool
+	path    string
+}
+
 func renderSessionRoute(props shellWrapperProps) ui.Node {
 	sess := state.UseAtomKey(SessionAtom)
 	pendingExpiry := state.UseAtomKey(PendingExpiryAtom)
@@ -90,7 +100,7 @@ func renderSessionRoute(props shellWrapperProps) ui.Node {
 	held := pendingExpiry.Get()
 	path := props.Path
 
-	ui.UseEffect(func() func() {
+	ui.UseEffectOf(func() func() {
 		info, known := routeInfoFor(path)
 		act := guard.DecideSessionChange(current, info, known, held)
 
@@ -133,7 +143,7 @@ func renderSessionRoute(props shellWrapperProps) ui.Node {
 			router.NavigateReplace(target)
 		})
 		return nil
-	}, current, held, path)
+	}, sessionRouteKey{current: current, held: held, path: path})
 
 	return h.Fragment()
 }

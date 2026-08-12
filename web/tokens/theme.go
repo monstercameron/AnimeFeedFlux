@@ -331,22 +331,88 @@ func spacingScale() map[int]css.Length {
 	return spacing
 }
 
+// Every helper below returns a fixed string for a fixed argument, and the
+// arguments are a closed set of constants declared in this file. They were
+// rebuilding that string on every call — a concatenation, and for Space a
+// strconv.Itoa as well — and web/ui's per-render rule slices call them dozens
+// of times per element, on every element, on every render (TODOS.md A8-47).
+//
+// So the answers are computed once, at init, and looked up. The maps are
+// written only by init and read-only afterwards, which is what makes an
+// unsynchronised map safe here: a mutable cache would need a lock or a
+// sync.Map, and the load would cost more than the concatenation it replaced.
+//
+// A name outside the closed set still works — it falls through to the old
+// path — because these helpers are also used with the Shadow/Duration/Font
+// constants and with names composed elsewhere, and returning a zero value for
+// an unrecognised one would turn a typo into an invisible missing style
+// rather than a visible wrong one.
+var (
+	colorVars    = map[string]css.Color{}
+	fontSizeVars = map[string]css.Length{}
+	radiusVars   = map[string]css.Length{}
+	spaceVars    = map[int]css.Length{}
+)
+
+func init() {
+	for _, role := range []string{
+		RoleBg, RoleSurface, RoleSurfaceRaised, RoleBorder, RoleBorderStrong,
+		RoleText, RoleTextMuted, RoleTextInverse,
+		RoleAccent, RoleAccentStrong, RoleAccentFg,
+		RoleWarning, RoleWarningFg, RoleDanger, RoleDangerFg,
+		RoleSuccess, RoleSuccessFg, RoleFocusRing, RoleScrim,
+		RoleLive, RoleLiveFg,
+	} {
+		colorVars[role] = css.Var("color-" + role)
+	}
+	for _, name := range []string{TextXs, TextSm, TextBase, TextMd, TextLg, TextXl, TextDisplay} {
+		fontSizeVars[name] = css.Length(varRef("text-" + name))
+	}
+	for _, name := range []string{RadiusSm, RadiusMd, RadiusLg, RadiusXl, RadiusFull} {
+		radiusVars[name] = css.Length(varRef("radius-" + name))
+	}
+	// The same scale spacingScale() declares, plus 0, which it also carries.
+	for _, n := range []int{0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 56, 64, 80, 96} {
+		spaceVars[n] = css.Length(varRef("space-" + strconv.Itoa(n)))
+	}
+}
+
 // Color returns css.Var("color-<role>") — a reference to a semantic role
 // declared by Emit, e.g. tokens.Color(tokens.RoleAccent).
-func Color(role string) css.Color { return css.Var("color-" + role) }
+func Color(role string) css.Color {
+	if v, ok := colorVars[role]; ok {
+		return v
+	}
+	return css.Var("color-" + role)
+}
 
 // FontSize returns css.Var("text-<name>") wrapped as a Length via CSS's own
 // var() (custom properties are untyped at the CSS level; the wrapping
 // property, e.g. font-size, decides how the string is interpreted).
-func FontSize(name string) css.Length { return css.Length(varRef("text-" + name)) }
+func FontSize(name string) css.Length {
+	if v, ok := fontSizeVars[name]; ok {
+		return v
+	}
+	return css.Length(varRef("text-" + name))
+}
 
 // Radius returns css.Var("radius-<name>").
-func Radius(name string) css.Length { return css.Length(varRef("radius-" + name)) }
+func Radius(name string) css.Length {
+	if v, ok := radiusVars[name]; ok {
+		return v
+	}
+	return css.Length(varRef("radius-" + name))
+}
 
 // Space returns css.Var("space-<n>") for a spacing scale index (0,1,2,3,4,5,
 // 6,8,10,12,16,20,24,32,40,48,56,64,80,96 — Tailwind's numeric scale, each
 // step 0.25rem).
-func Space(n int) css.Length { return css.Length(varRef("space-" + strconv.Itoa(n))) }
+func Space(n int) css.Length {
+	if v, ok := spaceVars[n]; ok {
+		return v
+	}
+	return css.Length(varRef("space-" + strconv.Itoa(n)))
+}
 
 // Shadow returns css.Var("<name>") for one of the ShadowSm/Md/Lg constants —
 // pass straight to css.Raw("box-shadow", string(tokens.Shadow(tokens.ShadowMd))).
