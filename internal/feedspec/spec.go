@@ -70,8 +70,23 @@ type Spec struct {
 
 	// Cron plus Timezone together, never Cron alone — a UTC-only cron
 	// silently shifts a "7am daily" feed by an hour twice a year (§7).
+	//
+	// Cron is the fallback and the escape hatch now, not the primary: when
+	// Recurrence is set it wins (see Spec.Firing). Kept because every recipe
+	// exported before 2026-08-11 carries one, and because a few shapes —
+	// "every 15 minutes", "weekdays at 9 and 17" — are still easier to say in
+	// cron than in an interval.
 	Cron     string
 	Timezone string
+
+	// Recurrence is the structured schedule the editor writes: an interval
+	// from an anchor date rather than a set of calendar fields to match.
+	//
+	// Nil means "use Cron". It exists because cron cannot express most of the
+	// schedules people actually want — "every other Thursday", "every 3
+	// weeks", "the second Tuesday" all have no cron form at all. See
+	// internal/schedule/recurrence.go.
+	Recurrence *Recurrence
 
 	ItemsPerRun int
 	// FeedWindow is how many items appear in the rendered XML (§5.4, §7),

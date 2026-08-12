@@ -92,9 +92,26 @@ message SourceSpec {
 message FeedSpec {
   // Standard cron expression, evaluated in `timezone` — never UTC-normalized
   // client-side, or "7am" silently drifts across DST (PLAN.md §7).
+  //
+  // Superseded by `recurrence` for new feeds, and kept for three reasons
+  // rather than removed: every existing feed and every exported recipe TOML
+  // carries one, the scheduler still honours it when `recurrence` is unset,
+  // and cron remains the escape hatch for the handful of shapes the
+  // structured model deliberately does not cover (e.g. "every 15 minutes",
+  // "weekdays only at 9 and 17"). When `recurrence` is set it WINS and this
+  // field is ignored.
   string cron = 1;
   // IANA zone, e.g. "America/New_York" (PLAN.md §7).
   string timezone = 2;
+
+  // Structured schedule, and the one the editor writes.
+  //
+  // Cron cannot express an INTERVAL, which is what most human schedules are:
+  // "every other Thursday" has no cron form ( `*/2` on day-of-week means
+  // every second weekday NUMBER), nor does "every 3 weeks", nor "the second
+  // Tuesday of the month". See internal/schedule/recurrence.go for the full
+  // argument and the RFC 5545 subset this mirrors.
+  Recurrence recurrence = 3;
 
   int32 items_per_run = 10;
   // How many items appear in the rendered XML window (PLAN.md §7's "feed
@@ -115,6 +132,83 @@ message FeedSpec {
   // Only meaningful (and required, per ValidateSpec) when kind =
   // FEED_KIND_GROUNDED.
   repeated SourceSpec sources = 40;
+}
+
+// Weekday is a day of the week, numbered to match Go's time.Weekday so the
+// server needs no conversion table. WEEKDAY_UNSPECIFIED is the proto3 zero
+// value and is never a valid selection — Sunday is explicitly 1, not 0, so
+// "unset" and "Sunday" can be told apart.
+enum Weekday {
+  WEEKDAY_UNSPECIFIED = 0;
+  WEEKDAY_SUNDAY = 1;
+  WEEKDAY_MONDAY = 2;
+  WEEKDAY_TUESDAY = 3;
+  WEEKDAY_WEDNESDAY = 4;
+  WEEKDAY_THURSDAY = 5;
+  WEEKDAY_FRIDAY = 6;
+  WEEKDAY_SATURDAY = 7;
+}
+
+// Frequency is the unit `Recurrence.interval` counts in.
+//
+// There is no YEARLY: a year is twelve months, and folding it in removes a
+// class of edge cases (yearly-with-set-position, interval-2 across February
+// 29) in exchange for the caller multiplying by twelve. The editor still
+// offers "years" as a unit and converts.
+enum Frequency {
+  FREQUENCY_UNSPECIFIED = 0;
+  FREQUENCY_DAILY = 1;
+  FREQUENCY_WEEKLY = 2;
+  FREQUENCY_MONTHLY = 3;
+}
+
+// Recurrence is a schedule expressed as an interval from an anchor date,
+// rather than as a set of calendar fields to match.
+//
+// A constrained subset of RFC 5545's RRULE (FREQ + INTERVAL + BYDAY +
+// BYMONTHDAY + BYSETPOS). Not for interoperability, but because that spec
+// already settled the awkward questions — what "the 31st" means in February,
+// how nth-weekday interacts with an interval — and a fourth dialect of
+// recurrence would have to rediscover them.
+message Recurrence {
+  Frequency frequency = 1;
+  // How many of `frequency` between firings. 1 = every, 2 = every other,
+  // 3 = every third. Must be >= 1.
+  int32 interval = 2;
+
+  // WEEKLY: which days fire. MONTHLY with set_position: which weekday the
+  // position counts (exactly one).
+  //
+  // The interval applies to the WEEK, not to each day — "every other week on
+  // Monday and Thursday" fires twice in a firing week and not at all in the
+  // week between.
+  repeated Weekday weekdays = 3;
+
+  // MONTHLY without set_position: 1-31, or -1 for "the last day of the
+  // month", whatever length that month is. A day that does not exist in a
+  // given month does not fire that month (RFC 5545's rule) rather than
+  // silently moving to the 28th, which would be a schedule nobody asked for.
+  int32 month_day = 4;
+
+  // MONTHLY: 1-4 for "the first/second/third/fourth <weekday>", or -1 for
+  // "the last". Zero means "use month_day instead".
+  int32 set_position = 5;
+
+  // Local wall-clock time in the spec's `timezone`. Never UTC: "7am" means
+  // 7am where the operator lives, across DST, which is the entire premise of
+  // internal/schedule.
+  int32 hour = 6;
+  int32 minute = 7;
+
+  // The phase reference the interval counts from, as a local date.
+  //
+  // Irrelevant when interval == 1, and load-bearing above it: "every other
+  // Thursday" is ambiguous until something says WHICH Thursdays. The editor
+  // sets this to the date the operator picks as the schedule's start.
+  // Unset means the Unix epoch, which is stable across restarts — defaulting
+  // to "now" would make the same stored schedule fire on different weeks
+  // depending on when the server happened to load it.
+  google.protobuf.Timestamp anchor = 8;
 }
 
 // Feed mirrors internal/model.Feed plus the recipe (FeedSpec) and the

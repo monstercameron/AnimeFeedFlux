@@ -1297,3 +1297,71 @@ func TestItemUpdate_SubSecondPublishedAtTruncatedToWholeSecond(t *testing.T) {
 		t.Fatalf("published_at retained a sub-second component: %v", got)
 	}
 }
+
+// TestItemListSearchMatchesPrefix drives the real FTS5 index, because
+// itemsearch_test.go only proves what string gets built — not that SQLite
+// agrees with it.
+//
+// The reported bug in one line: typing "triv" found nothing while "trivia"
+// found everything, in a box that searches as you type.
+func TestItemListSearchMatchesPrefix(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-search")
+
+	// Explicit, strictly increasing publish times: §5.5 refuses an item at or
+	// before the feed's newest, and three creates in the same second collide.
+	base := time.Now().Add(-time.Hour).UTC()
+	for i, title := range []string{
+		"Trivia question about mecha",
+		"Character spotlight: Haru",
+		"Weekly news roundup",
+	} {
+		if _, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+			FeedId: feedID, Title: title, SummaryText: "summary for " + title, BodyHtml: "<p>body</p>",
+			PublishedAt: timestamppb.New(base.Add(time.Duration(i) * time.Minute)),
+		}}); err != nil {
+			t.Fatalf("create %q: %v", title, err)
+		}
+	}
+
+	search := func(q string) []string {
+		t.Helper()
+		resp, err := srv.List(ctx, &affv1.ItemServiceListRequest{Query: q, PageSize: 50})
+		if err != nil {
+			t.Fatalf("List(%q): %v", q, err)
+		}
+		titles := make([]string, 0, len(resp.GetItems()))
+		for _, it := range resp.GetItems() {
+			titles = append(titles, it.GetTitle())
+		}
+		return titles
+	}
+
+	// The whole point: a prefix finds the word.
+	if got := search("triv"); len(got) != 1 {
+		t.Errorf(`search("triv") = %v, want the one trivia item`, got)
+	}
+	// And still works when the word is finished.
+	if got := search("trivia"); len(got) != 1 {
+		t.Errorf(`search("trivia") = %v, want the one trivia item`, got)
+	}
+	// Two prefixes are ANDed, not ORed.
+	if got := search("triv mech"); len(got) != 1 {
+		t.Errorf(`search("triv mech") = %v, want the one item matching both`, got)
+	}
+	if got := search("triv haru"); len(got) != 0 {
+		t.Errorf(`search("triv haru") = %v, want nothing (no item has both)`, got)
+	}
+	// FTS5 syntax must not reach the query language or blow up the request.
+	for _, q := range []string{`"`, `AND`, `spotlight: haru`, `NEAR(a b)`, `*`, `-news`} {
+		if _, err := srv.List(ctx, &affv1.ItemServiceListRequest{Query: q, PageSize: 50}); err != nil {
+			t.Errorf("List(%q) must not error on operator characters: %v", q, err)
+		}
+	}
+	// A query of only punctuation is not a question: it must not filter
+	// everything away.
+	if got := search("..."); len(got) != 3 {
+		t.Errorf(`search("...") = %v, want every item (no filter applied)`, got)
+	}
+}

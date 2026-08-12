@@ -25,8 +25,15 @@ const (
 	ReasonSlugShape    = "slug_shape"
 	ReasonSlugReserved = "slug_reserved"
 
-	ReasonCronInvalid     = "cron_invalid"
-	ReasonTimezoneInvalid = "timezone_invalid"
+	ReasonCronInvalid = "cron_invalid"
+	// ReasonRecurrenceInvalid covers every way a structured schedule can be
+	// unschedulable — an interval below 1, a weekly rule with no weekdays, a
+	// set position of 5. One reason rather than a dozen because the editor
+	// builds the recurrence from controls that cannot produce most of them;
+	// the ones a hand-edited recipe file can still produce all mean the same
+	// thing to the operator: this schedule would never run.
+	ReasonRecurrenceInvalid = "recurrence_invalid"
+	ReasonTimezoneInvalid   = "timezone_invalid"
 
 	ReasonTemplateInvalid = "template_invalid"
 
@@ -126,7 +133,7 @@ func Validate(s Spec) []Problem {
 	var problems []Problem
 
 	problems = append(problems, validateSlug(s.Slug)...)
-	problems = append(problems, validateSchedule(s.Cron, s.Timezone)...)
+	problems = append(problems, validateSchedule(s)...)
 	problems = append(problems, validateKind(s)...)
 	problems = append(problems, validateBudgets(s.Budgets)...)
 	problems = append(problems, validateRanges(s)...)
@@ -145,7 +152,36 @@ func validateSlug(slug string) []Problem {
 	return problems
 }
 
-func validateSchedule(cron, tz string) []Problem {
+// validateSchedule checks whichever schedule the feed will actually run on.
+//
+// Precedence matters here as much as shape: a feed with a structured
+// recurrence never evaluates its cron string, so validating the cron in that
+// case would reject feeds for a field nothing reads, and — worse — would pass
+// feeds whose recurrence is nonsense as long as an old cron string happened
+// to be well-formed. Spec.Firing owns the precedence; this mirrors it.
+func validateSchedule(s Spec) []Problem {
+	if s.Recurrence != nil {
+		return validateRecurrence(*s.Recurrence, s.Timezone)
+	}
+	return validateCron(s.Cron, s.Timezone)
+}
+
+func validateRecurrence(r Recurrence, tz string) []Problem {
+	var problems []Problem
+	if _, err := time.LoadLocation(tz); err != nil {
+		problems = append(problems, Problem{Field: "timezone", Reason: ReasonTimezoneInvalid})
+		// Resolve would fail on the zone alone below, masking any separate
+		// problem with the recurrence itself. Check it against UTC instead so
+		// both are reported in one pass.
+		tz = "UTC"
+	}
+	if _, err := r.Resolve(tz); err != nil {
+		problems = append(problems, Problem{Field: "recurrence", Reason: ReasonRecurrenceInvalid})
+	}
+	return problems
+}
+
+func validateCron(cron, tz string) []Problem {
 	var problems []Problem
 
 	loc, err := time.LoadLocation(tz)

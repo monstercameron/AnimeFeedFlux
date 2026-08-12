@@ -47,6 +47,8 @@ import (
 	"github.com/monstercameron/AnimeFeedFlux/internal/rpc"
 	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -172,7 +174,7 @@ func seedAll(ctx context.Context, st *store.Store, feedSrv *rpc.FeedServer, item
 
 	var out seedSummary
 
-	triviaID, err := createFeed(ctx, feedSrv, feedSpecInput{
+	triviaID, err := createFeed(ctx, st, feedSrv, feedSpecInput{
 		slug:        "daily-anime-trivia",
 		title:       "Daily Anime Trivia (seed data)",
 		description: "A fictional daily trivia feed used only to exercise the dev environment. Every question is placeholder content (seed data).",
@@ -190,7 +192,7 @@ func seedAll(ctx context.Context, st *store.Store, feedSrv *rpc.FeedServer, item
 		return out, fmt.Errorf("creating trivia feed: %w", err)
 	}
 
-	newsID, err := createFeed(ctx, feedSrv, feedSpecInput{
+	newsID, err := createFeed(ctx, st, feedSrv, feedSpecInput{
 		slug:        "weekly-anime-news",
 		title:       "Weekly Anime News Roundup (seed data)",
 		description: "A fictional grounded news feed used only to exercise the dev environment. Every article summary is placeholder content (seed data), never a real studio's real statement.",
@@ -212,7 +214,7 @@ func seedAll(ctx context.Context, st *store.Store, feedSrv *rpc.FeedServer, item
 		return out, fmt.Errorf("creating news feed: %w", err)
 	}
 
-	spotlightID, err := createFeed(ctx, feedSrv, feedSpecInput{
+	spotlightID, err := createFeed(ctx, st, feedSrv, feedSpecInput{
 		slug:        "character-spotlight-weekly",
 		title:       "Character Spotlight Weekly (seed data)",
 		description: "A fictional weekly character-spotlight feed used only to exercise the dev environment. Every spotlight is placeholder content about an invented character (seed data).",
@@ -311,7 +313,7 @@ type feedSpecInput struct {
 	sources                  []feedSourceInput
 }
 
-func createFeed(ctx context.Context, feedSrv *rpc.FeedServer, in feedSpecInput) (int64, error) {
+func createFeed(ctx context.Context, st *store.Store, feedSrv *rpc.FeedServer, in feedSpecInput) (int64, error) {
 	spec := &affv1.FeedSpec{
 		Cron:                 in.cron,
 		Timezone:             in.timezone,
@@ -347,7 +349,30 @@ func createFeed(ctx context.Context, feedSrv *rpc.FeedServer, in feedSpecInput) 
 		},
 	})
 	if err != nil {
-		return 0, err
+		// A slug that already exists is the --force path, and it has to be
+		// tolerated here or --force does not work at all.
+		//
+		// This was inert until 2026-08-11, found by the first test ever
+		// written for this command. The guard in run() let --force through,
+		// and then the very first createFeed failed with AlreadyExists,
+		// so `affseed --force` on a seeded database always exited 1 —
+		// while its own error message promised the opposite ("it will
+		// happily add more feeds/items/runs unless told to stop"). Reusing
+		// the existing feed makes --force mean what the flag help says:
+		// seed even if the database already has feeds, adding to them.
+		//
+		// Matching on the gRPC code rather than the message text: the
+		// message is prose that may be reworded, the code is the contract
+		// (internal/rpc/feed.go returns codes.AlreadyExists for exactly
+		// this case).
+		if status.Code(err) != codes.AlreadyExists {
+			return 0, err
+		}
+		existing, lookupErr := st.GetFeedBySlug(ctx, in.slug)
+		if lookupErr != nil {
+			return 0, fmt.Errorf("feed %q already exists but could not be read back: %w", in.slug, lookupErr)
+		}
+		return existing.ID, nil
 	}
 	return resp.GetFeed().GetId(), nil
 }
@@ -462,7 +487,7 @@ func seedTriviaFeed(ctx context.Context, st *store.Store, idSrc ids.Source, feed
 	plans := make([]itemPlan, 0, n)
 	studios := []string{"Studio Umbra Prism (fictional)", "Nonexistent Frame Works (fictional)", "Placeholder Anima Studio (fictional)"}
 	for i := 0; i < n; i++ {
-		day := now.AddDate(0, 0, -(n - i)).Truncate(24 * time.Hour).Add(13*time.Hour + time.Duration(i)*time.Minute)
+		day := now.AddDate(0, 0, -(n - i)).Truncate(24 * time.Hour).Add(13*time.Hour + time.Duration(i)*time.Minute + seedJitter(now))
 		q, a := triviaQA(i)
 		plans = append(plans, itemPlan{
 			title:       fmt.Sprintf("Trivia #%02d (seed data): %s", i+1, q),
@@ -532,7 +557,7 @@ func seedNewsFeed(ctx context.Context, st *store.Store, idSrc ids.Source, feedID
 	plans := make([]itemPlan, 0, n)
 	sources := []string{"Placeholder Wire (fictional)", "Example Anime Ledger (fictional)", "Nonexistent Herald (fictional)"}
 	for i := 0; i < n; i++ {
-		day := now.AddDate(0, 0, -(24 - (i*24)/n)).Add(9*time.Hour + time.Duration(i)*3*time.Minute)
+		day := now.AddDate(0, 0, -(24 - (i*24)/n)).Add(9*time.Hour + time.Duration(i)*3*time.Minute + seedJitter(now))
 		headline, body := newsArticle(i)
 		src := sources[i%len(sources)]
 		plans = append(plans, itemPlan{
@@ -611,7 +636,7 @@ func seedSpotlightFeed(ctx context.Context, st *store.Store, idSrc ids.Source, f
 	const n = 15
 	plans := make([]itemPlan, 0, n)
 	for i := 0; i < n; i++ {
-		day := now.AddDate(0, 0, -(n - i)).Truncate(24 * time.Hour).Add(10*time.Hour + time.Duration(i)*2*time.Minute)
+		day := now.AddDate(0, 0, -(n - i)).Truncate(24 * time.Hour).Add(10*time.Hour + time.Duration(i)*2*time.Minute + seedJitter(now))
 		name, blurb := spotlight(i)
 		plans = append(plans, itemPlan{
 			title:       fmt.Sprintf("(seed data) Character Spotlight: %s", name),
@@ -684,12 +709,22 @@ func reviseNewsItem(ctx context.Context, st *store.Store, itemSrv *rpc.ItemServe
 	return resp.GetItem().GetItemKey(), nil
 }
 
+// publishNewsCorrection publishes one correction against itemID.
+//
+// The correction's title names the item it corrects. That is worth doing on
+// its own terms — a correction that does not say what it corrects is close to
+// useless in a reader — and it is also what keeps a re-seed working:
+// PublishCorrection derives content_hash from the correction's own text, and
+// UNIQUE(feed_id, content_hash) rejects a second correction with byte-
+// identical wording. Fixed wording made --force fail on its third step, after
+// the slug and published_at collisions were dealt with; found by cmd/affseed's
+// first test.
 func publishNewsCorrection(ctx context.Context, itemSrv *rpc.ItemServer, itemID int64) (string, error) {
 	resp, err := itemSrv.PublishCorrection(ctx, &affv1.ItemServicePublishCorrectionRequest{
 		CorrectsItemId: itemID,
-		Title:          "an earlier figure in this story was wrong (seed data)",
-		SummaryText:    "This corrects a detail in the earlier item. (seed data, fictional correction, not a real retraction)",
-		BodyHtml:       "<p>An earlier item in this feed stated an incorrect detail. This item corrects it. Both this correction and the original item are placeholder seed data.</p>",
+		Title:          fmt.Sprintf("an earlier figure in item %d was wrong (seed data)", itemID),
+		SummaryText:    fmt.Sprintf("This corrects a detail in item %d. (seed data, fictional correction, not a real retraction)", itemID),
+		BodyHtml:       fmt.Sprintf("<p>Item %d in this feed stated an incorrect detail. This item corrects it. Both this correction and the original item are placeholder seed data.</p>", itemID),
 	})
 	if err != nil {
 		return "", err
@@ -751,6 +786,26 @@ func spotlight(i int) (name, blurb string) {
 // A seeder's exact token/cost figures do not need to be reproducible, only
 // plausible, so this uses math/rand/v2's unseeded top-level functions
 // (safe, non-cryptographic) rather than pulling in a Source.
+
+// seedJitter is a per-RUN offset added to every seeded published_at, and it
+// is what makes --force work.
+//
+// The three per-feed seeders derive each item's timestamp by walking back N
+// days from `now` and truncating to the day, which throws away everything
+// below the day boundary — so two runs of affseed on the same calendar day
+// computed byte-identical timestamps and the second one died on
+// UNIQUE(feed_id, published_at). That was the second half of the inert
+// --force bug (the first half was the slug collision handled in
+// createFeed); both were found by cmd/affseed's first test.
+//
+// The offset is CONSTANT within a run, so it shifts every item equally and
+// cannot disturb the strictly-increasing ordering the schema requires. It is
+// bounded well under an hour so an item can never overtake the next day's.
+// Derived from the nanosecond clock rather than a random source so a seeded
+// database is reproducible from the `now` that produced it.
+func seedJitter(now time.Time) time.Duration {
+	return time.Duration(now.UnixNano() % int64(37*time.Minute))
+}
 
 func randInt(lo, hi int) int {
 	if hi <= lo {

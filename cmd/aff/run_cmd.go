@@ -111,6 +111,16 @@ func (a *app) cmdRuns(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
+	// `aff runs daily` reads as "the runs of the daily feed", and it is not
+	// that — the feed filter is --feed with an id. Without this check the
+	// argument was silently ignored and the command printed every run for
+	// every feed, which looks exactly like a feed that has been running a lot.
+	// Silently wrong output is worse than a usage error, and every other
+	// command in this CLI already rejects strays; this one did not.
+	if fs.NArg() != 0 {
+		fmt.Fprintln(a.Stderr, "aff runs: takes no positional arguments; filter with --feed <id>")
+		return exitUsage
+	}
 	statusVal, err := parseRunStatus(*status)
 	if err != nil {
 		fmt.Fprintln(a.Stderr, err)

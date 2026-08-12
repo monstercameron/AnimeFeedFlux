@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	"github.com/monstercameron/AnimeFeedFlux/internal/llm"
@@ -98,7 +99,20 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	// (app.Store) is still open — this suite never closes it mid-test, so
 	// this genuinely is "a live store with an open writer", not a store
 	// that happened to be idle. ---
-	backupResp, err := login.Clients.System.Backup(ctx, &affv1.SystemServiceBackupRequest{})
+	// Backup re-proves password + TOTP; a live session is deliberately not
+	// enough, because the response is the whole database — every password
+	// hash, the encrypted TOTP secret, every session and recovery-code hash
+	// (A8-40). The code must come from a step Login above did not already
+	// consume: replayed steps are refused (§4), and Login spent the one at
+	// `now`, so this uses now+1 within the ±1 skew window.
+	backupCode, err := TOTPCode(totpSecret, time.Now().Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("computing Backup's totp code: %v", err)
+	}
+	backupResp, err := login.Clients.System.Backup(ctx, &affv1.SystemServiceBackupRequest{
+		CurrentPassword: adminPassword,
+		TotpCode:        backupCode,
+	})
 	if err != nil {
 		t.Fatalf("SystemService.Backup: %v", err)
 	}

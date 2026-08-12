@@ -243,7 +243,14 @@ func New(t *testing.T) *App {
 	a.feedServer = rpc.NewFeedServer(st, inv, nil /* no RunNow executor: see killswitch_test.go's own scheduler */)
 	a.itemServer = rpc.NewItemServer(st, inv, a.idSource)
 	a.runServer = rpc.NewRunServer(st, slog.New(slog.DiscardHandler))
-	a.systemServer = rpc.NewSystemServer(st, slog.New(slog.DiscardHandler), rpc.WithDefaultGenerationEnabled(true))
+	// WithCredentialVerifier matches production (cmd/animefeedflux/wire.go):
+	// Backup re-proves password + TOTP rather than trusting the session alone,
+	// because it returns the whole database — every password hash, the
+	// encrypted TOTP secret, every session and recovery-code hash. A harness
+	// that leaves it unwired would exercise a Backup this app never serves.
+	a.systemServer = rpc.NewSystemServer(st, slog.New(slog.DiscardHandler),
+		rpc.WithDefaultGenerationEnabled(true),
+		rpc.WithCredentialVerifier(a.authServer))
 	a.sampleServer = rpc.NewSampleServer(rpc.SampleServerConfig{
 		Feeds:    feedLookup{st},
 		GenStore: genStoreAdapter{st},

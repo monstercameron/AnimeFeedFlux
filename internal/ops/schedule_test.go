@@ -147,8 +147,21 @@ func TestSchedulerFiresOncePerDayAndRunsBackup(t *testing.T) {
 	// The bound is generous (well beyond a single VACUUM INTO/fsync's normal
 	// cost) because this is real disk I/O sharing the machine with whatever
 	// else is running, not a fixed compute cost this test controls.
+	//
+	// This loop ALSO advances the clock, and that is the fix for a real flake
+	// (observed 2026-08-11: "backups created = 1, want at least 2", passing on
+	// every rerun). The race is the one the comment above describes, taken one
+	// step further: the scheduler re-registers its next wait only after
+	// runBackup's real disk I/O finishes, and it computes that wait from the
+	// clock as it stands AT THAT MOMENT. On a loaded machine the first backup
+	// can complete when the fake clock has already been advanced most of the
+	// way through the loop's budget, so the next target lands beyond it — and
+	// a poll that only waits, without advancing, can never reach a target that
+	// is in the fake future. Advancing here means however late the
+	// re-registration happens, the clock keeps walking toward it.
 	deadline := time.Now().Add(10 * time.Second)
 	for backups.Load() < 2 && time.Now().Before(deadline) {
+		clock.Advance(time.Hour)
 		time.Sleep(10 * time.Millisecond)
 		matches, _ := filepath.Glob(filepath.Join(outDir, backupBaseName(dbPath)+"-*.db"))
 		backups.Store(int32(len(matches)))

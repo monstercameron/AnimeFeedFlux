@@ -337,6 +337,7 @@ func feedSpecFromProto(ps *affv1.FeedSpec) feedspec.Spec {
 	return feedspec.Spec{
 		Cron:        ps.GetCron(),
 		Timezone:    ps.GetTimezone(),
+		Recurrence:  recurrenceFromProto(ps.GetRecurrence()),
 		ItemsPerRun: int(ps.GetItemsPerRun()),
 		FeedWindow:  int(ps.GetFeedWindow()),
 		Model: feedspec.ModelParams{
@@ -370,6 +371,7 @@ func feedSpecToProto(spec feedspec.Spec) *affv1.FeedSpec {
 	return &affv1.FeedSpec{
 		Cron:                 spec.Cron,
 		Timezone:             spec.Timezone,
+		Recurrence:           recurrenceToProto(spec.Recurrence),
 		ItemsPerRun:          int32(spec.ItemsPerRun),
 		FeedWindow:           int32(spec.FeedWindow),
 		Model:                spec.Model.Model,

@@ -742,10 +742,15 @@ func (realClock) Now() time.Time                         { return time.Now() }
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
 // cronJob implements schedule.Job over a parsed feedspec cron expression.
+// cronJob keeps its name and no longer means only cron: `schedule` is now a
+// schedule.Firing, satisfied by both the cron parser and the structured
+// recurrence the editor writes. The runner never needed to know which — it
+// asks one question, "when next" — so widening the field was the whole change
+// on this side.
 type cronJob struct {
 	feedID   int64
 	slug     string
-	schedule schedule.Schedule
+	schedule schedule.Firing
 }
 
 func (j cronJob) FeedID() int64                  { return j.feedID }
@@ -1173,13 +1178,15 @@ func buildScheduler(
 			log.Warn("scheduler: skipping feed with unparsable recipe", "feed_slug", row.Slug, "error", err)
 			continue
 		}
-		loc, err := time.LoadLocation(fs.Timezone)
+		// Spec.Firing picks the structured recurrence when the feed has one
+		// and falls back to cron otherwise. Asking it here rather than
+		// branching inline is what keeps the scheduler, the editor's preview
+		// and `aff doctor` from ever disagreeing about which schedule a feed
+		// is on — a feed the scheduler runs fortnightly while the UI previews
+		// it weekly would be a bug nobody thinks to look for.
+		sched, err := fs.Firing()
 		if err != nil {
-			loc = time.UTC
-		}
-		sched, err := schedule.Parse(fs.Cron, loc)
-		if err != nil {
-			log.Warn("scheduler: skipping feed with unparsable cron", "feed_slug", row.Slug, "error", err)
+			log.Warn("scheduler: skipping feed with an unusable schedule", "feed_slug", row.Slug, "error", err)
 			continue
 		}
 		jobs = append(jobs, cronJob{feedID: row.ID, slug: row.Slug, schedule: sched})

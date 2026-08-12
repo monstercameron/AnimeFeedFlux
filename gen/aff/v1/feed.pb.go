@@ -22,6 +22,132 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Weekday is a day of the week, numbered to match Go's time.Weekday so the
+// server needs no conversion table. WEEKDAY_UNSPECIFIED is the proto3 zero
+// value and is never a valid selection — Sunday is explicitly 1, not 0, so
+// "unset" and "Sunday" can be told apart.
+type Weekday int32
+
+const (
+	Weekday_WEEKDAY_UNSPECIFIED Weekday = 0
+	Weekday_WEEKDAY_SUNDAY      Weekday = 1
+	Weekday_WEEKDAY_MONDAY      Weekday = 2
+	Weekday_WEEKDAY_TUESDAY     Weekday = 3
+	Weekday_WEEKDAY_WEDNESDAY   Weekday = 4
+	Weekday_WEEKDAY_THURSDAY    Weekday = 5
+	Weekday_WEEKDAY_FRIDAY      Weekday = 6
+	Weekday_WEEKDAY_SATURDAY    Weekday = 7
+)
+
+// Enum value maps for Weekday.
+var (
+	Weekday_name = map[int32]string{
+		0: "WEEKDAY_UNSPECIFIED",
+		1: "WEEKDAY_SUNDAY",
+		2: "WEEKDAY_MONDAY",
+		3: "WEEKDAY_TUESDAY",
+		4: "WEEKDAY_WEDNESDAY",
+		5: "WEEKDAY_THURSDAY",
+		6: "WEEKDAY_FRIDAY",
+		7: "WEEKDAY_SATURDAY",
+	}
+	Weekday_value = map[string]int32{
+		"WEEKDAY_UNSPECIFIED": 0,
+		"WEEKDAY_SUNDAY":      1,
+		"WEEKDAY_MONDAY":      2,
+		"WEEKDAY_TUESDAY":     3,
+		"WEEKDAY_WEDNESDAY":   4,
+		"WEEKDAY_THURSDAY":    5,
+		"WEEKDAY_FRIDAY":      6,
+		"WEEKDAY_SATURDAY":    7,
+	}
+)
+
+func (x Weekday) Enum() *Weekday {
+	p := new(Weekday)
+	*p = x
+	return p
+}
+
+func (x Weekday) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Weekday) Descriptor() protoreflect.EnumDescriptor {
+	return file_aff_v1_feed_proto_enumTypes[0].Descriptor()
+}
+
+func (Weekday) Type() protoreflect.EnumType {
+	return &file_aff_v1_feed_proto_enumTypes[0]
+}
+
+func (x Weekday) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Weekday.Descriptor instead.
+func (Weekday) EnumDescriptor() ([]byte, []int) {
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{0}
+}
+
+// Frequency is the unit `Recurrence.interval` counts in.
+//
+// There is no YEARLY: a year is twelve months, and folding it in removes a
+// class of edge cases (yearly-with-set-position, interval-2 across February
+// 29) in exchange for the caller multiplying by twelve. The editor still
+// offers "years" as a unit and converts.
+type Frequency int32
+
+const (
+	Frequency_FREQUENCY_UNSPECIFIED Frequency = 0
+	Frequency_FREQUENCY_DAILY       Frequency = 1
+	Frequency_FREQUENCY_WEEKLY      Frequency = 2
+	Frequency_FREQUENCY_MONTHLY     Frequency = 3
+)
+
+// Enum value maps for Frequency.
+var (
+	Frequency_name = map[int32]string{
+		0: "FREQUENCY_UNSPECIFIED",
+		1: "FREQUENCY_DAILY",
+		2: "FREQUENCY_WEEKLY",
+		3: "FREQUENCY_MONTHLY",
+	}
+	Frequency_value = map[string]int32{
+		"FREQUENCY_UNSPECIFIED": 0,
+		"FREQUENCY_DAILY":       1,
+		"FREQUENCY_WEEKLY":      2,
+		"FREQUENCY_MONTHLY":     3,
+	}
+)
+
+func (x Frequency) Enum() *Frequency {
+	p := new(Frequency)
+	*p = x
+	return p
+}
+
+func (x Frequency) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Frequency) Descriptor() protoreflect.EnumDescriptor {
+	return file_aff_v1_feed_proto_enumTypes[1].Descriptor()
+}
+
+func (Frequency) Type() protoreflect.EnumType {
+	return &file_aff_v1_feed_proto_enumTypes[1]
+}
+
+func (x Frequency) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Frequency.Descriptor instead.
+func (Frequency) EnumDescriptor() ([]byte, []int) {
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{1}
+}
+
 // PromptVariables documents the fixed set of {{.Foo}} names available to
 // both templates (PLAN.md §7), returned so the editor can render the
 // variable list inline without duplicating this list client-side.
@@ -246,10 +372,26 @@ type FeedSpec struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Standard cron expression, evaluated in `timezone` — never UTC-normalized
 	// client-side, or "7am" silently drifts across DST (PLAN.md §7).
+	//
+	// Superseded by `recurrence` for new feeds, and kept for three reasons
+	// rather than removed: every existing feed and every exported recipe TOML
+	// carries one, the scheduler still honours it when `recurrence` is unset,
+	// and cron remains the escape hatch for the handful of shapes the
+	// structured model deliberately does not cover (e.g. "every 15 minutes",
+	// "weekdays only at 9 and 17"). When `recurrence` is set it WINS and this
+	// field is ignored.
 	Cron string `protobuf:"bytes,1,opt,name=cron,proto3" json:"cron,omitempty"`
 	// IANA zone, e.g. "America/New_York" (PLAN.md §7).
-	Timezone    string `protobuf:"bytes,2,opt,name=timezone,proto3" json:"timezone,omitempty"`
-	ItemsPerRun int32  `protobuf:"varint,10,opt,name=items_per_run,json=itemsPerRun,proto3" json:"items_per_run,omitempty"`
+	Timezone string `protobuf:"bytes,2,opt,name=timezone,proto3" json:"timezone,omitempty"`
+	// Structured schedule, and the one the editor writes.
+	//
+	// Cron cannot express an INTERVAL, which is what most human schedules are:
+	// "every other Thursday" has no cron form ( `*/2` on day-of-week means
+	// every second weekday NUMBER), nor does "every 3 weeks", nor "the second
+	// Tuesday of the month". See internal/schedule/recurrence.go for the full
+	// argument and the RFC 5545 subset this mirrors.
+	Recurrence  *Recurrence `protobuf:"bytes,3,opt,name=recurrence,proto3" json:"recurrence,omitempty"`
+	ItemsPerRun int32       `protobuf:"varint,10,opt,name=items_per_run,json=itemsPerRun,proto3" json:"items_per_run,omitempty"`
 	// How many items appear in the rendered XML window (PLAN.md §7's "feed
 	// window", default 50) — deliberately not the same number as
 	// items_per_run or novelty_window_items.
@@ -311,6 +453,13 @@ func (x *FeedSpec) GetTimezone() string {
 		return x.Timezone
 	}
 	return ""
+}
+
+func (x *FeedSpec) GetRecurrence() *Recurrence {
+	if x != nil {
+		return x.Recurrence
+	}
+	return nil
 }
 
 func (x *FeedSpec) GetItemsPerRun() int32 {
@@ -383,6 +532,139 @@ func (x *FeedSpec) GetSources() []*SourceSpec {
 	return nil
 }
 
+// Recurrence is a schedule expressed as an interval from an anchor date,
+// rather than as a set of calendar fields to match.
+//
+// A constrained subset of RFC 5545's RRULE (FREQ + INTERVAL + BYDAY +
+// BYMONTHDAY + BYSETPOS). Not for interoperability, but because that spec
+// already settled the awkward questions — what "the 31st" means in February,
+// how nth-weekday interacts with an interval — and a fourth dialect of
+// recurrence would have to rediscover them.
+type Recurrence struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Frequency Frequency              `protobuf:"varint,1,opt,name=frequency,proto3,enum=aff.v1.Frequency" json:"frequency,omitempty"`
+	// How many of `frequency` between firings. 1 = every, 2 = every other,
+	// 3 = every third. Must be >= 1.
+	Interval int32 `protobuf:"varint,2,opt,name=interval,proto3" json:"interval,omitempty"`
+	// WEEKLY: which days fire. MONTHLY with set_position: which weekday the
+	// position counts (exactly one).
+	//
+	// The interval applies to the WEEK, not to each day — "every other week on
+	// Monday and Thursday" fires twice in a firing week and not at all in the
+	// week between.
+	Weekdays []Weekday `protobuf:"varint,3,rep,packed,name=weekdays,proto3,enum=aff.v1.Weekday" json:"weekdays,omitempty"`
+	// MONTHLY without set_position: 1-31, or -1 for "the last day of the
+	// month", whatever length that month is. A day that does not exist in a
+	// given month does not fire that month (RFC 5545's rule) rather than
+	// silently moving to the 28th, which would be a schedule nobody asked for.
+	MonthDay int32 `protobuf:"varint,4,opt,name=month_day,json=monthDay,proto3" json:"month_day,omitempty"`
+	// MONTHLY: 1-4 for "the first/second/third/fourth <weekday>", or -1 for
+	// "the last". Zero means "use month_day instead".
+	SetPosition int32 `protobuf:"varint,5,opt,name=set_position,json=setPosition,proto3" json:"set_position,omitempty"`
+	// Local wall-clock time in the spec's `timezone`. Never UTC: "7am" means
+	// 7am where the operator lives, across DST, which is the entire premise of
+	// internal/schedule.
+	Hour   int32 `protobuf:"varint,6,opt,name=hour,proto3" json:"hour,omitempty"`
+	Minute int32 `protobuf:"varint,7,opt,name=minute,proto3" json:"minute,omitempty"`
+	// The phase reference the interval counts from, as a local date.
+	//
+	// Irrelevant when interval == 1, and load-bearing above it: "every other
+	// Thursday" is ambiguous until something says WHICH Thursdays. The editor
+	// sets this to the date the operator picks as the schedule's start.
+	// Unset means the Unix epoch, which is stable across restarts — defaulting
+	// to "now" would make the same stored schedule fire on different weeks
+	// depending on when the server happened to load it.
+	Anchor        *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=anchor,proto3" json:"anchor,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Recurrence) Reset() {
+	*x = Recurrence{}
+	mi := &file_aff_v1_feed_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Recurrence) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Recurrence) ProtoMessage() {}
+
+func (x *Recurrence) ProtoReflect() protoreflect.Message {
+	mi := &file_aff_v1_feed_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Recurrence.ProtoReflect.Descriptor instead.
+func (*Recurrence) Descriptor() ([]byte, []int) {
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Recurrence) GetFrequency() Frequency {
+	if x != nil {
+		return x.Frequency
+	}
+	return Frequency_FREQUENCY_UNSPECIFIED
+}
+
+func (x *Recurrence) GetInterval() int32 {
+	if x != nil {
+		return x.Interval
+	}
+	return 0
+}
+
+func (x *Recurrence) GetWeekdays() []Weekday {
+	if x != nil {
+		return x.Weekdays
+	}
+	return nil
+}
+
+func (x *Recurrence) GetMonthDay() int32 {
+	if x != nil {
+		return x.MonthDay
+	}
+	return 0
+}
+
+func (x *Recurrence) GetSetPosition() int32 {
+	if x != nil {
+		return x.SetPosition
+	}
+	return 0
+}
+
+func (x *Recurrence) GetHour() int32 {
+	if x != nil {
+		return x.Hour
+	}
+	return 0
+}
+
+func (x *Recurrence) GetMinute() int32 {
+	if x != nil {
+		return x.Minute
+	}
+	return 0
+}
+
+func (x *Recurrence) GetAnchor() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Anchor
+	}
+	return nil
+}
+
 // Feed mirrors internal/model.Feed plus the recipe (FeedSpec) and the
 // derived jitter_offset the UI needs to explain "next three runs" honestly
 // (PLAN.md §14.3: "the UI's 'next three runs' shows the jittered times, not
@@ -429,7 +711,7 @@ type Feed struct {
 
 func (x *Feed) Reset() {
 	*x = Feed{}
-	mi := &file_aff_v1_feed_proto_msgTypes[4]
+	mi := &file_aff_v1_feed_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -441,7 +723,7 @@ func (x *Feed) String() string {
 func (*Feed) ProtoMessage() {}
 
 func (x *Feed) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[4]
+	mi := &file_aff_v1_feed_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -454,7 +736,7 @@ func (x *Feed) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Feed.ProtoReflect.Descriptor instead.
 func (*Feed) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{4}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Feed) GetId() int64 {
@@ -597,7 +879,7 @@ type FeedServiceListRequest struct {
 
 func (x *FeedServiceListRequest) Reset() {
 	*x = FeedServiceListRequest{}
-	mi := &file_aff_v1_feed_proto_msgTypes[5]
+	mi := &file_aff_v1_feed_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -609,7 +891,7 @@ func (x *FeedServiceListRequest) String() string {
 func (*FeedServiceListRequest) ProtoMessage() {}
 
 func (x *FeedServiceListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[5]
+	mi := &file_aff_v1_feed_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -622,7 +904,7 @@ func (x *FeedServiceListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceListRequest.ProtoReflect.Descriptor instead.
 func (*FeedServiceListRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{5}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *FeedServiceListRequest) GetPageSize() int32 {
@@ -663,7 +945,7 @@ type FeedServiceListResponse struct {
 
 func (x *FeedServiceListResponse) Reset() {
 	*x = FeedServiceListResponse{}
-	mi := &file_aff_v1_feed_proto_msgTypes[6]
+	mi := &file_aff_v1_feed_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -675,7 +957,7 @@ func (x *FeedServiceListResponse) String() string {
 func (*FeedServiceListResponse) ProtoMessage() {}
 
 func (x *FeedServiceListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[6]
+	mi := &file_aff_v1_feed_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -688,7 +970,7 @@ func (x *FeedServiceListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceListResponse.ProtoReflect.Descriptor instead.
 func (*FeedServiceListResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{6}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *FeedServiceListResponse) GetFeeds() []*Feed {
@@ -717,7 +999,7 @@ type FeedServiceGetRequest struct {
 
 func (x *FeedServiceGetRequest) Reset() {
 	*x = FeedServiceGetRequest{}
-	mi := &file_aff_v1_feed_proto_msgTypes[7]
+	mi := &file_aff_v1_feed_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -729,7 +1011,7 @@ func (x *FeedServiceGetRequest) String() string {
 func (*FeedServiceGetRequest) ProtoMessage() {}
 
 func (x *FeedServiceGetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[7]
+	mi := &file_aff_v1_feed_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -742,7 +1024,7 @@ func (x *FeedServiceGetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceGetRequest.ProtoReflect.Descriptor instead.
 func (*FeedServiceGetRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{7}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *FeedServiceGetRequest) GetId() int64 {
@@ -768,7 +1050,7 @@ type FeedServiceGetResponse struct {
 
 func (x *FeedServiceGetResponse) Reset() {
 	*x = FeedServiceGetResponse{}
-	mi := &file_aff_v1_feed_proto_msgTypes[8]
+	mi := &file_aff_v1_feed_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -780,7 +1062,7 @@ func (x *FeedServiceGetResponse) String() string {
 func (*FeedServiceGetResponse) ProtoMessage() {}
 
 func (x *FeedServiceGetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[8]
+	mi := &file_aff_v1_feed_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -793,7 +1075,7 @@ func (x *FeedServiceGetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceGetResponse.ProtoReflect.Descriptor instead.
 func (*FeedServiceGetResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{8}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *FeedServiceGetResponse) GetFeed() *Feed {
@@ -814,7 +1096,7 @@ type FeedServiceCreateRequest struct {
 
 func (x *FeedServiceCreateRequest) Reset() {
 	*x = FeedServiceCreateRequest{}
-	mi := &file_aff_v1_feed_proto_msgTypes[9]
+	mi := &file_aff_v1_feed_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -826,7 +1108,7 @@ func (x *FeedServiceCreateRequest) String() string {
 func (*FeedServiceCreateRequest) ProtoMessage() {}
 
 func (x *FeedServiceCreateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[9]
+	mi := &file_aff_v1_feed_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -839,7 +1121,7 @@ func (x *FeedServiceCreateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceCreateRequest.ProtoReflect.Descriptor instead.
 func (*FeedServiceCreateRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{9}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *FeedServiceCreateRequest) GetFeed() *Feed {
@@ -858,7 +1140,7 @@ type FeedServiceCreateResponse struct {
 
 func (x *FeedServiceCreateResponse) Reset() {
 	*x = FeedServiceCreateResponse{}
-	mi := &file_aff_v1_feed_proto_msgTypes[10]
+	mi := &file_aff_v1_feed_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -870,7 +1152,7 @@ func (x *FeedServiceCreateResponse) String() string {
 func (*FeedServiceCreateResponse) ProtoMessage() {}
 
 func (x *FeedServiceCreateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[10]
+	mi := &file_aff_v1_feed_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -883,7 +1165,7 @@ func (x *FeedServiceCreateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceCreateResponse.ProtoReflect.Descriptor instead.
 func (*FeedServiceCreateResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{10}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *FeedServiceCreateResponse) GetFeed() *Feed {
@@ -903,7 +1185,7 @@ type FeedServiceUpdateRequest struct {
 
 func (x *FeedServiceUpdateRequest) Reset() {
 	*x = FeedServiceUpdateRequest{}
-	mi := &file_aff_v1_feed_proto_msgTypes[11]
+	mi := &file_aff_v1_feed_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -915,7 +1197,7 @@ func (x *FeedServiceUpdateRequest) String() string {
 func (*FeedServiceUpdateRequest) ProtoMessage() {}
 
 func (x *FeedServiceUpdateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[11]
+	mi := &file_aff_v1_feed_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -928,7 +1210,7 @@ func (x *FeedServiceUpdateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceUpdateRequest.ProtoReflect.Descriptor instead.
 func (*FeedServiceUpdateRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{11}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *FeedServiceUpdateRequest) GetFeed() *Feed {
@@ -954,7 +1236,7 @@ type FeedServiceUpdateResponse struct {
 
 func (x *FeedServiceUpdateResponse) Reset() {
 	*x = FeedServiceUpdateResponse{}
-	mi := &file_aff_v1_feed_proto_msgTypes[12]
+	mi := &file_aff_v1_feed_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -966,7 +1248,7 @@ func (x *FeedServiceUpdateResponse) String() string {
 func (*FeedServiceUpdateResponse) ProtoMessage() {}
 
 func (x *FeedServiceUpdateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[12]
+	mi := &file_aff_v1_feed_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -979,7 +1261,7 @@ func (x *FeedServiceUpdateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceUpdateResponse.ProtoReflect.Descriptor instead.
 func (*FeedServiceUpdateResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{12}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *FeedServiceUpdateResponse) GetFeed() *Feed {
@@ -1000,7 +1282,7 @@ type FeedServiceSetEnabledRequest struct {
 
 func (x *FeedServiceSetEnabledRequest) Reset() {
 	*x = FeedServiceSetEnabledRequest{}
-	mi := &file_aff_v1_feed_proto_msgTypes[13]
+	mi := &file_aff_v1_feed_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1012,7 +1294,7 @@ func (x *FeedServiceSetEnabledRequest) String() string {
 func (*FeedServiceSetEnabledRequest) ProtoMessage() {}
 
 func (x *FeedServiceSetEnabledRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[13]
+	mi := &file_aff_v1_feed_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1025,7 +1307,7 @@ func (x *FeedServiceSetEnabledRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceSetEnabledRequest.ProtoReflect.Descriptor instead.
 func (*FeedServiceSetEnabledRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{13}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *FeedServiceSetEnabledRequest) GetFeedId() int64 {
@@ -1058,7 +1340,7 @@ type FeedServiceSetEnabledResponse struct {
 
 func (x *FeedServiceSetEnabledResponse) Reset() {
 	*x = FeedServiceSetEnabledResponse{}
-	mi := &file_aff_v1_feed_proto_msgTypes[14]
+	mi := &file_aff_v1_feed_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1070,7 +1352,7 @@ func (x *FeedServiceSetEnabledResponse) String() string {
 func (*FeedServiceSetEnabledResponse) ProtoMessage() {}
 
 func (x *FeedServiceSetEnabledResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[14]
+	mi := &file_aff_v1_feed_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1083,7 +1365,7 @@ func (x *FeedServiceSetEnabledResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceSetEnabledResponse.ProtoReflect.Descriptor instead.
 func (*FeedServiceSetEnabledResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{14}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *FeedServiceSetEnabledResponse) GetFeed() *Feed {
@@ -1103,7 +1385,7 @@ type FeedServiceDeleteRequest struct {
 
 func (x *FeedServiceDeleteRequest) Reset() {
 	*x = FeedServiceDeleteRequest{}
-	mi := &file_aff_v1_feed_proto_msgTypes[15]
+	mi := &file_aff_v1_feed_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1115,7 +1397,7 @@ func (x *FeedServiceDeleteRequest) String() string {
 func (*FeedServiceDeleteRequest) ProtoMessage() {}
 
 func (x *FeedServiceDeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[15]
+	mi := &file_aff_v1_feed_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1128,7 +1410,7 @@ func (x *FeedServiceDeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceDeleteRequest.ProtoReflect.Descriptor instead.
 func (*FeedServiceDeleteRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{15}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *FeedServiceDeleteRequest) GetFeedId() int64 {
@@ -1153,7 +1435,7 @@ type FeedServiceDeleteResponse struct {
 
 func (x *FeedServiceDeleteResponse) Reset() {
 	*x = FeedServiceDeleteResponse{}
-	mi := &file_aff_v1_feed_proto_msgTypes[16]
+	mi := &file_aff_v1_feed_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1165,7 +1447,7 @@ func (x *FeedServiceDeleteResponse) String() string {
 func (*FeedServiceDeleteResponse) ProtoMessage() {}
 
 func (x *FeedServiceDeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[16]
+	mi := &file_aff_v1_feed_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1178,7 +1460,7 @@ func (x *FeedServiceDeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceDeleteResponse.ProtoReflect.Descriptor instead.
 func (*FeedServiceDeleteResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{16}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{17}
 }
 
 type FeedServiceRunNowRequest struct {
@@ -1190,7 +1472,7 @@ type FeedServiceRunNowRequest struct {
 
 func (x *FeedServiceRunNowRequest) Reset() {
 	*x = FeedServiceRunNowRequest{}
-	mi := &file_aff_v1_feed_proto_msgTypes[17]
+	mi := &file_aff_v1_feed_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1202,7 +1484,7 @@ func (x *FeedServiceRunNowRequest) String() string {
 func (*FeedServiceRunNowRequest) ProtoMessage() {}
 
 func (x *FeedServiceRunNowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[17]
+	mi := &file_aff_v1_feed_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1215,7 +1497,7 @@ func (x *FeedServiceRunNowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceRunNowRequest.ProtoReflect.Descriptor instead.
 func (*FeedServiceRunNowRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{17}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *FeedServiceRunNowRequest) GetFeedId() int64 {
@@ -1236,7 +1518,7 @@ type FeedServiceRunNowResponse struct {
 
 func (x *FeedServiceRunNowResponse) Reset() {
 	*x = FeedServiceRunNowResponse{}
-	mi := &file_aff_v1_feed_proto_msgTypes[18]
+	mi := &file_aff_v1_feed_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1248,7 +1530,7 @@ func (x *FeedServiceRunNowResponse) String() string {
 func (*FeedServiceRunNowResponse) ProtoMessage() {}
 
 func (x *FeedServiceRunNowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[18]
+	mi := &file_aff_v1_feed_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1261,7 +1543,7 @@ func (x *FeedServiceRunNowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceRunNowResponse.ProtoReflect.Descriptor instead.
 func (*FeedServiceRunNowResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{18}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *FeedServiceRunNowResponse) GetRunId() int64 {
@@ -1283,7 +1565,7 @@ type FeedServiceValidateSpecRequest struct {
 
 func (x *FeedServiceValidateSpecRequest) Reset() {
 	*x = FeedServiceValidateSpecRequest{}
-	mi := &file_aff_v1_feed_proto_msgTypes[19]
+	mi := &file_aff_v1_feed_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1295,7 +1577,7 @@ func (x *FeedServiceValidateSpecRequest) String() string {
 func (*FeedServiceValidateSpecRequest) ProtoMessage() {}
 
 func (x *FeedServiceValidateSpecRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[19]
+	mi := &file_aff_v1_feed_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1308,7 +1590,7 @@ func (x *FeedServiceValidateSpecRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceValidateSpecRequest.ProtoReflect.Descriptor instead.
 func (*FeedServiceValidateSpecRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{19}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *FeedServiceValidateSpecRequest) GetKind() FeedKind {
@@ -1345,7 +1627,7 @@ type FeedServiceValidateSpecResponse struct {
 
 func (x *FeedServiceValidateSpecResponse) Reset() {
 	*x = FeedServiceValidateSpecResponse{}
-	mi := &file_aff_v1_feed_proto_msgTypes[20]
+	mi := &file_aff_v1_feed_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1357,7 +1639,7 @@ func (x *FeedServiceValidateSpecResponse) String() string {
 func (*FeedServiceValidateSpecResponse) ProtoMessage() {}
 
 func (x *FeedServiceValidateSpecResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[20]
+	mi := &file_aff_v1_feed_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1370,7 +1652,7 @@ func (x *FeedServiceValidateSpecResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceValidateSpecResponse.ProtoReflect.Descriptor instead.
 func (*FeedServiceValidateSpecResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{20}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *FeedServiceValidateSpecResponse) GetValid() bool {
@@ -1399,7 +1681,7 @@ type FieldError struct {
 
 func (x *FieldError) Reset() {
 	*x = FieldError{}
-	mi := &file_aff_v1_feed_proto_msgTypes[21]
+	mi := &file_aff_v1_feed_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1411,7 +1693,7 @@ func (x *FieldError) String() string {
 func (*FieldError) ProtoMessage() {}
 
 func (x *FieldError) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[21]
+	mi := &file_aff_v1_feed_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1424,7 +1706,7 @@ func (x *FieldError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FieldError.ProtoReflect.Descriptor instead.
 func (*FieldError) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{21}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *FieldError) GetField() string {
@@ -1454,7 +1736,7 @@ type FeedServiceSetMembersRequest struct {
 
 func (x *FeedServiceSetMembersRequest) Reset() {
 	*x = FeedServiceSetMembersRequest{}
-	mi := &file_aff_v1_feed_proto_msgTypes[22]
+	mi := &file_aff_v1_feed_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1466,7 +1748,7 @@ func (x *FeedServiceSetMembersRequest) String() string {
 func (*FeedServiceSetMembersRequest) ProtoMessage() {}
 
 func (x *FeedServiceSetMembersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[22]
+	mi := &file_aff_v1_feed_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1479,7 +1761,7 @@ func (x *FeedServiceSetMembersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceSetMembersRequest.ProtoReflect.Descriptor instead.
 func (*FeedServiceSetMembersRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{22}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *FeedServiceSetMembersRequest) GetAggregateFeedId() int64 {
@@ -1512,7 +1794,7 @@ type FeedServiceSetMembersResponse struct {
 
 func (x *FeedServiceSetMembersResponse) Reset() {
 	*x = FeedServiceSetMembersResponse{}
-	mi := &file_aff_v1_feed_proto_msgTypes[23]
+	mi := &file_aff_v1_feed_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1524,7 +1806,7 @@ func (x *FeedServiceSetMembersResponse) String() string {
 func (*FeedServiceSetMembersResponse) ProtoMessage() {}
 
 func (x *FeedServiceSetMembersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[23]
+	mi := &file_aff_v1_feed_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1537,7 +1819,7 @@ func (x *FeedServiceSetMembersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceSetMembersResponse.ProtoReflect.Descriptor instead.
 func (*FeedServiceSetMembersResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{23}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *FeedServiceSetMembersResponse) GetFeed() *Feed {
@@ -1556,7 +1838,7 @@ type FeedServiceExportTOMLRequest struct {
 
 func (x *FeedServiceExportTOMLRequest) Reset() {
 	*x = FeedServiceExportTOMLRequest{}
-	mi := &file_aff_v1_feed_proto_msgTypes[24]
+	mi := &file_aff_v1_feed_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1568,7 +1850,7 @@ func (x *FeedServiceExportTOMLRequest) String() string {
 func (*FeedServiceExportTOMLRequest) ProtoMessage() {}
 
 func (x *FeedServiceExportTOMLRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[24]
+	mi := &file_aff_v1_feed_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1581,7 +1863,7 @@ func (x *FeedServiceExportTOMLRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceExportTOMLRequest.ProtoReflect.Descriptor instead.
 func (*FeedServiceExportTOMLRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{24}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *FeedServiceExportTOMLRequest) GetFeedId() int64 {
@@ -1602,7 +1884,7 @@ type FeedServiceExportTOMLResponse struct {
 
 func (x *FeedServiceExportTOMLResponse) Reset() {
 	*x = FeedServiceExportTOMLResponse{}
-	mi := &file_aff_v1_feed_proto_msgTypes[25]
+	mi := &file_aff_v1_feed_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1614,7 +1896,7 @@ func (x *FeedServiceExportTOMLResponse) String() string {
 func (*FeedServiceExportTOMLResponse) ProtoMessage() {}
 
 func (x *FeedServiceExportTOMLResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[25]
+	mi := &file_aff_v1_feed_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1627,7 +1909,7 @@ func (x *FeedServiceExportTOMLResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceExportTOMLResponse.ProtoReflect.Descriptor instead.
 func (*FeedServiceExportTOMLResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{25}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *FeedServiceExportTOMLResponse) GetToml() string {
@@ -1650,7 +1932,7 @@ type FeedServiceImportTOMLRequest struct {
 
 func (x *FeedServiceImportTOMLRequest) Reset() {
 	*x = FeedServiceImportTOMLRequest{}
-	mi := &file_aff_v1_feed_proto_msgTypes[26]
+	mi := &file_aff_v1_feed_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1662,7 +1944,7 @@ func (x *FeedServiceImportTOMLRequest) String() string {
 func (*FeedServiceImportTOMLRequest) ProtoMessage() {}
 
 func (x *FeedServiceImportTOMLRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[26]
+	mi := &file_aff_v1_feed_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1675,7 +1957,7 @@ func (x *FeedServiceImportTOMLRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceImportTOMLRequest.ProtoReflect.Descriptor instead.
 func (*FeedServiceImportTOMLRequest) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{26}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *FeedServiceImportTOMLRequest) GetToml() string {
@@ -1708,7 +1990,7 @@ type FeedServiceImportTOMLResponse struct {
 
 func (x *FeedServiceImportTOMLResponse) Reset() {
 	*x = FeedServiceImportTOMLResponse{}
-	mi := &file_aff_v1_feed_proto_msgTypes[27]
+	mi := &file_aff_v1_feed_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1720,7 +2002,7 @@ func (x *FeedServiceImportTOMLResponse) String() string {
 func (*FeedServiceImportTOMLResponse) ProtoMessage() {}
 
 func (x *FeedServiceImportTOMLResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_aff_v1_feed_proto_msgTypes[27]
+	mi := &file_aff_v1_feed_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1733,7 +2015,7 @@ func (x *FeedServiceImportTOMLResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedServiceImportTOMLResponse.ProtoReflect.Descriptor instead.
 func (*FeedServiceImportTOMLResponse) Descriptor() ([]byte, []int) {
-	return file_aff_v1_feed_proto_rawDescGZIP(), []int{27}
+	return file_aff_v1_feed_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *FeedServiceImportTOMLResponse) GetFeed() *Feed {
@@ -1763,10 +2045,13 @@ const file_aff_v1_feed_proto_rawDesc = "" +
 	"\n" +
 	"SourceSpec\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x12\n" +
-	"\x04kind\x18\x02 \x01(\tR\x04kind\"\xd8\x03\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\"\x8c\x04\n" +
 	"\bFeedSpec\x12\x12\n" +
 	"\x04cron\x18\x01 \x01(\tR\x04cron\x12\x1a\n" +
-	"\btimezone\x18\x02 \x01(\tR\btimezone\x12\"\n" +
+	"\btimezone\x18\x02 \x01(\tR\btimezone\x122\n" +
+	"\n" +
+	"recurrence\x18\x03 \x01(\v2\x12.aff.v1.RecurrenceR\n" +
+	"recurrence\x12\"\n" +
 	"\ritems_per_run\x18\n" +
 	" \x01(\x05R\vitemsPerRun\x12\x1f\n" +
 	"\vfeed_window\x18\v \x01(\x05R\n" +
@@ -1778,7 +2063,17 @@ const file_aff_v1_feed_proto_rawDesc = "" +
 	"\anovelty\x18\x14 \x01(\v2\x17.aff.v1.NoveltySettingsR\anovelty\x12,\n" +
 	"\x12daily_token_budget\x18\x1e \x01(\x03R\x10dailyTokenBudget\x12(\n" +
 	"\x10daily_run_budget\x18\x1f \x01(\x05R\x0edailyRunBudget\x12,\n" +
-	"\asources\x18( \x03(\v2\x12.aff.v1.SourceSpecR\asources\"\xf5\x04\n" +
+	"\asources\x18( \x03(\v2\x12.aff.v1.SourceSpecR\asources\"\xa6\x02\n" +
+	"\n" +
+	"Recurrence\x12/\n" +
+	"\tfrequency\x18\x01 \x01(\x0e2\x11.aff.v1.FrequencyR\tfrequency\x12\x1a\n" +
+	"\binterval\x18\x02 \x01(\x05R\binterval\x12+\n" +
+	"\bweekdays\x18\x03 \x03(\x0e2\x0f.aff.v1.WeekdayR\bweekdays\x12\x1b\n" +
+	"\tmonth_day\x18\x04 \x01(\x05R\bmonthDay\x12!\n" +
+	"\fset_position\x18\x05 \x01(\x05R\vsetPosition\x12\x12\n" +
+	"\x04hour\x18\x06 \x01(\x05R\x04hour\x12\x16\n" +
+	"\x06minute\x18\a \x01(\x05R\x06minute\x122\n" +
+	"\x06anchor\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\x06anchor\"\xf5\x04\n" +
 	"\x04Feed\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
 	"\x04slug\x18\x02 \x01(\tR\x04slug\x12$\n" +
@@ -1864,7 +2159,21 @@ const file_aff_v1_feed_proto_rawDesc = "" +
 	"\afeed_id\x18\x02 \x01(\x03R\x06feedId\x12)\n" +
 	"\x10expected_version\x18\x03 \x01(\x03R\x0fexpectedVersion\"A\n" +
 	"\x1dFeedServiceImportTOMLResponse\x12 \n" +
-	"\x04feed\x18\x01 \x01(\v2\f.aff.v1.FeedR\x04feed2\xa5\a\n" +
+	"\x04feed\x18\x01 \x01(\v2\f.aff.v1.FeedR\x04feed*\xb6\x01\n" +
+	"\aWeekday\x12\x17\n" +
+	"\x13WEEKDAY_UNSPECIFIED\x10\x00\x12\x12\n" +
+	"\x0eWEEKDAY_SUNDAY\x10\x01\x12\x12\n" +
+	"\x0eWEEKDAY_MONDAY\x10\x02\x12\x13\n" +
+	"\x0fWEEKDAY_TUESDAY\x10\x03\x12\x15\n" +
+	"\x11WEEKDAY_WEDNESDAY\x10\x04\x12\x14\n" +
+	"\x10WEEKDAY_THURSDAY\x10\x05\x12\x12\n" +
+	"\x0eWEEKDAY_FRIDAY\x10\x06\x12\x14\n" +
+	"\x10WEEKDAY_SATURDAY\x10\a*h\n" +
+	"\tFrequency\x12\x19\n" +
+	"\x15FREQUENCY_UNSPECIFIED\x10\x00\x12\x13\n" +
+	"\x0fFREQUENCY_DAILY\x10\x01\x12\x14\n" +
+	"\x10FREQUENCY_WEEKLY\x10\x02\x12\x15\n" +
+	"\x11FREQUENCY_MONTHLY\x10\x032\xa5\a\n" +
 	"\vFeedService\x12G\n" +
 	"\x04List\x12\x1e.aff.v1.FeedServiceListRequest\x1a\x1f.aff.v1.FeedServiceListResponse\x12D\n" +
 	"\x03Get\x12\x1d.aff.v1.FeedServiceGetRequest\x1a\x1e.aff.v1.FeedServiceGetResponse\x12M\n" +
@@ -1894,85 +2203,93 @@ func file_aff_v1_feed_proto_rawDescGZIP() []byte {
 	return file_aff_v1_feed_proto_rawDescData
 }
 
-var file_aff_v1_feed_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
+var file_aff_v1_feed_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_aff_v1_feed_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_aff_v1_feed_proto_goTypes = []any{
-	(*PromptVariables)(nil),                 // 0: aff.v1.PromptVariables
-	(*NoveltySettings)(nil),                 // 1: aff.v1.NoveltySettings
-	(*SourceSpec)(nil),                      // 2: aff.v1.SourceSpec
-	(*FeedSpec)(nil),                        // 3: aff.v1.FeedSpec
-	(*Feed)(nil),                            // 4: aff.v1.Feed
-	(*FeedServiceListRequest)(nil),          // 5: aff.v1.FeedServiceListRequest
-	(*FeedServiceListResponse)(nil),         // 6: aff.v1.FeedServiceListResponse
-	(*FeedServiceGetRequest)(nil),           // 7: aff.v1.FeedServiceGetRequest
-	(*FeedServiceGetResponse)(nil),          // 8: aff.v1.FeedServiceGetResponse
-	(*FeedServiceCreateRequest)(nil),        // 9: aff.v1.FeedServiceCreateRequest
-	(*FeedServiceCreateResponse)(nil),       // 10: aff.v1.FeedServiceCreateResponse
-	(*FeedServiceUpdateRequest)(nil),        // 11: aff.v1.FeedServiceUpdateRequest
-	(*FeedServiceUpdateResponse)(nil),       // 12: aff.v1.FeedServiceUpdateResponse
-	(*FeedServiceSetEnabledRequest)(nil),    // 13: aff.v1.FeedServiceSetEnabledRequest
-	(*FeedServiceSetEnabledResponse)(nil),   // 14: aff.v1.FeedServiceSetEnabledResponse
-	(*FeedServiceDeleteRequest)(nil),        // 15: aff.v1.FeedServiceDeleteRequest
-	(*FeedServiceDeleteResponse)(nil),       // 16: aff.v1.FeedServiceDeleteResponse
-	(*FeedServiceRunNowRequest)(nil),        // 17: aff.v1.FeedServiceRunNowRequest
-	(*FeedServiceRunNowResponse)(nil),       // 18: aff.v1.FeedServiceRunNowResponse
-	(*FeedServiceValidateSpecRequest)(nil),  // 19: aff.v1.FeedServiceValidateSpecRequest
-	(*FeedServiceValidateSpecResponse)(nil), // 20: aff.v1.FeedServiceValidateSpecResponse
-	(*FieldError)(nil),                      // 21: aff.v1.FieldError
-	(*FeedServiceSetMembersRequest)(nil),    // 22: aff.v1.FeedServiceSetMembersRequest
-	(*FeedServiceSetMembersResponse)(nil),   // 23: aff.v1.FeedServiceSetMembersResponse
-	(*FeedServiceExportTOMLRequest)(nil),    // 24: aff.v1.FeedServiceExportTOMLRequest
-	(*FeedServiceExportTOMLResponse)(nil),   // 25: aff.v1.FeedServiceExportTOMLResponse
-	(*FeedServiceImportTOMLRequest)(nil),    // 26: aff.v1.FeedServiceImportTOMLRequest
-	(*FeedServiceImportTOMLResponse)(nil),   // 27: aff.v1.FeedServiceImportTOMLResponse
-	(FeedKind)(0),                           // 28: aff.v1.FeedKind
-	(*timestamppb.Timestamp)(nil),           // 29: google.protobuf.Timestamp
+	(Weekday)(0),                            // 0: aff.v1.Weekday
+	(Frequency)(0),                          // 1: aff.v1.Frequency
+	(*PromptVariables)(nil),                 // 2: aff.v1.PromptVariables
+	(*NoveltySettings)(nil),                 // 3: aff.v1.NoveltySettings
+	(*SourceSpec)(nil),                      // 4: aff.v1.SourceSpec
+	(*FeedSpec)(nil),                        // 5: aff.v1.FeedSpec
+	(*Recurrence)(nil),                      // 6: aff.v1.Recurrence
+	(*Feed)(nil),                            // 7: aff.v1.Feed
+	(*FeedServiceListRequest)(nil),          // 8: aff.v1.FeedServiceListRequest
+	(*FeedServiceListResponse)(nil),         // 9: aff.v1.FeedServiceListResponse
+	(*FeedServiceGetRequest)(nil),           // 10: aff.v1.FeedServiceGetRequest
+	(*FeedServiceGetResponse)(nil),          // 11: aff.v1.FeedServiceGetResponse
+	(*FeedServiceCreateRequest)(nil),        // 12: aff.v1.FeedServiceCreateRequest
+	(*FeedServiceCreateResponse)(nil),       // 13: aff.v1.FeedServiceCreateResponse
+	(*FeedServiceUpdateRequest)(nil),        // 14: aff.v1.FeedServiceUpdateRequest
+	(*FeedServiceUpdateResponse)(nil),       // 15: aff.v1.FeedServiceUpdateResponse
+	(*FeedServiceSetEnabledRequest)(nil),    // 16: aff.v1.FeedServiceSetEnabledRequest
+	(*FeedServiceSetEnabledResponse)(nil),   // 17: aff.v1.FeedServiceSetEnabledResponse
+	(*FeedServiceDeleteRequest)(nil),        // 18: aff.v1.FeedServiceDeleteRequest
+	(*FeedServiceDeleteResponse)(nil),       // 19: aff.v1.FeedServiceDeleteResponse
+	(*FeedServiceRunNowRequest)(nil),        // 20: aff.v1.FeedServiceRunNowRequest
+	(*FeedServiceRunNowResponse)(nil),       // 21: aff.v1.FeedServiceRunNowResponse
+	(*FeedServiceValidateSpecRequest)(nil),  // 22: aff.v1.FeedServiceValidateSpecRequest
+	(*FeedServiceValidateSpecResponse)(nil), // 23: aff.v1.FeedServiceValidateSpecResponse
+	(*FieldError)(nil),                      // 24: aff.v1.FieldError
+	(*FeedServiceSetMembersRequest)(nil),    // 25: aff.v1.FeedServiceSetMembersRequest
+	(*FeedServiceSetMembersResponse)(nil),   // 26: aff.v1.FeedServiceSetMembersResponse
+	(*FeedServiceExportTOMLRequest)(nil),    // 27: aff.v1.FeedServiceExportTOMLRequest
+	(*FeedServiceExportTOMLResponse)(nil),   // 28: aff.v1.FeedServiceExportTOMLResponse
+	(*FeedServiceImportTOMLRequest)(nil),    // 29: aff.v1.FeedServiceImportTOMLRequest
+	(*FeedServiceImportTOMLResponse)(nil),   // 30: aff.v1.FeedServiceImportTOMLResponse
+	(*timestamppb.Timestamp)(nil),           // 31: google.protobuf.Timestamp
+	(FeedKind)(0),                           // 32: aff.v1.FeedKind
 }
 var file_aff_v1_feed_proto_depIdxs = []int32{
-	1,  // 0: aff.v1.FeedSpec.novelty:type_name -> aff.v1.NoveltySettings
-	2,  // 1: aff.v1.FeedSpec.sources:type_name -> aff.v1.SourceSpec
-	28, // 2: aff.v1.Feed.kind:type_name -> aff.v1.FeedKind
-	29, // 3: aff.v1.Feed.last_built_at:type_name -> google.protobuf.Timestamp
-	29, // 4: aff.v1.Feed.created_at:type_name -> google.protobuf.Timestamp
-	3,  // 5: aff.v1.Feed.spec:type_name -> aff.v1.FeedSpec
-	4,  // 6: aff.v1.FeedServiceListResponse.feeds:type_name -> aff.v1.Feed
-	4,  // 7: aff.v1.FeedServiceGetResponse.feed:type_name -> aff.v1.Feed
-	4,  // 8: aff.v1.FeedServiceCreateRequest.feed:type_name -> aff.v1.Feed
-	4,  // 9: aff.v1.FeedServiceCreateResponse.feed:type_name -> aff.v1.Feed
-	4,  // 10: aff.v1.FeedServiceUpdateRequest.feed:type_name -> aff.v1.Feed
-	4,  // 11: aff.v1.FeedServiceUpdateResponse.feed:type_name -> aff.v1.Feed
-	4,  // 12: aff.v1.FeedServiceSetEnabledResponse.feed:type_name -> aff.v1.Feed
-	28, // 13: aff.v1.FeedServiceValidateSpecRequest.kind:type_name -> aff.v1.FeedKind
-	3,  // 14: aff.v1.FeedServiceValidateSpecRequest.spec:type_name -> aff.v1.FeedSpec
-	21, // 15: aff.v1.FeedServiceValidateSpecResponse.errors:type_name -> aff.v1.FieldError
-	4,  // 16: aff.v1.FeedServiceSetMembersResponse.feed:type_name -> aff.v1.Feed
-	4,  // 17: aff.v1.FeedServiceImportTOMLResponse.feed:type_name -> aff.v1.Feed
-	5,  // 18: aff.v1.FeedService.List:input_type -> aff.v1.FeedServiceListRequest
-	7,  // 19: aff.v1.FeedService.Get:input_type -> aff.v1.FeedServiceGetRequest
-	9,  // 20: aff.v1.FeedService.Create:input_type -> aff.v1.FeedServiceCreateRequest
-	11, // 21: aff.v1.FeedService.Update:input_type -> aff.v1.FeedServiceUpdateRequest
-	13, // 22: aff.v1.FeedService.SetEnabled:input_type -> aff.v1.FeedServiceSetEnabledRequest
-	15, // 23: aff.v1.FeedService.Delete:input_type -> aff.v1.FeedServiceDeleteRequest
-	17, // 24: aff.v1.FeedService.RunNow:input_type -> aff.v1.FeedServiceRunNowRequest
-	19, // 25: aff.v1.FeedService.ValidateSpec:input_type -> aff.v1.FeedServiceValidateSpecRequest
-	22, // 26: aff.v1.FeedService.SetMembers:input_type -> aff.v1.FeedServiceSetMembersRequest
-	24, // 27: aff.v1.FeedService.ExportTOML:input_type -> aff.v1.FeedServiceExportTOMLRequest
-	26, // 28: aff.v1.FeedService.ImportTOML:input_type -> aff.v1.FeedServiceImportTOMLRequest
-	6,  // 29: aff.v1.FeedService.List:output_type -> aff.v1.FeedServiceListResponse
-	8,  // 30: aff.v1.FeedService.Get:output_type -> aff.v1.FeedServiceGetResponse
-	10, // 31: aff.v1.FeedService.Create:output_type -> aff.v1.FeedServiceCreateResponse
-	12, // 32: aff.v1.FeedService.Update:output_type -> aff.v1.FeedServiceUpdateResponse
-	14, // 33: aff.v1.FeedService.SetEnabled:output_type -> aff.v1.FeedServiceSetEnabledResponse
-	16, // 34: aff.v1.FeedService.Delete:output_type -> aff.v1.FeedServiceDeleteResponse
-	18, // 35: aff.v1.FeedService.RunNow:output_type -> aff.v1.FeedServiceRunNowResponse
-	20, // 36: aff.v1.FeedService.ValidateSpec:output_type -> aff.v1.FeedServiceValidateSpecResponse
-	23, // 37: aff.v1.FeedService.SetMembers:output_type -> aff.v1.FeedServiceSetMembersResponse
-	25, // 38: aff.v1.FeedService.ExportTOML:output_type -> aff.v1.FeedServiceExportTOMLResponse
-	27, // 39: aff.v1.FeedService.ImportTOML:output_type -> aff.v1.FeedServiceImportTOMLResponse
-	29, // [29:40] is the sub-list for method output_type
-	18, // [18:29] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	6,  // 0: aff.v1.FeedSpec.recurrence:type_name -> aff.v1.Recurrence
+	3,  // 1: aff.v1.FeedSpec.novelty:type_name -> aff.v1.NoveltySettings
+	4,  // 2: aff.v1.FeedSpec.sources:type_name -> aff.v1.SourceSpec
+	1,  // 3: aff.v1.Recurrence.frequency:type_name -> aff.v1.Frequency
+	0,  // 4: aff.v1.Recurrence.weekdays:type_name -> aff.v1.Weekday
+	31, // 5: aff.v1.Recurrence.anchor:type_name -> google.protobuf.Timestamp
+	32, // 6: aff.v1.Feed.kind:type_name -> aff.v1.FeedKind
+	31, // 7: aff.v1.Feed.last_built_at:type_name -> google.protobuf.Timestamp
+	31, // 8: aff.v1.Feed.created_at:type_name -> google.protobuf.Timestamp
+	5,  // 9: aff.v1.Feed.spec:type_name -> aff.v1.FeedSpec
+	7,  // 10: aff.v1.FeedServiceListResponse.feeds:type_name -> aff.v1.Feed
+	7,  // 11: aff.v1.FeedServiceGetResponse.feed:type_name -> aff.v1.Feed
+	7,  // 12: aff.v1.FeedServiceCreateRequest.feed:type_name -> aff.v1.Feed
+	7,  // 13: aff.v1.FeedServiceCreateResponse.feed:type_name -> aff.v1.Feed
+	7,  // 14: aff.v1.FeedServiceUpdateRequest.feed:type_name -> aff.v1.Feed
+	7,  // 15: aff.v1.FeedServiceUpdateResponse.feed:type_name -> aff.v1.Feed
+	7,  // 16: aff.v1.FeedServiceSetEnabledResponse.feed:type_name -> aff.v1.Feed
+	32, // 17: aff.v1.FeedServiceValidateSpecRequest.kind:type_name -> aff.v1.FeedKind
+	5,  // 18: aff.v1.FeedServiceValidateSpecRequest.spec:type_name -> aff.v1.FeedSpec
+	24, // 19: aff.v1.FeedServiceValidateSpecResponse.errors:type_name -> aff.v1.FieldError
+	7,  // 20: aff.v1.FeedServiceSetMembersResponse.feed:type_name -> aff.v1.Feed
+	7,  // 21: aff.v1.FeedServiceImportTOMLResponse.feed:type_name -> aff.v1.Feed
+	8,  // 22: aff.v1.FeedService.List:input_type -> aff.v1.FeedServiceListRequest
+	10, // 23: aff.v1.FeedService.Get:input_type -> aff.v1.FeedServiceGetRequest
+	12, // 24: aff.v1.FeedService.Create:input_type -> aff.v1.FeedServiceCreateRequest
+	14, // 25: aff.v1.FeedService.Update:input_type -> aff.v1.FeedServiceUpdateRequest
+	16, // 26: aff.v1.FeedService.SetEnabled:input_type -> aff.v1.FeedServiceSetEnabledRequest
+	18, // 27: aff.v1.FeedService.Delete:input_type -> aff.v1.FeedServiceDeleteRequest
+	20, // 28: aff.v1.FeedService.RunNow:input_type -> aff.v1.FeedServiceRunNowRequest
+	22, // 29: aff.v1.FeedService.ValidateSpec:input_type -> aff.v1.FeedServiceValidateSpecRequest
+	25, // 30: aff.v1.FeedService.SetMembers:input_type -> aff.v1.FeedServiceSetMembersRequest
+	27, // 31: aff.v1.FeedService.ExportTOML:input_type -> aff.v1.FeedServiceExportTOMLRequest
+	29, // 32: aff.v1.FeedService.ImportTOML:input_type -> aff.v1.FeedServiceImportTOMLRequest
+	9,  // 33: aff.v1.FeedService.List:output_type -> aff.v1.FeedServiceListResponse
+	11, // 34: aff.v1.FeedService.Get:output_type -> aff.v1.FeedServiceGetResponse
+	13, // 35: aff.v1.FeedService.Create:output_type -> aff.v1.FeedServiceCreateResponse
+	15, // 36: aff.v1.FeedService.Update:output_type -> aff.v1.FeedServiceUpdateResponse
+	17, // 37: aff.v1.FeedService.SetEnabled:output_type -> aff.v1.FeedServiceSetEnabledResponse
+	19, // 38: aff.v1.FeedService.Delete:output_type -> aff.v1.FeedServiceDeleteResponse
+	21, // 39: aff.v1.FeedService.RunNow:output_type -> aff.v1.FeedServiceRunNowResponse
+	23, // 40: aff.v1.FeedService.ValidateSpec:output_type -> aff.v1.FeedServiceValidateSpecResponse
+	26, // 41: aff.v1.FeedService.SetMembers:output_type -> aff.v1.FeedServiceSetMembersResponse
+	28, // 42: aff.v1.FeedService.ExportTOML:output_type -> aff.v1.FeedServiceExportTOMLResponse
+	30, // 43: aff.v1.FeedService.ImportTOML:output_type -> aff.v1.FeedServiceImportTOMLResponse
+	33, // [33:44] is the sub-list for method output_type
+	22, // [22:33] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_aff_v1_feed_proto_init() }
@@ -1986,13 +2303,14 @@ func file_aff_v1_feed_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_aff_v1_feed_proto_rawDesc), len(file_aff_v1_feed_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   28,
+			NumEnums:      2,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_aff_v1_feed_proto_goTypes,
 		DependencyIndexes: file_aff_v1_feed_proto_depIdxs,
+		EnumInfos:         file_aff_v1_feed_proto_enumTypes,
 		MessageInfos:      file_aff_v1_feed_proto_msgTypes,
 	}.Build()
 	File_aff_v1_feed_proto = out.File
