@@ -125,6 +125,13 @@ func emitAuthStyles() {
 		css.Display.Flex,
 		css.Items.Center,
 		css.Justify.Center,
+		// Clip the ring field. It is a 110rem pseudo-element centred on the
+		// crest, so on any window narrower than about 1180px it pushed the
+		// DOCUMENT wide and gave the sign-in page a horizontal scrollbar —
+		// measured at 900px: scrollWidth 1181 against a 900px viewport.
+		// `clip` rather than `hidden` because hidden would make this a scroll
+		// container and swallow the card's own focus scrolling.
+		css.Raw("overflow", "clip"),
 	)
 
 	// The real-size brand lockup (brand.go's renderAuthBrand): the crest as
@@ -308,6 +315,22 @@ func emitAuthStyles() {
 		css.Justify.Between,
 		css.Items.Center,
 		css.Gap(tokens.Space(3)),
+	)
+	// The secondary action: outlined, not filled. Weight is what tells the
+	// eye which of two adjacent buttons is the one that finishes the job.
+	// Two classes, to out-specify the page's generic "button" rule — a class
+	// plus a type selector beats a single class, which is why the first
+	// attempt at this left Back looking exactly like Sign in.
+	css.Global(".af-login-actions .af-login-back",
+		css.Bg(css.Transparent),
+		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
+	)
+	// The recovery link is a real target, not a 17px hairline of text.
+	css.Global(".af-login-recover",
+		css.Display.InlineFlex,
+		css.Items.Center,
+		css.Raw("min-height", "24px"),
 	)
 
 	// Status text: an empty <p class="af-form-error">/<p class="af-backoff-

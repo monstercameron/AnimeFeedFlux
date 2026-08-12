@@ -89,6 +89,12 @@ var routeTable = []guard.RouteInfo{
 	//
 	// Guarded exactly like /settings: same auth requirement, same redirect.
 	{Path: "/settings/:section", RequiresAuth: true},
+	// Same treatment for History's two tabs (/history/runs, /history/items),
+	// for the same reason and with the same guard. A route the page registers
+	// but this table does not list is not merely unguarded — it is treated as
+	// unknown and redirected away, which is what sent /history/items to
+	// /generate the first time this was wired up.
+	{Path: "/history/:tab", RequiresAuth: true},
 }
 
 // initialSessionTimeout bounds the boot-time "whoami" call (D0-06/D0-07):
@@ -180,6 +186,13 @@ func Mount(ctx context.Context, selector string, wire func(*wsconn.Conn)) {
 	// theme change follows through to the document. The returned cleanup is
 	// deliberately dropped — this listener's lifetime IS the page's.
 	_ = WatchSystemTheme()
+
+	// The language, resolved and installed on the same before-anything-renders
+	// footing as the theme and for a sharper version of the same reason: a
+	// locale applied from inside a component effect paints one frame of
+	// English before switching, so every single load flickers through a
+	// language the operator may not read. See locale.go.
+	ApplyStoredLocale()
 
 	// This package's own rules (#app, .af-banner, .af-expiry-modal,
 	// .af-content/.af-placeholder) — see styles.go. Emitted right after

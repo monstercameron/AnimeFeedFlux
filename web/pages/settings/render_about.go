@@ -17,6 +17,14 @@ import (
 // run" is shown as each feed's last_built_at (labeled accordingly, not
 // as "last success") since no RPC returns a per-feed last-SUCCEEDED-run
 // timestamp distinct from that.
+//
+// The section leads with two cards of prose — what the app does, and what
+// it runs on — before the readouts. A page titled "About" that opened on
+// a version string and a table of slugs told a reader who had not built
+// the app nothing about what they were looking at; the diagnostics are
+// still here, but they now come after the explanation and each says what
+// it means. The prose is written in general terms (feeds, entries, an AI
+// service) rather than in this project's internal vocabulary.
 func renderAbout() ui.Node {
 	disconnected := isDisconnected()
 
@@ -63,6 +71,9 @@ func renderAbout() ui.Node {
 	var versionBody ui.Node
 	if v := version.Get(); v != nil {
 		versionBody = h.Div(
+			h.ClassStr("af-settings-card"),
+			h.H3(h.Text(t("settings.about.install.title"))),
+			h.P(h.ClassStr("af-field-help"), h.Text(t("settings.about.install.help"))),
 			h.P(h.Text(t("settings.about.version", v.GetVersion()))),
 			h.P(h.Text(t("settings.about.build", v.GetBuild()))),
 			h.P(h.Text(t("settings.about.uptime", formatUptime(v.GetStartedAt().AsTime())))),
@@ -88,16 +99,40 @@ func renderAbout() ui.Node {
 	body := h.Div(
 		h.ClassStr("af-settings-section"),
 		h.H2(h.Text(t("settings.about.title"))),
+
+		h.Div(
+			h.ClassStr("af-settings-card"),
+			h.H3(h.Text(t("settings.about.what.title"))),
+			h.P(h.Text(t("settings.about.what.body"))),
+			h.P(h.Text(t("settings.about.what.generate"))),
+			h.P(h.Text(t("settings.about.what.history"))),
+			h.P(h.Text(t("settings.about.what.settings"))),
+		),
+
+		h.Div(
+			h.ClassStr("af-settings-card"),
+			h.H3(h.Text(t("settings.about.built.title"))),
+			h.P(h.Text(t("settings.about.built.server"))),
+			h.P(h.Text(t("settings.about.built.client"))),
+			h.P(h.Text(t("settings.about.built.ai"))),
+			h.P(h.Text(t("settings.about.built.formats"))),
+		),
+
 		versionBody,
-		h.H3(h.Text(t("settings.about.feed.lastBuildTitle"))),
-		affui.Table(affui.TableProps{
-			T: t, ID: "settings-about-feeds", CaptionKey: "settings.about.feed.caption",
-			Columns: []affui.TableColumn{
-				{ID: "slug", LabelKey: "settings.about.feed.col.slug", Mono: true},
-				{ID: "lastBuild", LabelKey: "settings.about.feed.col.lastBuild"},
-			},
-			Rows: feedRows, RowKeys: feedRowKeys,
-		}),
+
+		h.Div(
+			h.ClassStr("af-settings-card"),
+			h.H3(h.Text(t("settings.about.feed.lastBuildTitle"))),
+			h.P(h.ClassStr("af-field-help"), h.Text(t("settings.about.feed.help"))),
+			affui.Table(affui.TableProps{
+				T: t, ID: "settings-about-feeds", CaptionKey: "settings.about.feed.caption",
+				Columns: []affui.TableColumn{
+					{ID: "slug", LabelKey: "settings.about.feed.col.slug", Mono: true},
+					{ID: "lastBuild", LabelKey: "settings.about.feed.col.lastBuild"},
+				},
+				Rows: feedRows, RowKeys: feedRowKeys,
+			}),
+		),
 	)
 
 	return screenWrapperRetry(state, errState.Get(), func() { reloadTick.Update(func(n int) int { return n + 1 }) }, body)

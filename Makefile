@@ -8,6 +8,22 @@ SHELL := /bin/sh
 BIN   := bin/animefeedflux
 PKG   := ./...
 
+# COVERPKG is PKG minus generated code, and it is what every coverage number
+# in this repository is measured over.
+#
+# gen/aff/v1 is protoc-gen-go output: ~3,600 statements of getters, String()
+# methods and reflection wiring, none of it hand-written and none of it
+# reachable by a test that would tell us anything. Including it moved total
+# coverage from 79% to 62% while saying nothing about the code anyone wrote,
+# and the only way to "fix" that number would be to write a reflection walk
+# that calls 1,191 generated getters — which is precisely the padding
+# scripts/coverage-ratchet.sh's own doc comment exists to argue against.
+#
+# The correctness of generated code is protoc's problem, guaranteed by the
+# generator and by the .proto files it reads. What we owe a test is the code
+# we wrote around it.
+COVERPKG := $(shell go list ./... | grep -v '/gen/')
+
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -22,7 +38,7 @@ LDFLAGS := -s -w \
 # SQLite driver decision recorded in §15.1.
 export CGO_ENABLED := 0
 
-.PHONY: all build run test test-race fmt fmt-check vet lint validate cover tidy hooks clean web help
+.PHONY: all build run test test-race fmt fmt-check vet lint validate cover cover-wasm tidy hooks clean web help
 
 all: fmt-check vet test ## fmt, vet, test
 
@@ -71,8 +87,8 @@ lint: vet ## vet + staticcheck, if installed
 		echo "  go install honnef.co/go/tools/cmd/staticcheck@v0.7.0"; \
 	fi
 
-cover: ## Coverage summary
-	go test -coverprofile=cover.out $(PKG)
+cover: ## Coverage summary (excludes generated code — see COVERPKG)
+	go test -coverprofile=cover.out $(COVERPKG)
 	go tool cover -func=cover.out | tail -1
 
 # Feed-format compliance (§5.6). Gates on WARNINGS as well as errors, because
@@ -91,6 +107,14 @@ validate: ## Validate the rendered golden feeds
 	go build -o bin/affvalidate ./cmd/affvalidate; \
 	echo "validating $$(ls $$golden | wc -l) golden documents"; \
 	./bin/affvalidate $$golden/*.golden
+
+# Coverage for the browser half, which `make cover` cannot see at all: 62
+# files under web/ carry `//go:build js && wasm`, so a host build excludes
+# them from their packages entirely and they contribute neither statements nor
+# misses to any host profile. That is why web/pages/settings can report 81.7%
+# on the host while its actual browser code sits at 15.5%. Requires node.
+cover-wasm: ## Coverage for web/ under GOOS=js GOARCH=wasm (needs node)
+	sh scripts/coverage-wasm.sh cover-wasm.out
 
 i18n-lint: ## Fail on user-visible string literals in web/ (§12.6, D6-20)
 	@if [ ! -d web ]; then echo "no web/ yet — nothing to lint"; exit 0; fi; \

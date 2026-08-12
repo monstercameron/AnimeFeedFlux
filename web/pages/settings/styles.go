@@ -94,6 +94,118 @@ func emitSettingsStyles() {
 	// fills the width it has, and at narrow widths every card collapses back
 	// to a stack without a media query. Wide children (headings, help text,
 	// tables) opt out below.
+	// --- /settings/data ----------------------------------------------------
+	//
+	// This page answers two questions — what is in the database, and what can
+	// I do to it — and it used to answer neither well: the figures were three
+	// muted sentences that read as a caption, and each of the four operations
+	// was laid out differently, two of them with an unlabeled overflow glyph
+	// as their only control.
+	//
+	// The figures are now the hero, and every operation is the same row.
+
+	// The stat strip. auto-fit so three figures spread across a wide page and
+	// stack on a narrow one without a media query.
+	css.Global(".af-data-stats",
+		css.Display.Grid,
+		css.Raw("grid-template-columns", "repeat(auto-fit, minmax(9rem, 1fr))"),
+		css.Gap(tokens.Space(4)),
+		css.PaddingY(tokens.Space(4)),
+	)
+	// The number itself: large, in the data face, tabular so three figures in
+	// a row line up on their digits rather than drifting.
+	css.Global(".af-data-stat__value",
+		css.FontSize(tokens.FontSize(tokens.Text2xl)),
+		css.FontWeight.Semibold,
+		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.Raw("font-variant-numeric", "tabular-nums"),
+		monoFont(),
+	)
+	css.Global(".af-data-stat__label",
+		css.FontSize(tokens.FontSize(tokens.TextXs)),
+		css.Raw("text-transform", "uppercase"),
+		css.Tracking(css.Ems(0.08)),
+		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
+	)
+
+	// One operation: name and consequence on the left, its control on the
+	// right, anything it needs or produces underneath at full width.
+	css.Global(".af-data-op",
+		css.Display.Flex,
+		css.FlexDir.Col,
+		css.Gap(tokens.Space(3)),
+		css.Raw("padding-block", string(tokens.Space(5))),
+		css.BorderTop(css.Px(1), tokens.Color(tokens.RoleBorder)),
+	)
+	css.Global(".af-data-op__head",
+		css.Display.Flex,
+		css.Items.Start,
+		css.Justify.Between,
+		css.Gap(tokens.Space(4)),
+		css.Raw("flex-wrap", "wrap"),
+	)
+	css.Global(".af-data-op__label",
+		css.Display.Flex,
+		css.FlexDir.Col,
+		css.Gap(tokens.Space(1)),
+		css.Raw("min-width", "16rem"),
+		css.Raw("flex", "1 1 20rem"),
+	)
+	css.Global(".af-data-op h3",
+		css.Margin(css.Zero),
+		css.FontSize(tokens.FontSize(tokens.TextBase)),
+		css.FontWeight.Semibold,
+		css.TextColor(tokens.Color(tokens.RoleText)),
+	)
+	// The action row: controls sized to their content and aligned to each
+	// other, not stretched to whatever column they landed in. The buttons on
+	// this page were 333px wide because they inherited a field's width.
+	css.Global(".af-data-op__action",
+		css.Display.Flex,
+		css.Items.Center,
+		css.Gap(tokens.Space(2)),
+		css.Raw("flex", "0 0 auto"),
+	)
+	css.Global(".af-data-op__action button",
+		css.Raw("width", "auto"),
+		css.Raw("min-height", "36px"),
+		css.Raw("white-space", "nowrap"),
+	)
+	css.Global(".af-data-op__select",
+		css.Raw("box-sizing", "border-box"),
+		css.Raw("min-height", "36px"),
+		css.Raw("min-width", "14rem"),
+		css.Raw("max-width", "20rem"),
+		css.PaddingX(tokens.Space(2)),
+		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
+		css.Rounded(tokens.Radius(tokens.RadiusSm)),
+		css.Bg(tokens.Color(tokens.RoleBg)),
+		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+		bodyFont(),
+	)
+	// Text areas on this page hold a whole recipe. They get the width of the
+	// card and the data face, because what goes in them is a document, not a
+	// sentence.
+	// Two classes, to beat ".af-settings textarea"'s 30rem cap: that cap is
+	// right for a field holding a URL or a TTL and wrong for one holding a
+	// whole recipe.
+	css.Global(".af-settings .af-data-op__field",
+		css.Raw("box-sizing", "border-box"),
+		css.W(css.Length("100%")),
+		css.Raw("max-width", "100%"),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+		css.Padding(tokens.Space(3)),
+		monoFont(),
+	)
+	css.Global(".af-data-op__download",
+		css.Display.InlineFlex,
+		css.Items.Center,
+		css.Gap(tokens.Space(2)),
+		css.TextColor(tokens.Color(tokens.RoleAccent)),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+	)
+
 	css.Global(".af-settings-card",
 		css.Display.Grid,
 		css.Raw("grid-template-columns", "repeat(auto-fit, minmax(20rem, 1fr))"),

@@ -53,14 +53,25 @@ const (
 	keyHeaderSignOut        = "header.signOut"
 	keyHeaderSignOutBusy    = "header.signOut.busy"
 	keyHeaderSignOutError   = "header.signOut.error"
-
-	// The appearance control (theme.go, renderThemeControl below). Backed
-	// by web/i18n/keys_shell.go's KeyShellHeaderTheme* entries.
-	keyHeaderThemeLabel  = "header.theme.label"
-	keyHeaderThemeSystem = "header.theme.system"
-	keyHeaderThemeLight  = "header.theme.light"
-	keyHeaderThemeDark   = "header.theme.dark"
 )
+
+// The four header.theme.* keys, and the renderThemeControl that rendered
+// them, were removed 2026-08-11 when the theme moved into Settings →
+// Appearance beside the new language selector (settings.appearance.*).
+//
+// Left as a note rather than silently deleted, because the comment that
+// stood here argued the opposite and the argument was a good one: the theme
+// control was in the header specifically so that an operator working at
+// night could reach it BEFORE signing in, since /settings is behind the
+// session. That cost is real and is now paid — /login and /recover render in
+// whatever theme and language were last stored, with no way to change either
+// from those screens. The trade accepted in exchange is one preference with
+// one home: theme and language are the same kind of setting, and splitting
+// them across two surfaces (one in the header, one in Settings) is the shape
+// this repo already rejected when it deleted the duplicate sign-out button.
+// If the pre-auth case turns out to matter more than the symmetry, the
+// answer is to render the Appearance controls on the auth routes too, not to
+// put a second theme switch back in the header.
 
 // headerNavItem is one of the three authed destinations (PLAN.md §12: "no
 // nested navigation, no hamburger, no breadcrumb" — three links need no
@@ -211,16 +222,6 @@ func renderHeader() ui.Node {
 		}()
 	})
 
-	themePref := ui.UseState(storedThemePref())
-	var themeClicks [len(themeOptions)]ui.Handler
-	for i, opt := range themeOptions {
-		pref := opt.pref
-		themeClicks[i] = ui.UseEvent(func() {
-			SelectTheme(pref)
-			themePref.Set(pref)
-		})
-	}
-
 	current := sess.Get()
 	showNav := appstate.IsAuthedIsh(current)
 	interactive := current == appstate.Auth || current == appstate.Killed
@@ -230,61 +231,8 @@ func renderHeader() ui.Node {
 		h.ClassStr("af-header"),
 		renderHeaderBrand(t, linkableBrand, !showNav, brandClick),
 		h.Show(showNav, renderHeaderNav(t, loc.Path, interactive, navClicks)),
-		renderThemeControl(t, themePref.Get(), themeClicks),
 		h.Show(showNav, renderHeaderSignOut(t, interactive, phase.Get(), signOutErr.Get(), handleSignOut)),
 	)
-}
-
-// themeOption is one choice in the appearance control. The array length is
-// load-bearing for the same reason headerNavItems' is: renderHeader calls
-// ui.UseEvent exactly len(themeOptions) times, every render, unconditionally.
-type themeOption struct {
-	pref string
-	key  string
-}
-
-var themeOptions = [3]themeOption{
-	{pref: themeSystem, key: keyHeaderThemeSystem},
-	{pref: themeLight, key: keyHeaderThemeLight},
-	{pref: themeDark, key: keyHeaderThemeDark},
-}
-
-// renderThemeControl is the appearance switch, and it is in the header
-// rather than in Settings for one decisive reason: /settings is behind the
-// session, and the login screen is exactly where an operator working at
-// night first meets this application. A theme control they cannot reach
-// until after they have signed in is a theme control that arrives one screen
-// too late. It therefore renders in every state, ANON included — it touches
-// nothing but a local preference, so unlike the nav and sign-out beside it
-// there is no state in which offering it would be a lie.
-//
-// Three explicit buttons rather than one cycling toggle: a control that
-// reads "Dark" is ambiguous about whether that is what it will do or what
-// you already have, and with three states a cycler additionally makes
-// "follow the system" reachable only by clicking past the other two.
-// aria-pressed carries the current choice, so the answer is announced rather
-// than inferred from styling.
-func renderThemeControl(t gwci18n.Namespace, pref string, clicks [len(themeOptions)]ui.Handler) ui.Node {
-	items := make([]any, 0, 3+len(themeOptions))
-	items = append(items,
-		h.ClassStr("af-header__theme"),
-		h.Role("group"),
-		h.Aria("label", t.T(keyHeaderThemeLabel)),
-	)
-	for i, opt := range themeOptions {
-		active := pref == opt.pref
-		items = append(items, h.Button(
-			h.Type("button"),
-			h.ClassStr(h.ClassMap(map[string]bool{
-				"af-header__theme-btn":          true,
-				"af-header__theme-btn--current": active,
-			})),
-			h.Aria("pressed", boolAttr(active)),
-			h.OnClick(clicks[i]),
-			h.Text(t.T(opt.key)),
-		))
-	}
-	return h.Div(items...)
 }
 
 // markSrc is the brand crest, served by StaticHandler from the same serve

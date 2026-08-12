@@ -64,9 +64,18 @@ const (
 	NSSettings = "settings"
 )
 
-// DefaultLocale is the only locale this app ships (D6's point is not
-// multiple languages — see PLAN.md §12.6 — but where strings live).
-const DefaultLocale = "en"
+// DefaultLocale is the locale every other one falls back to, and the one a
+// browser with no matching language preference gets.
+//
+// It used to be described here as "the only locale this app ships", because
+// D6's point was never multiple languages — it was where strings live (see
+// PLAN.md §12.6). That framing is still right about why the catalogue exists
+// and is no longer right about what it holds: a second locale (LocaleSpanish,
+// see locale.go) now ships alongside it, and the catalogue layer needed
+// nothing structural to accommodate that. The work was never in the
+// catalogue; it was in the ~550 call sites that asked for DefaultLocale by
+// name instead of asking which locale was actually selected.
+const DefaultLocale = LocaleEnglish
 
 // enCatalog is the single checked-in source of truth for the "en" locale
 // (D6-02). Namespaces the D1 auth pages don't need yet are declared empty
@@ -159,6 +168,12 @@ func NewBundle() *gwci18n.Bundle {
 		FallbackLocale: DefaultLocale,
 		OnMissing:      logMissingKey,
 	})
+	// Every shipped locale but the default is registered plainly — no
+	// pseudolocale substitution, which is a diagnostic for the SOURCE
+	// language (does this string fit when it grows 40%?) and would be
+	// meaningless applied to a translation.
+	b.Register(LocaleSpanish, esCatalog)
+
 	catalog := enCatalog
 	if PseudolocaleEnabled() {
 		// D6-24: swap the registered "en" catalogue for its pseudolocalized

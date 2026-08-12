@@ -29,7 +29,8 @@ func isDisconnected() bool {
 	return sess.Get() == appstate.Disconnected
 }
 
-// Section is one of the six PLAN.md §12.5 sections. No nested navigation
+// Section is one of the seven /settings sections (PLAN.md §12.5 named six;
+// Appearance was added 2026-08-11 with the language selector). No nested navigation
 // (D-FLOW: "three pages do not need wayfinding") — within /settings these
 // are flat tabs, not a tree.
 type Section int
@@ -40,6 +41,12 @@ const (
 	SectionGeneration
 	SectionPublishing
 	SectionData
+	// SectionAppearance sits between Data and About deliberately: the six
+	// sections before it are all server state, About is a read-only report,
+	// and Appearance is the only one that configures the client itself. Last
+	// among the configurable sections is where a per-browser preference
+	// belongs — ahead of About, which is not a setting at all.
+	SectionAppearance
 	SectionAbout
 )
 
@@ -55,6 +62,8 @@ func (s Section) titleKey() string {
 		return "settings.nav.publishing"
 	case SectionData:
 		return "settings.nav.data"
+	case SectionAppearance:
+		return "settings.nav.appearance"
 	case SectionAbout:
 		return "settings.nav.about"
 	default:
@@ -78,6 +87,8 @@ func (s Section) tabID() string {
 		return "settings-tab-publishing"
 	case SectionData:
 		return "settings-tab-data"
+	case SectionAppearance:
+		return "settings-tab-appearance"
 	case SectionAbout:
 		return "settings-tab-about"
 	default:
@@ -87,7 +98,7 @@ func (s Section) tabID() string {
 
 var allSections = []Section{
 	SectionSecurity, SectionProvider, SectionGeneration,
-	SectionPublishing, SectionData, SectionAbout,
+	SectionPublishing, SectionData, SectionAppearance, SectionAbout,
 }
 
 // slug is the section's URL segment: /settings/provider, /settings/data.
@@ -108,6 +119,8 @@ func (s Section) slug() string {
 		return "publishing"
 	case SectionData:
 		return "data"
+	case SectionAppearance:
+		return "appearance"
 	case SectionAbout:
 		return "about"
 	}
@@ -233,6 +246,8 @@ func renderActiveSection(active Section) ui.Node {
 		return ui.CreateElement(renderPublishing)
 	case SectionData:
 		return ui.CreateElement(renderData)
+	case SectionAppearance:
+		return ui.CreateElement(renderAppearance)
 	case SectionAbout:
 		return ui.CreateElement(renderAbout)
 	default:

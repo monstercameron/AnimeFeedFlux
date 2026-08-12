@@ -34,7 +34,13 @@ import (
 //	ui.Button(ui.ButtonProps{T: t, LabelKey: i18n.KeyActionSave})
 func NewLabelResolver(b *gwci18n.Bundle) func(key string, args ...any) string {
 	return func(key string, args ...any) string {
-		return b.Translate(DefaultLocale, NSCommon, key, positionalArguments(args), DefaultLocale)
+		// CurrentLocale() is read HERE, inside the returned closure, not
+		// captured when the resolver is built: NewLabelResolver is called
+		// once at boot and the closure it returns lives for the life of the
+		// page, so a captured locale would pin web/ui's every button and
+		// state panel to whatever language was active at startup while the
+		// rest of the app switched around them. See locale.go.
+		return b.Translate(CurrentLocale(), NSCommon, key, positionalArguments(args), DefaultLocale)
 	}
 }
 
@@ -78,7 +84,7 @@ func FormatDateTime(t time.Time, tz string) string {
 		loc = time.UTC
 	}
 	lt := t.In(loc)
-	datePart := gwci18n.FormatDate(DefaultLocale, lt, gwci18n.DateOptions{Style: gwci18n.DateStyleMedium})
+	datePart := gwci18n.FormatDate(CurrentLocale(), lt, gwci18n.DateOptions{Style: gwci18n.DateStyleMedium})
 	return datePart + " " + lt.Format("15:04") + " " + lt.Format("MST")
 }
 
@@ -86,7 +92,7 @@ func FormatDateTime(t time.Time, tz string) string {
 // hours ago", "in 2 minutes") via gwci18n's own FormatRelativeTime, which
 // already carries plural rules per locale family.
 func FormatRelativeTime(t, now time.Time) string {
-	return gwci18n.FormatRelativeTime(DefaultLocale, t, now)
+	return gwci18n.FormatRelativeTime(CurrentLocale(), t, now)
 }
 
 // FormatCurrencyUSD renders a USD amount with locale-aware digit grouping.
@@ -94,13 +100,13 @@ func FormatRelativeTime(t, now time.Time) string {
 // per-token USD amounts small enough that 2-digit rounding would display
 // "$0.00" for real, nonzero spend.
 func FormatCurrencyUSD(usd float64) string {
-	return "$" + gwci18n.FormatNumber(DefaultLocale, usd, gwci18n.NumberOptions{MaximumFractionDigits: 4})
+	return "$" + gwci18n.FormatNumber(CurrentLocale(), usd, gwci18n.NumberOptions{MaximumFractionDigits: 4})
 }
 
 // FormatCount renders an integer-valued count with locale-aware digit
 // grouping (feed counts, item counts, token counts).
 func FormatCount(n int64) string {
-	return gwci18n.FormatNumber(DefaultLocale, float64(n), gwci18n.NumberOptions{MaximumFractionDigits: 0})
+	return gwci18n.FormatNumber(CurrentLocale(), float64(n), gwci18n.NumberOptions{MaximumFractionDigits: 0})
 }
 
 // byteUnits mirrors web/pages/settings/format.go's ByteUnit scale
@@ -128,11 +134,11 @@ func FormatByteSize(n int64) string {
 	if unit == 0 { // whole bytes never carry fractional digits
 		digits = 0
 	}
-	return gwci18n.FormatNumber(DefaultLocale, value, gwci18n.NumberOptions{MaximumFractionDigits: digits}) + " " + byteUnits[unit]
+	return gwci18n.FormatNumber(CurrentLocale(), value, gwci18n.NumberOptions{MaximumFractionDigits: digits}) + " " + byteUnits[unit]
 }
 
 // FormatPercent renders a 0..1 fraction as a locale-aware "NN%" (e.g.
 // novelty thresholds, similarity scores in generate.sampler.novelty.*).
 func FormatPercent(fraction float64, maxFractionDigits int) string {
-	return gwci18n.FormatNumber(DefaultLocale, fraction*100, gwci18n.NumberOptions{MaximumFractionDigits: maxFractionDigits}) + "%"
+	return gwci18n.FormatNumber(CurrentLocale(), fraction*100, gwci18n.NumberOptions{MaximumFractionDigits: maxFractionDigits}) + "%"
 }

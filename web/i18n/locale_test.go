@@ -199,17 +199,22 @@ func TestTranslatedTextIsNotIdenticalToEnglish(t *testing.T) {
 	// Entries whose Spanish is legitimately the same as English.
 	sameByDesign := map[string]bool{
 		// Pure passthrough templates: no words at all.
-		"generate.common.labelValue":         true,
-		"generate.common.errorText":          true,
-		"generate.rail.slugPath":             true,
-		"generate.workbench.stakes.schedule": true,
-		"generate.workbench.sizeN":           true,
-		"generate.editor.cron.readback.raw":  true,
-		"history.errors.rejected":            true,
-		"history.runs.added_rejected_value":  true,
-		"history.runs.tokens_value":          true,
-		"history.runs.reject_reason_count":   true,
-		"settings.security.sessions.current": true,
+		"generate.common.labelValue": true,
+		"generate.common.errorText":  true,
+		"generate.rail.slugPath":     true,
+		// The schedule readback's glue: a comma-space list separator, and a
+		// "{time} ({zone})" template with no words in it. Both are punctuation
+		// and placeholders, and Spanish uses the same ones.
+		"generate.editor.schedule.readback.listSeparator": true,
+		"generate.editor.schedule.readback.at":            true,
+		"generate.workbench.stakes.schedule":              true,
+		"generate.workbench.sizeN":                        true,
+		"generate.editor.cron.readback.raw":               true,
+		"history.errors.rejected":                         true,
+		"history.runs.added_rejected_value":               true,
+		"history.runs.tokens_value":                       true,
+		"history.runs.reject_reason_count":                true,
+		"settings.security.sessions.current":              true,
 		// A backend identifier, not a word: "openai" is what the operator
 		// literally types, in every language.
 		"settings.provider.activeProvider.placeholder": true,

@@ -45,11 +45,29 @@ const themePrefKey = "aff.theme"
 // Theme preference values. These strings are persisted, so they are API:
 // changing one silently resets every existing operator's choice back to
 // system on their next load.
+//
+// Exported as of 2026-08-11, when the control that offers them moved out of
+// this package into Settings → Appearance (web/pages/settings/
+// render_appearance.go). The unexported aliases below are kept because this
+// file's own internals read them a dozen times and `themeDark` says the same
+// thing as `ThemeDark` with less noise inside the package that owns them.
 const (
-	themeSystem = "system"
-	themeLight  = "light"
-	themeDark   = "dark"
+	ThemeSystem = "system"
+	ThemeLight  = "light"
+	ThemeDark   = "dark"
+
+	themeSystem = ThemeSystem
+	themeLight  = ThemeLight
+	themeDark   = ThemeDark
 )
+
+// StoredThemePref exposes the persisted preference to the Appearance panel,
+// which needs the current value to render its control's selected state.
+//
+// Read-only by design: the panel changes the theme through SelectTheme, never
+// by writing storage itself, so the "record and apply in one step" guarantee
+// SelectTheme documents cannot be bypassed from outside this package.
+func StoredThemePref() string { return storedThemePref() }
 
 // ApplyStoredTheme resolves the stored preference against the OS setting and
 // stamps <html data-theme>, and is called by Mount BEFORE the first render.

@@ -75,9 +75,25 @@ func applyTransition(ev appstate.Event) {
 // modal shows) rather than applied immediately and silently. Every other
 // event applies immediately.
 func applyEvent(ev appstate.Event) {
-	if ev == appstate.EvSessionExpired && ShouldHoldExpiry(dirtyCheck) {
-		PendingExpiryAtom.Global().Set(true)
-		return
+	if ev == appstate.EvSessionExpired {
+		// Ignore an expiry that is not a legal transition from where we are.
+		//
+		// This became load-bearing the moment wsconn started emitting the
+		// event for real (noteSessionExpiry): the shell now hears about
+		// Unauthenticated responses, and an ANON visitor can produce one
+		// simply by being ANON — a call made before login lands, say. From
+		// ANON the transition is rejected anyway, so applyTransition would
+		// correctly do nothing; the problem is the HOLD above it, which would
+		// still fire and put a "your session expired" modal in front of
+		// someone who never had a session. Checking validity first keeps the
+		// hold to the case it was written for.
+		if _, ok := appstate.Transition(SessionAtom.Global().Get(), ev); !ok {
+			return
+		}
+		if ShouldHoldExpiry(dirtyCheck) {
+			PendingExpiryAtom.Global().Set(true)
+			return
+		}
 	}
 	applyTransition(ev)
 }

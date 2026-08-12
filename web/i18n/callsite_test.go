@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"io/fs"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -45,6 +46,16 @@ import (
 // not statically recoverable here, and "defined nowhere" is the failure that
 // actually reaches the screen.
 func TestEveryCallSiteKeyIsDefined(t *testing.T) {
+	// Host-only: this walks web/pages and web/shell on disk, and Go's js
+	// syscall layer has no O_DIRECTORY, so a directory walk cannot run in a
+	// browser build at all. Nothing is lost by skipping there — the source
+	// tree it reads is identical whichever way the tests were compiled, and
+	// the host run covers it every time. See scripts/coverage-wasm.sh for why
+	// this package is now built under wasm as well.
+	if runtime.GOOS == "js" {
+		t.Skip("scans the source tree; directory reads are unsupported in a js/wasm build")
+	}
+
 	defined := map[string]bool{}
 	for _, cat := range []gwci18n.NamespaceCatalog{
 		authMessages, commonMessages, shellMessages,

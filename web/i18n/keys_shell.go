@@ -44,6 +44,14 @@ const (
 	// landing on /login with no explanation for why they're there.
 	KeyShellGuardRedirectNotice = "guard.redirectNotice"
 
+	// KeyShellSessionExpiredNotice is the same idea for the case that
+	// actually happens: not a deep link while signed out, but a session that
+	// died under a page already open. The wording says what happened AND
+	// that nothing was wrong with what they did — an admin bounced to a login
+	// form with no explanation cannot tell an expiry from a mistake of their
+	// own, and will go looking for the mistake.
+	KeyShellSessionExpiredNotice = "session.expiredNotice"
+
 	// KeyShellNotImplemented is pages.go's per-route placeholder,
 	// interpolated with {path} = the route that has no registered body
 	// yet. TODOS.md D6-09 requires this go through
@@ -94,15 +102,13 @@ const (
 	KeyShellHeaderSignOutBusy    = "header.signOut.busy"
 	KeyShellHeaderSignOutError   = "header.signOut.error"
 
-	// KeyShellHeaderTheme* back the appearance control (theme.go). The
-	// label names what the control is FOR ("Appearance") rather than what
-	// it currently shows, and each option is stated as the thing you get,
-	// not as a verb — a control that reads "Dark" in dark mode and "Light"
-	// in light mode is ambiguous about whether it reports or acts.
-	KeyShellHeaderThemeLabel  = "header.theme.label"
-	KeyShellHeaderThemeSystem = "header.theme.system"
-	KeyShellHeaderThemeLight  = "header.theme.light"
-	KeyShellHeaderThemeDark   = "header.theme.dark"
+	// The four KeyShellHeaderTheme* constants were removed 2026-08-11 along
+	// with the header control they labelled: the theme moved into Settings →
+	// Appearance, beside the new language selector, and its copy now lives
+	// in the settings namespace as settings.appearance.theme.* (keys_settings
+	// .go). Noted rather than silently deleted so the next person to grep
+	// "header.theme" finds where it went — the same treatment the removed
+	// settings.security.signOut.* keys got in keys_settings.go.
 )
 
 var shellMessages = gwci18n.NamespaceCatalog{
@@ -124,6 +130,8 @@ var shellMessages = gwci18n.NamespaceCatalog{
 
 	KeyShellGuardRedirectNotice: {Text: "You were redirected because you need to sign in first."},
 
+	KeyShellSessionExpiredNotice: {Text: "Your session expired, so you were signed out. Sign in to pick up where you left off."},
+
 	KeyShellNotImplemented: {Text: "Page not yet implemented: {path}"},
 
 	KeyShellHeaderNavLabel:    {Text: "Primary navigation"},
@@ -140,9 +148,4 @@ var shellMessages = gwci18n.NamespaceCatalog{
 	// no apology and nothing vague — the register the rest of this
 	// catalogue's errors use.
 	KeyShellHeaderSignOutError: {Text: "Sign out failed. Try again."},
-
-	KeyShellHeaderThemeLabel:  {Text: "Appearance"},
-	KeyShellHeaderThemeSystem: {Text: "Match system"},
-	KeyShellHeaderThemeLight:  {Text: "Light"},
-	KeyShellHeaderThemeDark:   {Text: "Dark"},
 }

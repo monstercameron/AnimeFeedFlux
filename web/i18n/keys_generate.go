@@ -148,9 +148,18 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.rail.lastBuild":          {Text: "Last build"},
 	"generate.rail.nextRun":            {Text: "Next run"},
 	"generate.rail.nextRunUnavailable": {Text: "unavailable"},
-	"generate.rail.runNow":             {Text: "Run now"},
-	"generate.rail.disable":            {Text: "Disable"},
-	"generate.rail.enable":             {Text: "Enable"},
+	// {arg1} is the feed title, so the ⋯ trigger has a name that says which
+	// row it belongs to rather than twenty-five identical "Actions".
+	"generate.rail.actionsFor":   {Text: "Actions for {arg1}"},
+	"generate.rail.delete":       {Text: "Delete feed"},
+	"generate.rail.delete.title": {Text: "Delete this feed?"},
+	// {arg1} the feed title, {arg2} the slug an operator must type.
+	"generate.rail.delete.message":  {Text: "Deleting {arg1} stops its scheduled runs and its feed URL will no longer resolve. Existing subscribers will see the feed disappear. Type {arg2} to confirm."},
+	"generate.rail.delete.error":    {Text: "Couldn't delete that feed."},
+	"generate.rail.delete.conflict": {Text: "That feed changed while this page was open. Refresh and try again."},
+	"generate.rail.runNow":          {Text: "Run now"},
+	"generate.rail.disable":         {Text: "Disable"},
+	"generate.rail.enable":          {Text: "Enable"},
 	// generate.rail.enabledLabel is web/ui.Toggle's visible label (adopted
 	// in render_rail.go in place of the old two-state "Enable"/"Disable"
 	// verb button) — a real switch names the STATE it shows ("Enabled",
@@ -166,7 +175,10 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.rail.slugPath": {Text: "/{arg1}"},
 
 	// Sampler (render_sampler.go, logic.go).
-	"generate.sampler.selectOrSaveFeed":          {Text: "Select or save a feed to sample it."},
+	// No longer "select or SAVE": SampleService takes a SampleDraft, so a
+	// preview runs against whatever is on screen, saved or not. The copy said
+	// otherwise for as long as that was true and kept saying it afterwards.
+	"generate.sampler.selectOrSaveFeed":          {Text: "Pick a feed to preview. Unsaved prompt edits are included."},
 	"generate.sampler.estimateUnavailable":       {Text: "Estimate unavailable"},
 	"generate.sampler.estimatedCost":             {Text: "Estimated cost: {arg1}"},
 	"generate.sampler.size":                      {Text: "Size"},
@@ -176,7 +188,7 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.sampler.cancel":                    {Text: "Cancel"},
 	"generate.sampler.disconnected":              {Text: "Disconnected — sampling paused."},
 	"generate.sampler.streaming":                 {Text: "Streaming…"},
-	"generate.sampler.empty":                     {Text: "No candidates yet."},
+	"generate.sampler.empty":                     {Text: "No candidates yet — press Preview to generate one."},
 	"generate.sampler.groundedSources":           {Text: "Grounded sources"},
 	"generate.sampler.failedLinks":               {Text: "Failed links"},
 	"generate.sampler.candidateCost":             {Text: "Candidate cost"},
@@ -199,6 +211,7 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	// Page-level fallback (render.go, before real data is wired).
 	// --- The workbench layout (web/pages/generate/render_workbench.go) ------
 	"generate.workbench.feed":            {Text: "Feed"},
+	"generate.workbench.newFeedOption":   {Text: "New feed — not saved yet"},
 	"generate.workbench.chooseFeed":      {Text: "Choose a feed…"},
 	"generate.workbench.stakes.disabled": {Text: "Disabled — scheduled runs will not fire"},
 	// {arg1} the cron expression, {arg2} its timezone.
@@ -207,9 +220,19 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.workbench.stakes.budget":    {Text: "{arg1} tokens/day · {arg2} runs/day"},
 	"generate.workbench.retryFeeds":       {Text: "Retry"},
 	"generate.workbench.feedsUnavailable": {Text: "Couldn't load feeds"},
-	"generate.workbench.newFeed":          {Text: "+ New"},
-	"generate.workbench.model":            {Text: "Model"},
-	"generate.workbench.modelDefault":     {Text: "Default model"},
+	"generate.workbench.saveChanges":      {Text: "Save"},
+	"generate.workbench.saving":           {Text: "Saving…"},
+	// The rest state: not a call to action, a statement that there is nothing
+	// to save. It is the same control, so it says so in the same place.
+	"generate.workbench.saved":        {Text: "Saved"},
+	"generate.workbench.menu.label":   {Text: "Actions for {arg1}"},
+	"generate.workbench.menu.runNow":  {Text: "Run now"},
+	"generate.workbench.menu.enable":  {Text: "Enable feed"},
+	"generate.workbench.menu.disable": {Text: "Disable feed"},
+	"generate.workbench.menu.delete":  {Text: "Delete feed"},
+	"generate.workbench.newFeed":      {Text: "New feed"},
+	"generate.workbench.model":        {Text: "Model"},
+	"generate.workbench.modelDefault": {Text: "Default model"},
 	// {arg1} is a model id the recipe names but the provider's list does not
 	// include — a deprecated id, or one served by a custom endpoint.
 	"generate.workbench.modelUnlisted":   {Text: "{arg1} (not listed)"},
@@ -228,10 +251,34 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.workbench.sizeN":           {Text: "{arg1}×"},
 	// The verb of the page. "Preview", not "Sample": it names what you get
 	// back, and it is the same word the pane it fills is called.
-	"generate.workbench.preview":        {Text: "Preview"},
-	"generate.workbench.previewing":     {Text: "Generating…"},
-	"generate.workbench.recipeSettings": {Text: "Recipe settings — slug, schedule, budgets, window, sources"},
-	"generate.workbench.insertVariable": {Text: "Insert:"},
+	"generate.workbench.preview":    {Text: "Preview"},
+	"generate.workbench.previewing": {Text: "Generating…"},
+	// {arg1} is how many feeds exist, so the collapsed summary still answers
+	// "do I have any?" without being opened.
+	// The run-status line under the strip (web/pages/generate/render_runstatus.go).
+	// {arg1} is the feed's slug.
+	"generate.runStatus.starting": {Text: "Starting a run for {arg1}…"},
+	"generate.runStatus.running":  {Text: "Running {arg1} — this can take a minute."},
+	// {arg1} items added, {arg2} rejected, {arg3} tokens, {arg4} cost.
+	"generate.runStatus.succeeded": {Text: "Run finished: {arg1} added, {arg2} rejected, {arg3} tokens, {arg4}."},
+	// A budget cap is not a failure, and saying so stops it reading as one.
+	"generate.runStatus.skipped": {Text: "Run skipped — a budget cap stopped it before the provider was called."},
+	// {arg1} is the error kind (§8's taxonomy), so a provider blip does not
+	// read the same as a broken recipe.
+	"generate.runStatus.failed": {Text: "Run failed: {arg1}. Open the history for the log."},
+	// {arg1} is the refusal's own message.
+	"generate.runStatus.refused":             {Text: "Couldn't start the run: {arg1}"},
+	"generate.runStatus.viewHistory":         {Text: "See this feed's runs"},
+	"generate.runStatus.dismiss":             {Text: "Dismiss this run's status"},
+	"generate.runStatus.errorKind.transient": {Text: "a temporary provider or network problem"},
+	"generate.runStatus.errorKind.invalid":   {Text: "the model's output did not pass validation"},
+	"generate.runStatus.errorKind.fatal":     {Text: "a configuration problem that will not fix itself"},
+	"generate.runStatus.errorKind.unknown":   {Text: "an unrecorded reason"},
+	"generate.workbench.menu.history":        {Text: "See this feed's runs"},
+	"generate.rail.history":                  {Text: "See this feed's runs"},
+	"generate.workbench.feedsSummary":        {Text: "Feeds ({arg1}) — status, schedule, spend, delete"},
+	"generate.workbench.recipeSettings":      {Text: "Recipe settings — slug, schedule, budgets, window, sources"},
+	"generate.workbench.insertVariable":      {Text: "Insert:"},
 	// {arg1} = the template identifier, e.g. {{.Today}}.
 	"generate.workbench.insertNamed": {Text: "Insert {arg1} at the cursor"},
 	"generate.workbench.noFeed":      {Text: "Pick a feed above, or start a new one, to write its prompts."},
@@ -260,4 +307,76 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	// a screen reader. {arg1} is the row's own label.
 	"generate.urls.copyNamed": {Text: "Copy the {arg1} URL"},
 	"generate.urls.baseUnset": {Text: "Set a public base URL in Settings → Publishing to see subscribe URLs."},
+
+	// Schedule builder (render_schedule.go / schedulecontrol.go). Replaces the
+	// raw cron field: cron cannot express "every other Thursday", "every 3
+	// weeks" or "the second Tuesday" at all, so the control had to change
+	// shape before the vocabulary could.
+	"generate.editor.schedule.repeats":             {Text: "Repeats"},
+	"generate.editor.schedule.every":               {Text: "Every"},
+	"generate.editor.schedule.startingOn":          {Text: "Starting on"},
+	"generate.editor.schedule.startingHelp":        {Text: "Which cycle the interval counts from. It only matters when you repeat every 2nd, 3rd and so on — it is what decides which Thursday “every other Thursday” means."},
+	"generate.editor.schedule.onDays":              {Text: "On these days"},
+	"generate.editor.schedule.onThe":               {Text: "On the"},
+	"generate.editor.schedule.dayOfMonth":          {Text: "Day of the month"},
+	"generate.editor.schedule.monthlyMode":         {Text: "Repeat on"},
+	"generate.editor.schedule.monthlyMode.day":     {Text: "a day of the month"},
+	"generate.editor.schedule.monthlyMode.weekday": {Text: "a weekday"},
+	"generate.editor.schedule.timeOfDay":           {Text: "Time of day"},
+
+	"generate.editor.schedule.unit.day.singular":   {Text: "day"},
+	"generate.editor.schedule.unit.day.plural":     {Text: "days"},
+	"generate.editor.schedule.unit.week.singular":  {Text: "week"},
+	"generate.editor.schedule.unit.week.plural":    {Text: "weeks"},
+	"generate.editor.schedule.unit.month.singular": {Text: "month"},
+	"generate.editor.schedule.unit.month.plural":   {Text: "months"},
+	"generate.editor.schedule.unit.year.singular":  {Text: "year"},
+	"generate.editor.schedule.unit.year.plural":    {Text: "years"},
+
+	"generate.editor.schedule.weekday.sunday":          {Text: "Sunday"},
+	"generate.editor.schedule.weekday.monday":          {Text: "Monday"},
+	"generate.editor.schedule.weekday.tuesday":         {Text: "Tuesday"},
+	"generate.editor.schedule.weekday.wednesday":       {Text: "Wednesday"},
+	"generate.editor.schedule.weekday.thursday":        {Text: "Thursday"},
+	"generate.editor.schedule.weekday.friday":          {Text: "Friday"},
+	"generate.editor.schedule.weekday.saturday":        {Text: "Saturday"},
+	"generate.editor.schedule.weekday.short.sunday":    {Text: "Sun"},
+	"generate.editor.schedule.weekday.short.monday":    {Text: "Mon"},
+	"generate.editor.schedule.weekday.short.tuesday":   {Text: "Tue"},
+	"generate.editor.schedule.weekday.short.wednesday": {Text: "Wed"},
+	"generate.editor.schedule.weekday.short.thursday":  {Text: "Thu"},
+	"generate.editor.schedule.weekday.short.friday":    {Text: "Fri"},
+	"generate.editor.schedule.weekday.short.saturday":  {Text: "Sat"},
+
+	"generate.editor.schedule.ordinal.first":  {Text: "first"},
+	"generate.editor.schedule.ordinal.second": {Text: "second"},
+	"generate.editor.schedule.ordinal.third":  {Text: "third"},
+	"generate.editor.schedule.ordinal.fourth": {Text: "fourth"},
+	"generate.editor.schedule.ordinal.last":   {Text: "last"},
+	"generate.editor.schedule.lastDayOption":  {Text: "Last day of the month"},
+
+	// Readback. Assembled from keys rather than concatenated fragments — a
+	// sentence built by joining words assumes English word order (PLAN.md
+	// §12.6).
+	"generate.editor.schedule.readback.at":            {Text: "{arg1} ({arg2})"},
+	"generate.editor.schedule.readback.daily":         {Text: "Every day at {arg1}."},
+	"generate.editor.schedule.readback.dailyEvery":    {Text: "Every {arg1} days at {arg2}."},
+	"generate.editor.schedule.readback.weekly":        {Text: "Every week on {arg1}, at {arg2}."},
+	"generate.editor.schedule.readback.weeklyEvery":   {Text: "Every {arg1} weeks on {arg2}, at {arg3}."},
+	"generate.editor.schedule.readback.monthly":       {Text: "Every month on {arg1}, at {arg2}."},
+	"generate.editor.schedule.readback.monthlyEvery":  {Text: "Every {arg1} {arg2} on {arg3}, at {arg4}."},
+	"generate.editor.schedule.readback.onDay":         {Text: "day {arg1}"},
+	"generate.editor.schedule.readback.lastDay":       {Text: "the last day"},
+	"generate.editor.schedule.readback.nthWeekday":    {Text: "the {arg1} {arg2}"},
+	"generate.editor.schedule.readback.listSeparator": {Text: ", "},
+	"generate.editor.schedule.readback.listAnd":       {Text: "{arg1} and {arg2}"},
+
+	"generate.editor.schedule.preview":      {Text: "Next runs"},
+	"generate.editor.schedule.previewHelp":  {Text: "Worked out here from the settings above, not from what is saved. Shown before the small per-feed offset the scheduler adds to spread load."},
+	"generate.editor.schedule.previewNone":  {Text: "This schedule never runs. Check the day and the interval."},
+	"generate.editor.schedule.previewError": {Text: "Can’t work out the next runs: {arg1}"},
+
+	// The cron escape hatch, kept but demoted.
+	"generate.editor.schedule.advanced":     {Text: "Use a cron expression instead"},
+	"generate.editor.schedule.advancedHelp": {Text: "For shapes the builder does not cover, such as every 15 minutes, or weekdays at 9 and 17. Leave this off unless you need one."},
 }

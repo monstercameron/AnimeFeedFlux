@@ -8,6 +8,7 @@ import (
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
 	gwci18n "github.com/monstercameron/GoWebComponents/v5/i18n"
 	"github.com/monstercameron/GoWebComponents/v5/router"
+	"github.com/monstercameron/GoWebComponents/v5/state"
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
 	afi18n "github.com/monstercameron/AnimeFeedFlux/web/i18n"
@@ -103,8 +104,14 @@ type shellWrapperProps struct {
 // fit rather than inventing an artificial parent route.
 func renderShellWrapper(props shellWrapperProps) ui.Node {
 	return h.Fragment(
+		// renderSessionRoute renders nothing; it watches the session state and
+		// sends an expired one back to /login (sessionroute.go). It is mounted
+		// FIRST so its effect is registered before the page body's own — the
+		// page should not start a fetch for a route it is about to leave.
+		ui.CreateElement(renderSessionRoute, props),
 		ui.CreateElement(renderHeader, nil),
 		ui.CreateElement(renderBanner, nil),
+		ui.CreateElement(renderRedirectNotice, nil),
 		ui.CreateElement(renderExpiryModal, nil),
 		h.Main(h.ClassStr("af-content"), renderPageBody(props.Path)),
 	)
@@ -142,11 +149,32 @@ func Bundle() *gwci18n.Bundle {
 // mount point that still covers the banner and expiry modal (both live
 // inside renderShellWrapper, this component's only child) on every route,
 // exactly as D0-21 requires — never a second Provider mounted deeper.
+// It is also the one component in the app that SUBSCRIBES to the chosen
+// language, and that subscription is what makes the language selector work
+// everywhere at once. gwci18n.Runtime resolves through the locale captured
+// when the Provider rendered, so switching languages has to re-render this
+// component — and because GWC's reconciler has no props-equality bailout for
+// function components, re-rendering here re-runs the entire tree below,
+// which is every page, every panel and every control. Nothing downstream
+// subscribes to anything or needs to know this file exists.
+//
+// The atom read must stay UNCONDITIONAL and first, per the hook rules this
+// package documents throughout: it is a hook call in a component whose other
+// content is a single static child, so there is no branch it could fall
+// behind.
 func renderShellRoot(props shellWrapperProps) ui.Node {
+	locale := state.UseAtomKey(LocaleAtom)
 	return gwci18n.Provider(gwci18n.ProviderProps{
-		Bundle:        i18nBundle,
-		CurrentLocale: afi18n.DefaultLocale,
-		Child:         ui.CreateElement(renderShellWrapper, props),
+		Bundle: i18nBundle,
+		// Not afi18n.DefaultLocale. That constant was the whole reason the
+		// app was English-only: every catalogue the Bundle had was reachable,
+		// and the Provider asked for exactly one of them, forever.
+		CurrentLocale: locale.Get(),
+		// The fallback stays pinned to the default locale so a key missing
+		// from a translated catalogue renders its English text rather than
+		// its own raw key.
+		FallbackLocale: afi18n.DefaultLocale,
+		Child:          ui.CreateElement(renderShellWrapper, props),
 	})
 }
 

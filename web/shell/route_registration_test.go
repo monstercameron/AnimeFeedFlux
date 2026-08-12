@@ -46,7 +46,23 @@ import (
 // needs a browser, a dialed connection, and the composition root's
 // wirePages — out of reach for a host-compiled test either way).
 func TestAllFiveRoutesRegistered(t *testing.T) {
-	want := []string{"/generate", "/history", "/login", "/recover", "/settings"}
+	// Seven, not five, since /history/:tab and /settings/:section were added —
+	// both are real registered page bodies, not decoration, and a reload on
+	// /settings/provider depends on this one existing.
+	//
+	// This assertion was stale and could not have caught anything: it is a
+	// js-only test, and until scripts/coverage-wasm.sh existed nothing ever
+	// COMPILED it, let alone ran it. The list it checked had been wrong since
+	// the addressable-tabs work landed. Sorted, because RegisteredPaths sorts.
+	want := []string{
+		"/generate",
+		"/history",
+		"/history/:tab",
+		"/login",
+		"/recover",
+		"/settings",
+		"/settings/:section",
+	}
 
 	got := shell.RegisteredPaths()
 

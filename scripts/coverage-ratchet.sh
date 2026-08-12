@@ -15,6 +15,18 @@
 # ordering (-shuffle=on) and the odd untested branch that shifts the total
 # by a fraction of a point — not to forgive a real regression.
 #
+# What is MEASURED matters as much as the threshold. Since 2026-08-11 the
+# profile this reads is built over `go list ./... | grep -v /gen/`, not
+# `./...`: gen/aff/v1 is protoc output, ~3,600 statements nobody wrote, and
+# including it reported the repository at 62% while the hand-written code sat
+# at 79%. That gap is not a coverage problem, it is a measurement problem, and
+# the only way to close it by writing tests would be a reflection walk calling
+# 1,191 generated getters — the exact "tests written to touch lines rather
+# than assert behaviour" this file's opening paragraph exists to reject. See
+# the Makefile's COVERPKG comment and the CI workflow's Coverage ratchet step,
+# which must stay in agreement with each other or the ratchet compares two
+# different populations.
+#
 # If current coverage is HIGHER than the baseline, this only prints the new
 # number and how to adopt it. It never rewrites the baseline file itself: a
 # ratchet that silently raises its own floor on every green run would just

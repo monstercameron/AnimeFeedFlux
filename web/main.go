@@ -36,6 +36,25 @@ import (
 	"strconv"
 	"time"
 
+	// The IANA timezone database, compiled INTO the bundle.
+	//
+	// time.LoadLocation reads /usr/share/zoneinfo, and a browser has no
+	// filesystem — so every LoadLocation in web/ (i18n/adapter.go's
+	// FormatDateTime, and both page-level Formatters) fails there and falls
+	// back to UTC. The effect is quiet and wrong in the worst way: a feed
+	// scheduled "7am America/New_York" renders its times as UTC while the
+	// label beside them still says New York, so the operator reads a
+	// five-hour lie with no indication anything failed.
+	//
+	// It does not reproduce under `go test` — node HAS a filesystem, so the
+	// wasm test runner resolves zones fine and the browser is the only place
+	// this breaks.
+	//
+	// Costs roughly 450KB uncompressed in a bundle that is already 34MB raw
+	// (7MB gzipped, A8-49 tracks shrinking it), which is noise against being
+	// correct about the thing this entire application schedules on.
+	_ "time/tzdata"
+
 	gwci18n "github.com/monstercameron/GoWebComponents/v5/i18n"
 	"github.com/monstercameron/GoWebComponents/v5/utils"
 
@@ -139,8 +158,15 @@ type bundleTranslator struct {
 	ns     string
 }
 
+// T resolves against afi18n.CurrentLocale() — read on every call, never
+// captured in the struct — with DefaultLocale as the fallback. This is the
+// single seam that makes the language selector work at all: wirePages runs
+// once at boot and hands each page a translator it keeps forever, so a
+// locale captured here would be the language the app started in, for the
+// life of the tab. Falling back to DefaultLocale means a key missing from a
+// non-English catalogue renders its English text rather than its own name.
 func (t bundleTranslator) T(key string, args ...any) string {
-	return t.bundle.Translate(afi18n.DefaultLocale, t.ns, key, positionalArguments(args), afi18n.DefaultLocale)
+	return t.bundle.Translate(afi18n.CurrentLocale(), t.ns, key, positionalArguments(args), afi18n.DefaultLocale)
 }
 
 // positionalArguments mirrors web/i18n.NewLabelResolver's own unexported
@@ -180,6 +206,13 @@ func (bundleFormatters) RelativeTime(t, now time.Time) string {
 	return afi18n.FormatRelativeTime(t, now)
 }
 
+// Number renders a count with locale grouping — token counts on this page run
+// to four and five digits, and "1761 tokens" is harder to read at a glance
+// than "1,761".
+func (bundleFormatters) Number(v int64) string {
+	return afi18n.FormatCount(v)
+}
+
 // Percent renders novelty similarity. Two digits, because the difference
 // between 87% and 87.34% is never the difference between accepting a
 // candidate and rejecting it.
@@ -201,5 +234,6 @@ type bundleCatalog struct {
 }
 
 func (c bundleCatalog) T(key string, args map[string]any) string {
-	return c.bundle.Translate(afi18n.DefaultLocale, afi18n.NSHistory, key, gwci18n.Arguments(args), afi18n.DefaultLocale)
+	// Same read-at-call-time rule as bundleTranslator.T above.
+	return c.bundle.Translate(afi18n.CurrentLocale(), afi18n.NSHistory, key, gwci18n.Arguments(args), afi18n.DefaultLocale)
 }

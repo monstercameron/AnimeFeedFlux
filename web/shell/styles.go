@@ -62,6 +62,23 @@ func emitShellStyles() {
 	css.Global(".af-banner--hidden", css.Display.None)
 	css.Global(".af-banner--visible", css.Display.Block)
 
+	// .af-notice: the "here is why you are looking at this screen" line
+	// (sessionroute.go's renderRedirectNotice). Deliberately NOT the banner's
+	// danger fill: an expired session is ordinary and expected, not a fault,
+	// and painting it the same red as "the control plane is unreachable"
+	// would teach the operator to read that red as noise. Surface fill with a
+	// muted accent rule instead — informational weight.
+	css.Global(".af-notice",
+		css.PaddingY(tokens.Space(2)),
+		css.PaddingX(tokens.Space(4)),
+		css.Bg(tokens.Color(tokens.RoleSurface)),
+		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.BorderBottom(css.Px(1), tokens.Color(tokens.RoleAccent)),
+		css.TextAlign.Center,
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+		bodyFont(),
+	)
+
 	// .af-expiry-modal: D0-08's blocking "you have unsaved work" hold.
 	// expiry.go never renders this with the --hidden class (a closed modal
 	// renders h.Fragment(), nothing at all — see that file's own doc comment
@@ -335,50 +352,18 @@ func emitHeaderStyles() {
 		css.Raw("outline", "2px solid "+string(tokens.Color(tokens.RoleFocusRing))),
 		css.Raw("outline-offset", "2px"),
 	)
-	// .af-header__theme: the appearance control (header.go's
-	// renderThemeControl). One hairline-bordered group of three segments
-	// rather than three loose buttons, because the three are one choice —
-	// the border is what says "pick one of these", and it is the same
-	// `rule` hairline the rest of the chrome separates with, not a new
-	// device.
-	css.Global(".af-header__theme",
-		css.Display.Flex,
-		css.Items.Center,
-		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
-		css.Rounded(tokens.Radius(tokens.RadiusFull)),
-		css.Raw("overflow", "hidden"),
-		css.Raw("margin-inline-start", "auto"),
-	)
-	css.Global(".af-header__theme-btn",
-		css.Raw("appearance", "none"),
-		css.Raw("border", "0"),
-		css.Bg(css.Color("transparent")),
-		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
-		css.FontSize(tokens.FontSize(tokens.TextXs)),
-		css.PaddingX(tokens.Space(3)),
-		css.PaddingY(tokens.Space(1)),
-		css.Cursor.Pointer,
-		bodyFont(),
-		// The segments are the app's smallest interactive targets, so the
-		// transition is the only thing that has to make the state change
-		// legible; it collapses under prefers-reduced-motion with every
-		// other duration, since the value is a token (web/tokens).
-		css.Raw("transition", "background-color "+string(tokens.Duration(tokens.DurationFast))+" "+string(tokens.Easing(tokens.EasingStd))),
-	)
-	css.Global(".af-header__theme-btn:hover",
-		css.TextColor(tokens.Color(tokens.RoleText)),
-	)
-	// The selected segment is filled, not merely coloured: at this size a
-	// colour-only difference between three adjacent words is easy to miss,
-	// and aria-pressed already carries the state for anyone not looking.
-	css.Global(".af-header__theme-btn--current",
-		css.Bg(tokens.Color(tokens.RoleAccent)),
-		css.TextColor(tokens.Color(tokens.RoleAccentFg)),
-	)
-	css.Global(".af-header__theme-btn:focus-visible",
-		css.Raw("outline", "2px solid "+string(tokens.Color(tokens.RoleFocusRing))),
-		css.Raw("outline-offset", "-2px"),
-	)
+	// The .af-header__theme* rules that stood here were removed 2026-08-11
+	// with the control they styled (header.go's renderThemeControl). The
+	// segmented-control treatment they defined was not lost: it moved to
+	// web/pages/settings/styles.go as .af-appearance__segment*, which is
+	// where the theme and language controls now live.
+	//
+	// One layout detail went with them and is worth stating: that group
+	// carried margin-inline-start:auto, which is what pushed it and sign-out
+	// to the right edge. .af-header is justify-content:space-between and now
+	// has exactly three children (brand, nav, sign-out), so the same
+	// right-alignment falls out of the flex distribution without anyone
+	// asking for it.
 
 	css.Global(".af-header__signout-error",
 		css.FontSize(tokens.FontSize(tokens.TextXs)),
