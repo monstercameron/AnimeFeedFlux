@@ -1,0 +1,58 @@
+# Local test overlay for compose.yaml (TODOS.md C0-24).
+#
+# This file exists to make one claim true: the configuration that ships is the
+# configuration that gets tested. It is an OVERLAY, never a copy —
+#
+#   docker compose -f deploy/compose.yaml -f deploy/compose.test.yaml up -d
+#
+# — so `read_only`, `cap_drop: ALL`, `no-new-privileges`, the tmpfs, the memory
+# and pid limits, the healthcheck and the log caps all come from the production
+# file and are exercised exactly as written. A second, standalone compose file
+# would have been easier to write and would have drifted from production the
+# first time either one changed, which is precisely the failure this is meant
+# to catch.
+#
+# Only four things differ, and each is here because it MUST differ locally:
+#
+#   1. build instead of image — there is no ghcr.io tag for uncommitted work.
+#   2. a distinct container name, so a stray `docker rm` here can never take
+#      out a real deployment.
+#   3. a distinct volume name, so a test run cannot touch animefeedflux-data —
+#      the volume the production comment correctly calls "the only copy of
+#      every item ever generated".
+#   4. AFF_PUBLIC_BASE_URL points at the loopback port, because guids and
+#      atom:link rel=self are built from it and the verifier checks them.
+#
+# The env file comes from AFF_ENV_FILE (see compose.yaml). scripts/check-compose.sh
+# writes a throwaway one with fake values; nothing resembling a credential is
+# committed for this.
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: test
+        COMMIT: local
+        BUILD_DATE: unknown
+    # Overrides compose.yaml's ghcr.io tag. Named distinctly from anything a
+    # release would produce so `docker images` never ambiguates the two.
+    image: animefeedflux:compose-test
+
+    container_name: animefeedflux-test
+
+    environment:
+      # Overrides merge per key, so everything else in compose.yaml's
+      # environment block (DB path, addresses, backup dir, static dir) is
+      # inherited unchanged.
+      AFF_PUBLIC_BASE_URL: http://127.0.0.1:9310
+      AFF_ALLOWED_ORIGINS: http://127.0.0.1:9311
+      AFF_LOG_LEVEL: info
+      # Generation off: a test container must never be one provider key away
+      # from spending real money on a scheduled run (RULE-1).
+      AFF_GENERATION_ENABLED: "false"
+
+volumes:
+  data:
+    name: animefeedflux-test-data

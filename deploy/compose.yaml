@@ -28,8 +28,13 @@ services:
     # Secrets come from a host file at 0600, never from an ENV line in the
     # Dockerfile and never a literal here. An image layer is readable by anyone
     # who can pull it, and this file is in git (RULE-2).
+    #
+    # The path is a variable ONLY so compose.test.yaml can point at a throwaway
+    # file of fake values and still exercise THIS file — every hardening line
+    # below is then under test rather than duplicated into a second compose
+    # file that drifts (C0-24). Production sets nothing and gets the default.
     env_file:
-      - /etc/animefeedflux/animefeedflux.env
+      - ${AFF_ENV_FILE:-/etc/animefeedflux/animefeedflux.env}
 
     environment:
       AFF_DB_PATH: /var/lib/animefeedflux/animefeedflux.db

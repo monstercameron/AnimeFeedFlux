@@ -9,18 +9,34 @@
 .githooks
 
 # Local working state — never source, and never in an image.
+#
+# Patterns here are filepath.Match-style, NOT gitignore-style: `*` does not
+# cross a `/`, and a bare pattern is matched against the whole path rather than
+# applied at every directory level. So `*.db` alone excludes a database at the
+# repo root and silently keeps `.devrun/aff.db` — which is the exact file this
+# section exists to keep out. Every pattern that must match at any depth is
+# written `**/`.
 .env
 .env.*
-*.key
+**/*.key
 recovery-codes*
-*.db
-*.db-shm
-*.db-wal
-backups/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/backups/
+
+# The local dev run directory: AFF_SECRET_KEY, the dev admin password and TOTP
+# secret, and a live database (see .devrun/env.sh). It never reaches the
+# published image — the runtime stage copies three explicit paths out of the
+# build stage and this is not one of them — but without this line it is
+# uploaded in the build context and baked into a build-stage layer, which is
+# exported by registry-backed build caches (RULE-2).
+.devrun/
 
 # Build output; the image builds its own.
 bin/
 dist/
+web/dist/
 *.exe
 
 # Docs do not affect the binary, and excluding them means a typo fix does not

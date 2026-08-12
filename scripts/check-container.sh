@@ -39,6 +39,21 @@
 
 set -eu
 
+# Windows/git-bash only, and a no-op everywhere else: MSYS rewrites anything
+# that looks like a POSIX path in an argument before the program sees it, so
+# `-v vol:/var/lib/animefeedflux` reaches docker as
+# `-v vol:C:/Program Files/Git/var/lib/animefeedflux`. The container then boots
+# with NOTHING mounted at the path AFF_DB_PATH points at and SQLite fails with
+# "unable to open database file (14)" — which reads exactly like a volume
+# ownership or read-only-filesystem bug and is neither.
+#
+# Found by this script failing on Windows while scripts/check-compose.sh passed
+# against the same image: compose reads its paths from YAML, which MSYS never
+# touches, so only the CLI-flag path was affected.
+MSYS_NO_PATHCONV=1
+MSYS2_ARG_CONV_EXCL='*'
+export MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
+
 IMAGE_AMD64="animefeedflux-check:amd64"
 IMAGE_ARM64="animefeedflux-check:arm64"
 CONTAINER_NAME="animefeedflux-check-run"
@@ -83,6 +98,8 @@ skip_loudly() {
         printf '      -e AFF_PUBLISH_ADDR=0.0.0.0:9310 -e AFF_ADMIN_ADDR=0.0.0.0:9311 \\\n'
         printf '      -e AFF_SECRET_KEY=check-secret-key-0123456789 \\\n'
         printf '      -e SCHEMAFLUX_API_KEY=sk-check-placeholder \\\n'
+        printf '      -e AFF_PUBLIC_BASE_URL=http://127.0.0.1:9310 \\\n'
+        printf '      -e AFF_ALLOWED_ORIGINS=http://127.0.0.1:9311 \\\n'
         printf '      -p 19310:9310 -v animefeedflux-check-data:/var/lib/animefeedflux \\\n'
         printf '      animefeedflux-check:amd64\n'
         printf '  curl -sf http://127.0.0.1:19310/healthz\n'
@@ -98,6 +115,8 @@ skip_loudly() {
         printf '      -e AFF_PUBLISH_ADDR=0.0.0.0:9310 -e AFF_ADMIN_ADDR=0.0.0.0:9311 \\\n'
         printf '      -e AFF_SECRET_KEY=check-secret-key-0123456789 \\\n'
         printf '      -e SCHEMAFLUX_API_KEY=sk-check-placeholder \\\n'
+        printf '      -e AFF_PUBLIC_BASE_URL=http://127.0.0.1:9310 \\\n'
+        printf '      -e AFF_ALLOWED_ORIGINS=http://127.0.0.1:9311 \\\n'
         printf '      -p 19310:9310 -v animefeedflux-check-data:/var/lib/animefeedflux \\\n'
         printf '      animefeedflux-check:amd64\n'
         printf '  curl -sf http://127.0.0.1:19310/healthz   # must go healthy again, same volume\n'
@@ -137,6 +156,8 @@ else
         -e AFF_ADMIN_ADDR=0.0.0.0:9311 \
         -e AFF_SECRET_KEY=check-secret-key-0123456789 \
         -e SCHEMAFLUX_API_KEY=sk-check-placeholder \
+        -e AFF_PUBLIC_BASE_URL=http://127.0.0.1:9310 \
+        -e AFF_ALLOWED_ORIGINS=http://127.0.0.1:9311 \
         -p "${HOST_PORT}:9310" \
         -v "${VOLUME_NAME}:/var/lib/animefeedflux" \
         "$IMAGE_AMD64" >/tmp/check-container-run-amd64.log 2>&1 \
@@ -183,19 +204,32 @@ if [ "$arm64_build_rc" -ne 0 ]; then
 else
     log "C0-09: arm64 build succeeded (this host's builder can cross-build without failing). Now checking whether RUNNING it fails ..."
     arm64_run_rc=0
-    arm64_run_out="$(docker run --rm "$IMAGE_ARM64" healthcheck 2>&1)" || arm64_run_rc=$?
-    if [ "$arm64_run_rc" -ne 0 ]; then
-        log "C0-09: PASS — arm64 image built but FAILED to run natively on this amd64 host (rc=$arm64_run_rc)."
-        printf '%s\n' "$arm64_run_out" >&2
-        case "$arm64_run_out" in
-            *"exec format error"*|*"exec user process caused"*)
-                log "C0-09: signature confirmed as the expected 'exec format error' — recognize this on the droplet." ;;
-            *)
-                log "C0-09: failed for a DIFFERENT reason than exec-format — read the output above before assuming it's the arch mismatch." ;;
-        esac
-    else
-        warn "C0-09: arm64 image RAN on this amd64 host without error. This host's Docker Desktop is transparently emulating arm64 via QEMU, so the mismatch did not reproduce here. This is expected on Docker Desktop and NOT expected on a bare Linux host without qemu-user-static/binfmt registered (e.g. the droplet) — do not read this as 'the platform trap doesn't exist', only as 'this particular host works around it'."
-    fi
+    # The env matters here. Run bare, `healthcheck` exits non-zero simply
+    # because AFF_PUBLISH_ADDR is unset — which lands in the "it failed!"
+    # branch below and reports a mismatch that did not happen. Supplying the
+    # same config the amd64 run gets makes the exit code mean what this check
+    # needs it to mean: nonzero == the binary could not execute on this
+    # architecture, zero == it ran (i.e. something is emulating it).
+    arm64_run_out="$(docker run --rm \
+        -e AFF_PUBLISH_ADDR=0.0.0.0:9310 \
+        -e AFF_ADMIN_ADDR=0.0.0.0:9311 \
+        "$IMAGE_ARM64" healthcheck 2>&1)" || arm64_run_rc=$?
+    # Classify by the OUTPUT, not by the exit code alone. A nonzero exit does
+    # not mean the architecture mismatch reproduced: `healthcheck` is a client,
+    # so in a one-shot container with no server it exits nonzero with a dial
+    # error — which is proof the binary EXECUTED, i.e. the opposite of what
+    # this check is looking for. Only the loader's own refusal is the signature.
+    case "$arm64_run_out" in
+        *"exec format error"*|*"exec user process caused"*)
+            log "C0-09: PASS — the arm64 image could not execute on this amd64 host (rc=$arm64_run_rc)."
+            printf '%s\n' "$arm64_run_out" >&2
+            log "C0-09: signature confirmed as the expected 'exec format error' — recognize this on the droplet."
+            ;;
+        *)
+            warn "C0-09: the arm64 binary RAN on this amd64 host (rc=$arm64_run_rc, output below is the program's own, not the loader's). Docker Desktop is transparently emulating arm64 via QEMU, so the mismatch did NOT reproduce here. That is expected on Docker Desktop and NOT expected on a bare Linux host without qemu-user-static/binfmt registered (e.g. the droplet) — do not read this as 'the platform trap does not exist', only as 'this particular host works around it'. On the droplet the signature to expect is 'exec format error' at docker run, not at build."
+            printf '%s\n' "$arm64_run_out" >&2
+            ;;
+    esac
 fi
 
 # --- C0-19: restart survives with the volume intact -------------------------
@@ -210,6 +244,8 @@ if docker image inspect "$IMAGE_AMD64" >/dev/null 2>&1 && docker volume inspect 
         -e AFF_ADMIN_ADDR=0.0.0.0:9311 \
         -e AFF_SECRET_KEY=check-secret-key-0123456789 \
         -e SCHEMAFLUX_API_KEY=sk-check-placeholder \
+        -e AFF_PUBLIC_BASE_URL=http://127.0.0.1:9310 \
+        -e AFF_ALLOWED_ORIGINS=http://127.0.0.1:9311 \
         -p "${HOST_PORT}:9310" \
         -v "${VOLUME_NAME}:/var/lib/animefeedflux" \
         "$IMAGE_AMD64" >/tmp/check-container-run-restart.log 2>&1 \

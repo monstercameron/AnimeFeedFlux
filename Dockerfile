@@ -52,6 +52,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     sh scripts/build-web.sh
 
+# The empty, correctly-owned directory the runtime stage adopts as its data
+# directory. Created here because distroless has no shell to mkdir with, and
+# created EMPTY on purpose — see the runtime stage's comment on why /tmp was
+# the wrong donor.
+RUN mkdir -p /out/emptydata && chown 65532:65532 /out/emptydata
+
 # --- runtime -------------------------------------------------------------
 FROM gcr.io/distroless/static:nonroot
 
@@ -64,8 +70,15 @@ FROM gcr.io/distroless/static:nonroot
 # Bind mounts do NOT inherit ownership this way and must be chowned on the host.
 # distroless has no shell, so the directory is staged in the build stage with
 # the right ownership and copied across.
+#
+# It is staged as a directory created FOR this purpose, not as /tmp. Copying
+# /tmp was the original trick — it is guaranteed to exist and needs no mkdir —
+# but /tmp in the build stage is not empty: apk, `go build` and
+# scripts/build-web.sh all use it. Whatever they happened to leave behind was
+# copied in as the initial contents of the data directory, and therefore as the
+# initial contents of every fresh named volume.
 COPY --from=build --chown=65532:65532 /out/animefeedflux /usr/local/bin/animefeedflux
-COPY --from=build --chown=65532:65532 /tmp /var/lib/animefeedflux
+COPY --from=build --chown=65532:65532 /out/emptydata /var/lib/animefeedflux
 
 # web/build.sh's default SERVE_DIR is "<repo>/web/dist"; here that is
 # /src/web/dist inside the build stage. Landing it at /web/dist in the
