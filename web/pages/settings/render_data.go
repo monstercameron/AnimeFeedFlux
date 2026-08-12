@@ -256,7 +256,11 @@ func renderData() ui.Node {
 			),
 			Body: h.Fragment(
 				h.Show(exportErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.data.recipe.exportError")))),
-				h.Show(exportedTOML.Get() != "", h.Textarea(
+				// A whole TOML document as a prop value, constructed and
+				// cloned on every render of this page even with no export in
+				// hand. Last child of this Body fragment, so h.If is safe
+				// (A8-45).
+				h.If(exportedTOML.Get() != "", h.Textarea(
 					h.ID("settings-recipe-export"), h.Rows(10),
 					h.ClassStr("af-data-op__field"),
 					h.Aria("label", t("settings.data.recipe.exportTitle")),

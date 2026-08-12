@@ -297,7 +297,12 @@ func renderSecurity() ui.Node {
 					Type: "submit", Disabled: disconnected, Busy: reenrollSubmitting.Get(),
 				}),
 			),
-			h.Show(provisioningURI.Get() != "", h.Div(
+			// h.If, not h.Show: the enrolment URI is a secret shown once, and
+			// h.Show would leave it constructed, cloned and mounted (merely
+			// hidden) in the DOM for the whole session (A8-45). Safe here
+			// because it is the last child of this form — h.If yields nil and
+			// GWC drops nil children, which shifts every later sibling.
+			h.If(provisioningURI.Get() != "", h.Div(
 				h.P(h.Text(t("settings.security.reenrollTotp.shownOnce"))),
 				h.Code(h.Text(provisioningURI.Get())),
 			)),
@@ -332,7 +337,11 @@ func renderSecurity() ui.Node {
 				OnCancel:  func() { regenVisible.Set(false) },
 			}),
 			h.Show(regenErr.Get() != nil, h.P(h.Role("alert"), h.Aria("live", "assertive"), h.ClassStr("af-error"), h.Text(t("settings.security.recoveryCodes.error")))),
-			h.Show(len(newCodes.Get()) > 0, renderRecoveryCodeList(newCodes.Get())),
+			// Same reasoning as the enrolment URI above: ten fresh recovery
+			// codes, shown once, built and mounted on every render of this
+			// page under h.Show. Last child of the section, so h.If's nil
+			// shifts nothing (A8-45).
+			h.If(len(newCodes.Get()) > 0, renderRecoveryCodeList(newCodes.Get())),
 		),
 
 		// Active sessions

@@ -495,7 +495,7 @@ emitted, what recomputes per render, and what the framework actually charges for
       `len(ordered)` — it early-returns while closed, so an empty item set there is harmless, but a
       guard that emptied `ordered` itself (rather than skipping the build) would have broken menu
       positioning through that closure.
-- [ ] `A8-45` **`h.Show(false, …)` costs MORE than rendering the subtree and saves only paint — 48
+- [x] `A8-45` **AUDITED AND ACTED ON 2026-08-11.** — original report: **`h.Show(false, …)` costs MORE than rendering the subtree and saves only paint — 48
       call sites.** Three charges, and the first two are easy to miss: Go evaluates arguments
       eagerly, so the hidden subtree is fully constructed before `Show` is called; `html.Show` then
       CLONES the node and its props map (`cloneAnyMap`, sugar.go:1369) to set `hidden`; and the
@@ -506,6 +506,24 @@ emitted, what recomputes per render, and what the framework actually charges for
       collapsed regions. Keep `h.Show` only where retention is the point: uncommitted input that
       must survive a toggle, scroll position, focus, or a remount that would refetch. Audit the 48
       by weight, not wholesale.
+      **Audited (now 55 sites). Three converted, and the rest deliberately not — the wholesale
+      conversion the ticket half-suggests would have been a bug.** Two hazards found by reading
+      v5.0.1 rather than assuming:
+      1. `h.If` returns `nil`, and `appendNormalizedChild` (sugar.go:978) DROPS nil children. So a
+         conversion anywhere but the last sibling position shifts every later child by one, which
+         remounts sibling component fibers and loses their state. Only last-child conditionals are
+         safely convertible without keys.
+      2. Three `h.Show` sites hold an inline `ui.UseEvent` in the argument they guard — a HOOK. The
+         eager evaluation the ticket calls a cost is what keeps those hook slots stable;
+         `render_workbench.go`'s retry button already says so in a comment. Converting those would
+         be the positional-hook bug, not an optimisation.
+      Converted (all last-child, all genuinely heavy, none containing hooks): the TOTP enrolment URI
+      block and the ten fresh recovery codes on `/settings/security` — both secrets shown once, both
+      previously constructed, cloned and left mounted for the whole session — and the exported-TOML
+      textarea on `/settings/data`, which carried a whole document as a prop value on every render.
+      Not converted, and why: 32 of the 55 are a single `<p>` of error or status text, where the
+      construct-plus-clone is a few allocations and the conversion buys nothing measurable; the rest
+      are mid-list, so rule 1 applies. Revisit if keyed children arrive.
 - [ ] `A8-46` **`UseMemo`/`UseMemoOf` exist in v5.0.1 and this app uses them exactly zero times.**
       Every derived value is recomputed on every render — the per-row `originLabel`/`formatTimestamp`
       formatting, the filter comparisons, the ordered kebab partition, the visible-ID sets. Most are
