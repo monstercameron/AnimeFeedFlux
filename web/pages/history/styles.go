@@ -545,6 +545,16 @@ func emitFilterAndTableStyles() {
 		css.Bg(tokens.Color(tokens.RoleBg)),
 		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
 	)
+	// The wire token beside a reject reason's sentence (A8-30). Deliberately
+	// quiet: the sentence is what an operator reads, the token is what they
+	// grep for once they have decided the sentence matters, so it must be
+	// present and must not compete.
+	css.Global(".history-reject-token",
+		css.Raw("font-family", "ui-monospace, SFMono-Regular, Menlo, monospace"),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
+		css.Raw("margin-inline-start", string(tokens.Space(2))),
+	)
 	// The facts header of an expanded run (runs_ui.go's runDetailFacts):
 	// status, trigger, absolute start/finish, duration, counts, tokens, cost,
 	// and the error verbatim. A responsive grid rather than fixed columns, so

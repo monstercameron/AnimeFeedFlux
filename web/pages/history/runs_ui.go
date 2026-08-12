@@ -456,10 +456,27 @@ func runRow(t Catalog, r *affv1.Run, rowNumber int, expanded bool, log string, t
 				h.IfElse(len(r.RejectReasons) == 0,
 					h.P(t.T("history.runs.no_rejects", nil)),
 					h.Ul(h.MapKeyed(r.RejectReasons, func(rr *affv1.RejectReason) any { return rr.Reason }, func(rr *affv1.RejectReason) ui.Node {
-						return h.Li(t.T("history.runs.reject_reason_count", map[string]any{
-							"reason": rr.Reason,
-							"count":  i18n.FormatNumber("en", float64(rr.Count), i18n.NumberOptions{MaximumFractionDigits: 0}),
-						}))
+						count := i18n.FormatNumber("en", float64(rr.Count), i18n.NumberOptions{MaximumFractionDigits: 0})
+						key, known := RejectReasonKey(rr.Reason)
+						if !known {
+							// A reason this build has no sentence for — a newer
+							// server, most likely. The identifier alone beats a
+							// sentence that would be guessing (A8-30).
+							return h.Li(t.T("history.runs.reject_reason_count", map[string]any{
+								"reason": rr.Reason,
+								"count":  count,
+							}))
+						}
+						// Sentence first, because that is what an operator acts
+						// on; the wire token stays beside it, because that is
+						// what they grep for once they decide to.
+						return h.Li(
+							t.T("history.runs.reject_reason_count", map[string]any{
+								"reason": t.T(key, nil),
+								"count":  count,
+							}),
+							h.Code(h.ClassStr("history-reject-token"), h.Text(rr.Reason)),
+						)
 					})),
 				),
 				h.H3(t.T("history.runs.log", nil)),

@@ -831,9 +831,17 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
 - [ ] `A8-29` **`/settings/provider`'s "Active provider" is an unexplained empty text box.** It sits
       under a labelled heading with no placeholder and no help text, so it reads as a broken field
       rather than an optional override. Another session's area; noted, not touched.
-- [ ] `A8-30` **Reject reasons render as raw identifiers** — "novelty_duplicate: 1",
+- [x] `A8-30` **FIXED 2026-08-11.** — original report: **Reject reasons render as raw identifiers** — "novelty_duplicate: 1",
       "tags_not_lowercase: 2". They are diagnostic, so this is defensible, but they are the only
       machine identifiers left on an operator surface.
+      Fixed: each of the 19 tokens now has a sentence ("This repeats an item the feed has already
+      published"), with the token still shown beside it in a quiet monospace span — the sentence is
+      what an operator acts on, the token is what they grep for once they have decided to. The wire
+      format is unchanged and must stay short and stable, because the reasons are grouped and counted
+      per run. `generate.AllRejectReasons` is the source of truth; a source-scanning test in that
+      package fails if a `Reason…` constant is added and not listed, and `web/pages/history`'s
+      `TestEveryGenerateReasonHasALabel` fails if a listed reason has no sentence. An unrecognised
+      token — a newer server — falls back to printing the identifier rather than guessing.
 
 ### Feed CRUD 2026-08-11 (A7 series)
 
@@ -1954,7 +1962,7 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [x] `C0-05` **Pre-create the data directory owned by the non-root user** — named-volume ownership. §15.1
 - [x] `C0-06` `.dockerignore` excluding `.git`, local databases, and backups. §15.1
 - [x] `C0-07` Build cache mounts so rebuilds are cheap. §15.1
-- [ ] `C0-24` **The hardened configuration is the one thing never tested.** `check-container.sh`
+- [x] `C0-24` DONE 2026-08-11 — `deploy/compose.test.yaml` (an overlay, not a copy) plus `scripts/check-compose.sh`. Verified under the real production hardening: healthy with `read_only: true`, `cap_drop: ALL`, `no-new-privileges` and the tmpfs, with the security options asserted from `docker inspect` rather than assumed, and the database confirmed written on the volume (a read-only root or a mis-owned volume shows up there as an absent file even though the healthcheck is green). **The hardened configuration is the one thing never tested.** `check-container.sh`
       starts the container with a plain `docker run` — no `--read-only`, no `--cap-drop ALL`, no
       `--tmpfs /tmp`, no `--security-opt no-new-privileges`, no `--pids-limit`. `deploy/compose.yaml`
       sets all of them in production. So the configuration that actually ships is the configuration
@@ -1967,7 +1975,7 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
       `deploy/compose.test.yaml` overriding only the image (built locally) and the `env_file`
       (throwaway values) keeps every hardening line under test, and `docker compose config` catches
       a malformed file before anything starts.
-- [ ] `C0-25` **Nothing proves the PRODUCT works in the container — only that the process boots.**
+- [x] `C0-25` DONE 2026-08-11 — `check-compose.sh` asserts /healthz, the admin shell (HTTP 200 on the control port), `app.wasm` fetchable, and the database written. The `/web/dist` omission the Dockerfile documents would now fail a check instead of booting green. Pointing `deploy-verify.sh` at the container for the full renderer/conditional-GET/affvalidate pass is still worth doing and is not done. **Nothing proves the PRODUCT works in the container — only that the process boots.**
       `/healthz` answering means a listener is up. It does not mean migrations ran, a feed renders,
       conditional GET works, or the admin bundle is served — and that last one is not hypothetical:
       the Dockerfile's own comment records that `/web/dist` "was never wired into the image, so a
@@ -1982,7 +1990,7 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
       returns the WASM shell), a fresh volume produces a migrated database, and `docker compose
       exec`-equivalent CLI paths work in an image with no shell (`--entrypoint`).
 
-- [ ] `C0-20` **`.dockerignore`'s `*.db` does not match `.devrun/aff.db`, and `.devrun/` is not
+- [x] `C0-20` FIXED 2026-08-11. **`.dockerignore`'s `*.db` does not match `.devrun/aff.db`, and `.devrun/` is not
       excluded at all.** Docker's ignore patterns are `filepath.Match`-style: `*` does not cross a
       `/`, and a pattern is NOT implicitly applied to subdirectories the way `.gitignore` applies
       one. So `*.db` excludes only top-level databases, and `.devrun/` — which holds
@@ -1995,7 +2003,7 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
       Fix: add `.devrun/` and change the database patterns to `**/*.db`, `**/*.db-shm`,
       `**/*.db-wal`. Same reasoning applies to `backups/` and `bin/`, which have the same
       top-level-only problem.
-- [ ] `C0-21` **The runtime image's data directory is seeded from the build stage's `/tmp`.**
+- [x] `C0-21` FIXED 2026-08-11 — the build stage now creates `/out/emptydata` explicitly and the runtime stage copies that. Verified: a fresh volume contains only the database and its WAL/SHM sidecars, nothing else. **The runtime image's data directory is seeded from the build stage's `/tmp`.**
       `COPY --from=build --chown=65532:65532 /tmp /var/lib/animefeedflux` is a way to get an
       empty directory with the right ownership into a distroless image that has no shell to `mkdir`
       with — but `/tmp` in that stage is not empty. `apk add gzip`, `go build` and
@@ -2024,8 +2032,8 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
       is chosen, `C0-08` below should still be run: the image building and starting is worth knowing
       independently of whether it is what production uses.
 
-- [ ] `C0-08` **Build locally with `--platform linux/amd64`** and confirm it runs. §15.2
-- [ ] `C0-09` Confirm a native arm64 build fails on an amd64 host — know the error signature. §15.2
+- [x] `C0-08` **Build locally with `--platform linux/amd64`** and confirm it runs. §15.2 — RUN 2026-08-11, PASS. `scripts/check-container.sh` builds the image and the container answers /healthz. First run FAILED with SQLite `unable to open database file (14)`, which looked like the volume-ownership trap §15.1 warns about and was not: MSYS rewrites `/var/lib/animefeedflux` in a `-v` flag into a Windows path before docker sees it, so nothing was mounted where AFF_DB_PATH points. Fixed with MSYS_NO_PATHCONV in the script (a no-op off Windows). The same run also proved the script had never been executed: it omitted AFF_PUBLIC_BASE_URL and AFF_ALLOWED_ORIGINS, both of which config.Load requires.
+- [x] `C0-09` Confirm a native arm64 build fails on an amd64 host — know the error signature. §15.2 — RUN 2026-08-11. The mismatch does NOT reproduce on this host: Docker Desktop emulates arm64 via QEMU, so the arm64 image both builds and RUNS here. Recorded as a WARN rather than a pass, because the signature to expect on the droplet (bare Linux, no binfmt) is `exec format error` at `docker run`, not at build. The check now classifies on the loader's output rather than the exit code — `healthcheck` is a client, so it exits nonzero with a dial error even when the binary ran perfectly, which the first version misread as the mismatch reproducing.
 - [x] `C0-10` `compose.yaml`: publish to `127.0.0.1` only. §15.4, §19
 - [x] `C0-11` Named volume for the database on local disk. §15.4
 - [x] `C0-12` `env_file` at 0600 on the host; no secrets in compose or the image. §15.4
@@ -2035,7 +2043,7 @@ every commit. The UI walkthroughs in `DF` come later and do not replace these.
 - [x] `C0-16` Memory limit. §15.4
 - [x] `C0-17` `read_only: true` plus a tmpfs for `/tmp`. §15.4
 - [x] `C0-18` `cap_drop: ALL` and `security_opt: no-new-privileges`. §15.4
-- [ ] `C0-19` Verify the container survives a restart with the volume intact and the DB readable.
+- [x] `C0-19` Verify the container survives a restart with the volume intact and the DB readable. — RUN 2026-08-11, PASS, both ways: a fresh container against the same named volume in `check-container.sh`, and `docker compose stop` + `up` in `check-compose.sh`.
 
 ## C1 — Pipeline
 
@@ -2999,6 +3007,32 @@ no change at all. That is the payoff this section predicted, collected.
       `web/pages/auth/devfill_off.go` and `web/ui/kebab_anchor_host.go` (build-tag stubs whose whole
       body is the other build's absence), and the platform-gated `diskspace_*`/`term_*` pair that
       cannot compile on the machine running the tests.)
+- [x] `T-08` Reroute to /login when the session expires. §12/D0-08
+      (closed 2026-08-11, asked for by Cam: "the app stops being useful". Three stacked bugs, each
+      hidden behind the previous — see the DEVLOG entry. (1) Nothing re-ran the route guard when the
+      SESSION changed, only when the PATH did, so an expired session left the admin parked on a dead
+      page; `web/shell/sessionroute.go` now re-runs `guard.DecideSessionChange` — the same pure
+      decision `BeforeEnter` uses, so DISCONNECTED still stays put and ELEVATED still goes to
+      /recover. (2) `EvSessionExpired` was NEVER EMITTED by anything: `web/wsconn` reported only
+      connectivity, and a session dying server-side is invisible to connectivity. Detection now sits
+      in `guardUnary`/`guardCall`, the two chokepoints every RPC already passes, and distinguishes a
+      dead session from a wrong password — possible only because §12.1's no-oracle rule keeps
+      credential failures generic while session failures name themselves. (3) The state STILL did not
+      change: the emit ran on the RPC goroutine, and GWC v5.0.1 queues off-loop updates and defers
+      the drain — the identical defect `web/ui/pump.go` documents. Both the emit and the navigation
+      are deferred through `time.AfterFunc(0, ...)`; `Router.NavigateReplace` additionally returns
+      SILENTLY when called re-entrantly from inside the render the router triggered. Verified in a
+      browser against a real server-side session revoke; unit tests in `web/guard` and `web/wsconn`
+      cover the decision table and the error classification.)
+- [ ] `T-09` Make `/history` and `/settings` report real unsaved work. D0-08
+      (opened 2026-08-11 by `T-08`. Both register `RegisterDirtyCheck(func() bool { return wired })`
+      — which is not "has unsaved work" and not even "page is mounted", but "Init was called", true
+      forever after boot. `/generate` is correct (`DraftDirty`). The consequence: the unsaved-work
+      hold fires on EVERY expiry on those two pages, so the automatic redirect never runs there and
+      the admin gets a modal promising to keep unsaved changes that do not exist. Both files admit
+      the substitute in their own comments. **This is a data-loss trade, not a cleanup** — either
+      accept that a half-typed settings field is lost on expiry, or track dirtiness per panel — so it
+      needs a decision before a patch.)
 
 ## DF — Flow sanity walkthroughs, through the UI (§22, §17.5)
 

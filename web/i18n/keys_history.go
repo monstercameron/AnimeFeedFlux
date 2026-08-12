@@ -143,6 +143,31 @@ var historyMessages = gwci18n.NamespaceCatalog{
 	// TODOS.md D6-19) with its already locale-formatted count.
 	"history.runs.reject_reason_count": {Text: "{reason}: {count}"},
 
+	// history.runs.reject.* turn the server's wire tokens into sentences.
+	// The tokens themselves stay on screen next to them: the sentence is for
+	// deciding what to do, the token is for grepping the logs (A8-30).
+	// Kept in step with internal/generate by web/pages/history's
+	// TestEveryGenerateReasonHasALabel.
+	"history.runs.reject.invalid_utf8":               {Text: "The model returned bytes that are not valid text."},
+	"history.runs.reject.control_chars":              {Text: "The text contained control characters, which would not render."},
+	"history.runs.reject.title_required":             {Text: "No title."},
+	"history.runs.reject.title_too_short":            {Text: "The title was too short to say anything."},
+	"history.runs.reject.title_too_long":             {Text: "The title was longer than the limit."},
+	"history.runs.reject.title_trailing_punctuation": {Text: "The title ended in punctuation, which reads as truncated in a feed reader."},
+	"history.runs.reject.summary_required":           {Text: "No summary."},
+	"history.runs.reject.summary_exceeds_hard_cap":   {Text: "The summary was longer than the hard cap."},
+	"history.runs.reject.summary_contains_html":      {Text: "The summary contained HTML, which is published as plain text."},
+	"history.runs.reject.body_html_required":         {Text: "No body."},
+	"history.runs.reject.body_html_relative_link":    {Text: "The body linked somewhere relative, which resolves to nothing outside this site."},
+	"history.runs.reject.answer_leaked_into_summary": {Text: "The summary gave away the answer the body was supposed to reveal."},
+	"history.runs.reject.tags_too_many":              {Text: "More tags than the limit allows."},
+	"history.runs.reject.tags_not_lowercase":         {Text: "A tag was not lowercase, so it would split into a duplicate of an existing tag."},
+	"history.runs.reject.link_required_grounded":     {Text: "No source link, and this feed requires every item to be grounded in one."},
+	"history.runs.reject.link_invalid":               {Text: "The source link was not a usable URL."},
+	"history.runs.reject.link_not_in_candidate_set":  {Text: "The source link was not one of the sources given to the model — it was invented."},
+	"history.runs.reject.novelty_duplicate":          {Text: "This repeats an item the feed has already published."},
+	"history.runs.reject.novelty_check_failed":       {Text: "The duplicate check could not run, so the item was refused rather than risked."},
+
 	// Items tab.
 	"history.items.filter_query":      {Text: "Search"},
 	"history.items.filter_deleted":    {Text: "Deleted items"},

@@ -99,6 +99,28 @@ var esHistoryMessages = gwci18n.NamespaceCatalog{
 
 	"history.runs.reject_reason_count": {Text: "{reason}: {count}"},
 
+	// Ver keys_history.go para por qué existen estas frases. Los tokens en
+	// inglés siguen mostrándose junto a ellas y no se traducen.
+	"history.runs.reject.invalid_utf8":               {Text: "El modelo devolvió bytes que no son texto válido."},
+	"history.runs.reject.control_chars":              {Text: "El texto contenía caracteres de control, que no se mostrarían."},
+	"history.runs.reject.title_required":             {Text: "Sin título."},
+	"history.runs.reject.title_too_short":            {Text: "El título era demasiado corto para decir nada."},
+	"history.runs.reject.title_too_long":             {Text: "El título superaba el límite de longitud."},
+	"history.runs.reject.title_trailing_punctuation": {Text: "El título terminaba en un signo de puntuación, lo que en un lector de feeds parece un texto cortado."},
+	"history.runs.reject.summary_required":           {Text: "Sin resumen."},
+	"history.runs.reject.summary_exceeds_hard_cap":   {Text: "El resumen superaba el límite máximo."},
+	"history.runs.reject.summary_contains_html":      {Text: "El resumen contenía HTML, y se publica como texto plano."},
+	"history.runs.reject.body_html_required":         {Text: "Sin cuerpo."},
+	"history.runs.reject.body_html_relative_link":    {Text: "El cuerpo incluía un enlace relativo, que fuera de este sitio no lleva a ninguna parte."},
+	"history.runs.reject.answer_leaked_into_summary": {Text: "El resumen revelaba la respuesta que debía dar el cuerpo."},
+	"history.runs.reject.tags_too_many":              {Text: "Más etiquetas de las que permite el límite."},
+	"history.runs.reject.tags_not_lowercase":         {Text: "Una etiqueta no estaba en minúsculas, así que se duplicaría con una etiqueta ya existente."},
+	"history.runs.reject.link_required_grounded":     {Text: "Sin enlace de origen, y este feed exige que todos los elementos se apoyen en uno."},
+	"history.runs.reject.link_invalid":               {Text: "El enlace de origen no era una URL utilizable."},
+	"history.runs.reject.link_not_in_candidate_set":  {Text: "El enlace de origen no era ninguna de las fuentes entregadas al modelo: se lo inventó."},
+	"history.runs.reject.novelty_duplicate":          {Text: "Repite un elemento que el feed ya ha publicado."},
+	"history.runs.reject.novelty_check_failed":       {Text: "No se pudo ejecutar la comprobación de duplicados, así que el elemento se rechazó en lugar de arriesgarse."},
+
 	"history.items.filter_query":      {Text: "Buscar"},
 	"history.items.filter_deleted":    {Text: "Elementos eliminados"},
 	"history.items.deleted.exclude":   {Text: "Excluir eliminados"},

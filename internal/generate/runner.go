@@ -196,6 +196,37 @@ const (
 	ReasonNoveltyCheckFailed = "novelty_check_failed"
 )
 
+// AllRejectReasons is every token this package can put in
+// runs.reject_reasons_json, from both this file and contract.go.
+//
+// It exists so the UI's identifier-to-sentence map can be checked against
+// the source of truth instead of hand-maintained hopefully (TODOS.md A8-30):
+// add a reason and forget the label, and web/pages/history's
+// TestEveryGenerateReasonHasALabel names the token you added.
+func AllRejectReasons() []string {
+	return []string{
+		ReasonInvalidUTF8,
+		ReasonControlChars,
+		ReasonTitleRequired,
+		ReasonTitleTooShort,
+		ReasonTitleTooLong,
+		ReasonTitleTrailingPunct,
+		ReasonSummaryRequired,
+		ReasonSummaryHardCap,
+		ReasonSummaryContainsHTML,
+		ReasonBodyRequired,
+		ReasonBodyRelativeLink,
+		ReasonAnswerLeaked,
+		ReasonTagsTooMany,
+		ReasonTagsNotLowercase,
+		ReasonLinkRequiredGrounded,
+		ReasonLinkInvalid,
+		ReasonLinkNotCandidate,
+		ReasonNoveltyDuplicate,
+		ReasonNoveltyCheckFailed,
+	}
+}
+
 // ErrMalformedOutput is returned by Run/Sample when a repair attempt (§9.3)
 // still produced zero valid items. The run/sample outcome around it (failed
 // vs partially reported) is decided by the caller of runAttempt, not by this
