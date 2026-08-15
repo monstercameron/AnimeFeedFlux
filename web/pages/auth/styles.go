@@ -389,6 +389,18 @@ func emitAuthStyles() {
 		css.Raw("overflow-wrap", "anywhere"),
 		monoFont(),
 	)
+	// /setup's shown-once recovery-code list: each <li> already renders as an
+	// .af-code chip; the list itself just stacks them and drops the browser's
+	// default bullet-and-indent, which reads as decoration on what is
+	// security-critical copy-this-down content.
+	css.Global(".af-recovery-codes",
+		css.Display.Flex,
+		css.FlexDir.Col,
+		css.Gap(tokens.Space(2)),
+		css.Raw("list-style", "none"),
+		css.Raw("margin", "0"),
+		css.Raw("padding", "0"),
+	)
 	css.Global(".af-recover-breakglass",
 		css.Display.Flex,
 		css.FlexDir.Col,

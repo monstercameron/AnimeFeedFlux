@@ -161,6 +161,12 @@ type guardedAuthClient struct {
 
 var _ affv1.AuthServiceClient = guardedAuthClient{}
 
+func (g guardedAuthClient) Setup(ctx context.Context, in *affv1.AuthServiceSetupRequest, opts ...grpc.CallOption) (*affv1.AuthServiceSetupResponse, error) {
+	return guardUnary(g.conn, ctx, unaryTimeout, func(ctx context.Context) (*affv1.AuthServiceSetupResponse, error) {
+		return g.real.Setup(ctx, in, opts...)
+	})
+}
+
 func (g guardedAuthClient) Login(ctx context.Context, in *affv1.AuthServiceLoginRequest, opts ...grpc.CallOption) (*affv1.AuthServiceLoginResponse, error) {
 	return guardUnary(g.conn, ctx, unaryTimeout, func(ctx context.Context) (*affv1.AuthServiceLoginResponse, error) {
 		return g.real.Login(ctx, in, opts...)

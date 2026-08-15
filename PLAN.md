@@ -255,7 +255,13 @@ ever required, that is the point to revisit — not before.
 
 - **Credential:** password hashed with **argon2id** (not bcrypt — no 72-byte truncation, memory-hard
   params tunable), stored in SQLite. Verification is constant-time. No default password; the account
-  is created by `aff admin init`, reading from stdin.
+  is created either by `aff admin init` (local-only, reading from stdin) or by the one-time `/setup`
+  page over `AuthService.Setup`, which works only while no admin row exists and returns one generic
+  refusal forever after. `/setup` is deliberately **open first-come** (decided 2026-08-15, Cam's
+  call — see DEVLOG): on a fresh or freshly-reset instance, the first caller to reach it claims the
+  instance. The accepted mitigation is operational — claim promptly after deploy or reset — not
+  mechanical; a boot-logged setup code was considered and declined as friction for a single-operator
+  system.
 
   | Parameter | Value | Why |
   |---|---|---|
@@ -995,9 +1001,10 @@ password reset has no gRPC surface at all, ever — see §12.2 for why.
 
 ## 12. Admin UI (GWC)
 
-Five pages. Two unauthenticated, three behind the session.
+Six pages. Three unauthenticated, three behind the session.
 
 ```
+/setup       unauthenticated — first-run account creation; works once, then only says "already set up"
 /login       unauthenticated
 /recover     unauthenticated
 /generate    default landing page after login

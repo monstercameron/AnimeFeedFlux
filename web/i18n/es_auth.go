@@ -71,4 +71,25 @@ var esAuthMessages = gwci18n.NamespaceCatalog{
 	KeyRecoverBreakGlassHeading:     {Text: "¿Sin acceso por completo?"},
 	KeyRecoverBreakGlassBody:        {Text: "Si tampoco tienes códigos de recuperación, el acceso de emergencia restablece a la vez tu contraseña, tu TOTP y tus códigos de recuperación, pero solo funciona por SSH, directamente en el servidor y con acceso al archivo de la base de datos. No hay ninguna vía remota ni web para hacerlo."},
 	KeyRecoverBreakGlassCommandNote: {Text: "Ejecuta: aff admin reset"},
+
+	KeySetupTitle: {Text: "Configura este sistema"},
+	KeySetupIntro: {Text: "Todavía no existe ninguna cuenta de administración. Créala aquí, una sola vez: la cuenta creada en esta página es la única cuenta que este sistema tendrá jamás."},
+
+	KeySetupPasswordLabel:        {Text: "Nueva contraseña de administración"},
+	KeySetupConfirmPasswordLabel: {Text: "Confirma la contraseña"},
+	KeySetupPasswordHint:         {Text: "De 15 a 128 caracteres. Se permiten espacios: una frase larga es mejor que un revoltijo corto."},
+	KeySetupPasswordMismatch:     {Text: "Las contraseñas no coinciden."},
+	KeySetupPasswordTooShort:     {Text: "La contraseña debe tener al menos {min} caracteres."},
+	KeySetupPasswordTooLong:      {Text: "La contraseña puede tener como máximo {max} caracteres."},
+	KeySetupSubmit:               {Text: "Crear cuenta de administración"},
+
+	KeySetupUnavailable:      {Text: "Este sistema ya está configurado. Inicia sesión."},
+	KeySetupPasswordRejected: {Text: "El servidor rechazó esta contraseña: puede aparecer en una lista de contraseñas comprometidas. Elige otra."},
+
+	KeySetupDoneHeading:  {Text: "Cuenta de administración creada"},
+	KeySetupProvisioned:  {Text: "Escanea esto ahora en tu aplicación de autenticación: no se volverá a mostrar: {uri}"},
+	KeySetupCodesHeading: {Text: "Códigos de recuperación"},
+	KeySetupCodesIntro:   {Text: "Se muestran una sola vez y después solo se guardan sus hashes. Consérvalos en un lugar seguro: cada código te permite volver a entrar exactamente una vez si pierdes tu aplicación de autenticación."},
+	KeySetupSavedConfirm: {Text: "He escaneado el código en mi aplicación de autenticación y he guardado mis códigos de recuperación"},
+	KeySetupGoToLogin:    {Text: "Ir a iniciar sesión"},
 }

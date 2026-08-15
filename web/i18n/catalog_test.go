@@ -22,6 +22,10 @@ var allDeclaredAuthKeys = []string{
 	KeyRecoverReenrollIntro, KeyRecoverReenrollSubmit, KeyRecoverReenrollProvisioned, KeyRecoverDoneHeading,
 	KeyRecoverDoneBody, KeyRecoverDoneGoToLogin, KeyRecoverCancel, KeyRecoverBreakGlassHeading, KeyRecoverBreakGlassBody,
 	KeyRecoverBreakGlassCommandNote, KeyRecoverSavedConfirm,
+	KeySetupTitle, KeySetupIntro, KeySetupPasswordLabel, KeySetupConfirmPasswordLabel,
+	KeySetupPasswordHint, KeySetupPasswordMismatch, KeySetupPasswordTooShort, KeySetupPasswordTooLong,
+	KeySetupSubmit, KeySetupUnavailable, KeySetupPasswordRejected, KeySetupDoneHeading,
+	KeySetupProvisioned, KeySetupCodesHeading, KeySetupCodesIntro, KeySetupSavedConfirm, KeySetupGoToLogin,
 }
 
 var allDeclaredCommonKeys = []string{

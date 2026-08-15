@@ -137,11 +137,67 @@ var recoverMessages = gwci18n.NamespaceCatalog{
 	KeyRecoverBreakGlassCommandNote: {Text: "Run: aff admin reset"},
 }
 
+// Auth-namespace key constants for /setup — first-run account creation
+// (PLAN.md §4/§12.1: the web counterpart of `aff admin init`, working
+// exactly once while no admin row exists). Same meaning-not-wording naming
+// rule as the login.*/recover.* keys above.
+const (
+	KeySetupTitle                = "setup.title"
+	KeySetupIntro                = "setup.intro"
+	KeySetupPasswordLabel        = "setup.passwordLabel"
+	KeySetupConfirmPasswordLabel = "setup.confirmPasswordLabel"
+	KeySetupPasswordHint         = "setup.passwordHint"
+	KeySetupPasswordMismatch     = "setup.passwordMismatch"
+	KeySetupPasswordTooShort     = "setup.passwordTooShort"
+	KeySetupPasswordTooLong      = "setup.passwordTooLong"
+	KeySetupSubmit               = "setup.submit"
+	// KeySetupUnavailable renders the server's one generic refusal
+	// (FailedPrecondition once an admin exists): the page must not invent
+	// distinctions the server deliberately withholds.
+	KeySetupUnavailable = "setup.unavailable"
+	// KeySetupPasswordRejected covers the server-side auth.IsWeak refusal
+	// the client-side length check cannot predict — in practice the
+	// compromised-password blocklist, which is a server-side resource and
+	// deliberately not shipped in the WASM bundle.
+	KeySetupPasswordRejected = "setup.passwordRejected"
+	KeySetupDoneHeading      = "setup.doneHeading"
+	KeySetupProvisioned      = "setup.provisioned"
+	KeySetupCodesHeading     = "setup.codesHeading"
+	KeySetupCodesIntro       = "setup.codesIntro"
+	KeySetupSavedConfirm     = "setup.savedConfirm"
+	KeySetupGoToLogin        = "setup.goToLogin"
+)
+
+var setupMessages = gwci18n.NamespaceCatalog{
+	KeySetupTitle: {Text: "Set up this system"},
+	KeySetupIntro: {Text: "No admin account exists yet. Create it here, once — the account created on this page is the only account this system will ever have."},
+
+	KeySetupPasswordLabel:        {Text: "New admin password"},
+	KeySetupConfirmPasswordLabel: {Text: "Confirm password"},
+	KeySetupPasswordHint:         {Text: "15 to 128 characters. Spaces are allowed — a long passphrase beats a short scramble."},
+	KeySetupPasswordMismatch:     {Text: "Passwords don't match."},
+	KeySetupPasswordTooShort:     {Text: "Password must be at least {min} characters."},
+	KeySetupPasswordTooLong:      {Text: "Password must be at most {max} characters."},
+	KeySetupSubmit:               {Text: "Create admin account"},
+
+	KeySetupUnavailable:      {Text: "This system is already set up. Sign in instead."},
+	KeySetupPasswordRejected: {Text: "The server rejected this password — it may appear in a list of compromised passwords. Choose a different one."},
+
+	KeySetupDoneHeading:  {Text: "Admin account created"},
+	KeySetupProvisioned:  {Text: "Scan this into your authenticator app now — it will not be shown again: {uri}"},
+	KeySetupCodesHeading: {Text: "Recovery codes"},
+	KeySetupCodesIntro:   {Text: "Shown once, then stored only as hashes. Keep them somewhere safe — each code signs you back in exactly once if you lose your authenticator."},
+	// Same what-was-saved phrasing rule as KeyRecoverSavedConfirm: the
+	// checkbox names the two saved things, not merely "I understand".
+	KeySetupSavedConfirm: {Text: "I've scanned the code into my authenticator app and saved my recovery codes"},
+	KeySetupGoToLogin:    {Text: "Go to sign in"},
+}
+
 // authMessages merges login.* and recover.* into the single "auth"
 // namespace catalog.go registers (D6-04: one namespace per surface, not
-// one per page — /login and /recover are both part of the same "auth"
-// surface in PLAN.md §12).
-var authMessages = mergeNamespaces(loginMessages, recoverMessages)
+// one per page — /login, /recover, and /setup are all part of the same
+// "auth" surface in PLAN.md §12).
+var authMessages = mergeNamespaces(loginMessages, recoverMessages, setupMessages)
 
 func mergeNamespaces(parts ...gwci18n.NamespaceCatalog) gwci18n.NamespaceCatalog {
 	out := make(gwci18n.NamespaceCatalog)

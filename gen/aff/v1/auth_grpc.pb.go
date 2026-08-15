@@ -19,6 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	AuthService_Setup_FullMethodName                   = "/aff.v1.AuthService/Setup"
 	AuthService_Login_FullMethodName                   = "/aff.v1.AuthService/Login"
 	AuthService_RecoverWithCode_FullMethodName         = "/aff.v1.AuthService/RecoverWithCode"
 	AuthService_Logout_FullMethodName                  = "/aff.v1.AuthService/Logout"
@@ -42,6 +43,17 @@ const (
 // session minted here, checked by a server interceptor on every call — "no
 // authenticated at upgrade, trusted forever" (§4).
 type AuthServiceClient interface {
+	// Setup performs first-run account creation from the browser: it creates
+	// the singleton admin row, enrolls TOTP, and generates recovery codes —
+	// the same sequence `aff admin init` runs locally — and it works EXACTLY
+	// once, while no admin row exists yet. The very first caller to reach it
+	// claims the instance (an accepted first-come race, recorded in PLAN.md
+	// §4 and DEVLOG 2026-08-15); every call after the row exists gets one
+	// generic FailedPrecondition regardless of why. It never mints a session:
+	// the response carries the provisioning URI and recovery codes, shown
+	// once, and the operator proves the enrollment worked by signing in
+	// through Login like any other day.
+	Setup(ctx context.Context, in *AuthServiceSetupRequest, opts ...grpc.CallOption) (*AuthServiceSetupResponse, error)
 	// Login verifies password + TOTP together in one call. Password and code
 	// travel together (not as two separate RPCs) so the server can return the
 	// same generic failure for "wrong password" and "wrong code" without the
@@ -89,6 +101,16 @@ type authServiceClient struct {
 
 func NewAuthServiceClient(cc grpc.ClientConnInterface) AuthServiceClient {
 	return &authServiceClient{cc}
+}
+
+func (c *authServiceClient) Setup(ctx context.Context, in *AuthServiceSetupRequest, opts ...grpc.CallOption) (*AuthServiceSetupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AuthServiceSetupResponse)
+	err := c.cc.Invoke(ctx, AuthService_Setup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *authServiceClient) Login(ctx context.Context, in *AuthServiceLoginRequest, opts ...grpc.CallOption) (*AuthServiceLoginResponse, error) {
@@ -202,6 +224,17 @@ func (c *authServiceClient) RegenerateRecoveryCodes(ctx context.Context, in *Aut
 // session minted here, checked by a server interceptor on every call — "no
 // authenticated at upgrade, trusted forever" (§4).
 type AuthServiceServer interface {
+	// Setup performs first-run account creation from the browser: it creates
+	// the singleton admin row, enrolls TOTP, and generates recovery codes —
+	// the same sequence `aff admin init` runs locally — and it works EXACTLY
+	// once, while no admin row exists yet. The very first caller to reach it
+	// claims the instance (an accepted first-come race, recorded in PLAN.md
+	// §4 and DEVLOG 2026-08-15); every call after the row exists gets one
+	// generic FailedPrecondition regardless of why. It never mints a session:
+	// the response carries the provisioning URI and recovery codes, shown
+	// once, and the operator proves the enrollment worked by signing in
+	// through Login like any other day.
+	Setup(context.Context, *AuthServiceSetupRequest) (*AuthServiceSetupResponse, error)
 	// Login verifies password + TOTP together in one call. Password and code
 	// travel together (not as two separate RPCs) so the server can return the
 	// same generic failure for "wrong password" and "wrong code" without the
@@ -251,6 +284,9 @@ type AuthServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAuthServiceServer struct{}
 
+func (UnimplementedAuthServiceServer) Setup(context.Context, *AuthServiceSetupRequest) (*AuthServiceSetupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Setup not implemented")
+}
 func (UnimplementedAuthServiceServer) Login(context.Context, *AuthServiceLoginRequest) (*AuthServiceLoginResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Login not implemented")
 }
@@ -300,6 +336,24 @@ func RegisterAuthServiceServer(s grpc.ServiceRegistrar, srv AuthServiceServer) {
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&AuthService_ServiceDesc, srv)
+}
+
+func _AuthService_Setup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AuthServiceSetupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuthServiceServer).Setup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuthService_Setup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuthServiceServer).Setup(ctx, req.(*AuthServiceSetupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _AuthService_Login_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -489,6 +543,10 @@ var AuthService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "aff.v1.AuthService",
 	HandlerType: (*AuthServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Setup",
+			Handler:    _AuthService_Setup_Handler,
+		},
 		{
 			MethodName: "Login",
 			Handler:    _AuthService_Login_Handler,

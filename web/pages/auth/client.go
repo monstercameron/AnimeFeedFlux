@@ -20,6 +20,12 @@ import (
 // the shell wires the tunnel, only on the method shapes it needs. Whoever
 // mounts these pages (the shell wave, D0) passes conn.Auth directly as
 // both LoginPageProps.Client and RecoverPageProps.Client.
+// SetupClient is the one RPC /setup depends on. Like the other two
+// interfaces below, affv1.AuthServiceClient satisfies it structurally.
+type SetupClient interface {
+	Setup(ctx context.Context, in *affv1.AuthServiceSetupRequest, opts ...grpc.CallOption) (*affv1.AuthServiceSetupResponse, error)
+}
+
 type LoginClient interface {
 	Login(ctx context.Context, in *affv1.AuthServiceLoginRequest, opts ...grpc.CallOption) (*affv1.AuthServiceLoginResponse, error)
 }

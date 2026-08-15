@@ -138,10 +138,14 @@ func callerSessionFromContext(ctx context.Context) (cs callerSession, ok bool) {
 	return cs, ok
 }
 
-// noSessionMethods is the exemption list. PLAN.md §4 is explicit that these
-// are the only two ways to reach the system without already holding a
-// session: signing in, and using a recovery code to start signing back in.
+// noSessionMethods is the exemption list. PLAN.md §4: three ways to reach
+// the system without already holding a session — signing in, using a
+// recovery code to start signing back in, and (exactly once, while no admin
+// row exists) first-run Setup. Setup guards itself: once the admin row
+// exists it returns one generic FailedPrecondition for every cause, so its
+// standing presence here adds no reachable surface to a claimed instance.
 var noSessionMethods = map[string]bool{
+	affv1.AuthService_Setup_FullMethodName:           true,
 	affv1.AuthService_Login_FullMethodName:           true,
 	affv1.AuthService_RecoverWithCode_FullMethodName: true,
 }

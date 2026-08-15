@@ -102,7 +102,7 @@ func wirePages(conn *wsconn.Conn) {
 
 	// Everything goes over the WebSocket, login included: §3's transport
 	// rule is one bridge, not one bridge plus an HTTP side door.
-	authpage.Init(conn.Auth, conn.Auth)
+	authpage.Init(conn.Auth, conn.Auth, conn.Auth)
 
 	generatepage.Init(generatepage.Deps{
 		Feed:       conn.Feed,

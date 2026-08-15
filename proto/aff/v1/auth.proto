@@ -13,6 +13,18 @@ option go_package = "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1;affv1";
 // session minted here, checked by a server interceptor on every call — "no
 // authenticated at upgrade, trusted forever" (§4).
 service AuthService {
+  // Setup performs first-run account creation from the browser: it creates
+  // the singleton admin row, enrolls TOTP, and generates recovery codes —
+  // the same sequence `aff admin init` runs locally — and it works EXACTLY
+  // once, while no admin row exists yet. The very first caller to reach it
+  // claims the instance (an accepted first-come race, recorded in PLAN.md
+  // §4 and DEVLOG 2026-08-15); every call after the row exists gets one
+  // generic FailedPrecondition regardless of why. It never mints a session:
+  // the response carries the provisioning URI and recovery codes, shown
+  // once, and the operator proves the enrollment worked by signing in
+  // through Login like any other day.
+  rpc Setup(AuthServiceSetupRequest) returns (AuthServiceSetupResponse);
+
   // Login verifies password + TOTP together in one call. Password and code
   // travel together (not as two separate RPCs) so the server can return the
   // same generic failure for "wrong password" and "wrong code" without the
@@ -80,6 +92,24 @@ message Session {
   // connection, so ListSessions can highlight "this device" without the
   // client comparing tokens it never has access to.
   bool is_current = 8;
+}
+
+message AuthServiceSetupRequest {
+  // The new admin password. Checked against the same NIST policy `aff
+  // admin init` enforces (15–128 chars, breached-password blocklist);
+  // policy feedback comes back as InvalidArgument with a real message —
+  // there is no oracle risk in explaining password policy to the only
+  // caller who can ever reach this successfully.
+  string password = 1;
+}
+
+message AuthServiceSetupResponse {
+  // otpauth:// URI for the QR code. Shown once; never retrievable again
+  // (PLAN.md §4) — same contract as ReenrollTOTP's field of the same name.
+  string provisioning_uri = 1;
+  // Plaintext recovery codes, shown exactly once; the server retains only
+  // their hashes (PLAN.md §4: "shown once, stored hashed").
+  repeated string recovery_codes = 2;
 }
 
 message AuthServiceLoginRequest {

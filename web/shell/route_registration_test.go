@@ -62,6 +62,7 @@ func TestAllFiveRoutesRegistered(t *testing.T) {
 		"/recover",
 		"/settings",
 		"/settings/:section",
+		"/setup",
 	}
 
 	got := shell.RegisteredPaths()

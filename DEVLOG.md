@@ -13,6 +13,39 @@ Newest entries at the top.
 
 ---
 
+## 2026-08-15 — /setup: the plan said "never a network path for account creation"; Cam overruled it, eyes open
+
+PLAN.md §4/§11 made `aff admin init` (local-only, stdin) the sole account-creation path, and the
+reasoning was written down hard: an unauthenticated network call that can mint or reset the only
+account is "a full account takeover primitive" (the argument that kept password reset off gRPC
+forever). Cam asked for a browser page anyway — "the sign up only needs to be a page where the admin
+can one time enter their credentials."
+
+Three options were put to him explicitly: (1) a boot-logged one-time setup code the page requires —
+web convenience, but claiming still needs log access; (2) an open first-come page, available exactly
+while no admin row exists; (3) keep CLI-only. He chose **open first-come**, accepting the race: on a
+fresh deploy or after `aff admin reset`, whoever reaches `/setup` first owns the instance, and the
+mitigation is operational (claim promptly), not mechanical. The window is real but narrow in
+practice for a single-operator instance, and the alternative (the setup code) reintroduces exactly
+the SSH-and-read-the-logs step the request was trying to remove.
+
+What kept this from being the takeover primitive the plan feared: `AuthService.Setup` never widens
+the surface of a CLAIMED instance. It is gated on the admin row's nonexistence, the row insert is the
+atomic claim (`store.InitAdmin` refuses, never overwrites — two racing calls, one winner), and once
+the row exists every call gets one generic `FailedPrecondition` regardless of cause, per the same
+single-sentinel anti-oracle rule as `errAuthFailed`. It also never mints a session or a ticket — the
+response is the provisioning URI + recovery codes (shown once), and the operator proves the
+enrollment round-trip by signing in through the ordinary `/login` flow. The only fact the endpoint's
+availability can leak is "no admin exists yet," which the chosen design already concedes on purpose.
+
+One near-miss worth recording: the first draft checked password policy AFTER the availability check
+but hashed/enrolled BEFORE the row insert in an order that would have let a weak-password rejection
+land after nothing, but a mid-sequence DB failure land after `InitAdmin` — leaving a half-enrolled
+admin (row, no TOTP) with `/setup` now refusing and `/login` impossible. The landed ordering does all
+fallible-but-pure work (policy, KDF, TOTP enrollment, secret encryption, code generation) before the
+first write, shrinking the stranded-state window to a DB error between three adjacent writes — the
+same residual window `aff admin init` already has, with the same remedy (`aff admin reset`).
+
 ## 2026-08-11 — The container was fine; the harness had never run
 
 Docker on this project was in the state that reads as done and isn't: a multi-stage build into

@@ -58,6 +58,7 @@ const keyBackoffCleared = "backoffCleared"
 var (
 	loginClient   LoginClient
 	recoverClient RecoverClient
+	setupClient   SetupClient
 )
 
 // Init installs the live control-plane clients renderLogin/renderRecover
@@ -72,9 +73,13 @@ var (
 // client.go), passed as two parameters rather than one so a caller could
 // still supply distinct fakes in a future test without this package
 // inventing its own narrower "AuthClient" union type.
-func Init(login LoginClient, recoverC RecoverClient) {
+// setup gets NO ticket-redeeming wrapper: AuthServer.Setup never mints a
+// session or a ticket (the operator signs in through Login afterward, which
+// is where the ticket dance happens), so there is nothing to redeem.
+func Init(login LoginClient, recoverC RecoverClient, setup SetupClient) {
 	loginClient = ticketRedeemingLoginClient{inner: login}
 	recoverClient = ticketRedeemingRecoverClient{inner: recoverC}
+	setupClient = setup
 }
 
 // ticketRedeemingLoginClient wraps a real LoginClient so a successful Login
@@ -209,6 +214,18 @@ func renderRecover() ui.Node {
 	})
 }
 
+// renderSetup is /setup's registered page body — first-run account
+// creation (the web counterpart of `aff admin init`). No appstate event on
+// success: Setup never opens a session, so ANON remains true throughout and
+// the page simply routes to /login when the operator confirms the
+// shown-once values are saved.
+func renderSetup() ui.Node {
+	if setupClient == nil {
+		return ui.CreateElement(renderAuthNotWired, nil)
+	}
+	return SetupPage(SetupPageProps{Client: setupClient})
+}
+
 // renderAuthNotWired covers the one case Init genuinely cannot avoid: the
 // control plane's initial dial failed outright (web/shell.Mount's
 // DISCONNECTED fallback), so the composition root never had a real
@@ -243,4 +260,5 @@ func renderAuthNotWired() ui.Node {
 func init() {
 	shell.RegisterPage("/login", renderLogin)
 	shell.RegisterPage("/recover", renderRecover)
+	shell.RegisterPage("/setup", renderSetup)
 }

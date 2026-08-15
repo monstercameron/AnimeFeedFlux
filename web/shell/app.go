@@ -77,6 +77,12 @@ import (
 var routeTable = []guard.RouteInfo{
 	{Path: "/login", RequiresAuth: false},
 	{Path: "/recover", RequiresAuth: false},
+	// /setup is unauthenticated by construction — it exists to create the
+	// account that authentication checks against. web/guard's existing rules
+	// already do the right thing for it with no special case: ANON may open
+	// it, an authed-ish session is bounced to /generate, ELEVATED to
+	// /recover.
+	{Path: "/setup", RequiresAuth: false},
 	{Path: "/generate", RequiresAuth: true},
 	{Path: "/history", RequiresAuth: true},
 	{Path: "/settings", RequiresAuth: true},

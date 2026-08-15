@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -296,6 +297,97 @@ func (s *AuthServer) verifyPassword(password, hash string, rowPepperVersion int)
 		ok = false
 	}
 	return ok, needsRehash, err
+}
+
+// --- Setup ---------------------------------------------------------------
+
+// errSetupUnavailable is the ONE error Setup returns once an admin row
+// exists, whatever the actual reason a given call was refused (row already
+// there, lost the creation race, store error while checking). One string for
+// every cause, same reasoning as errAuthFailed: the only fact Setup's
+// availability may reveal is the one the open-first-come design already
+// concedes — "no admin exists yet" — and nothing beyond it.
+var errSetupUnavailable = status.Error(codes.FailedPrecondition, "setup unavailable")
+
+// Setup is first-run account creation over the wire: the same sequence
+// cmd/aff's cmdAdminInit runs locally (hash the password, create the
+// singleton admin row, enroll TOTP, generate recovery codes), reachable
+// without a session, working exactly once. Cam chose the open first-come
+// variant deliberately (DEVLOG 2026-08-15): whoever reaches this first on a
+// fresh or freshly-reset instance claims it, and the mitigation is
+// operational (claim promptly), not mechanical.
+//
+// The password is hashed UNPEPPERED (pepper version 0), exactly as `aff
+// admin init` writes it — store.InitAdmin records no pepper version — and
+// Login's transparent re-pepper migration upgrades the row on the first
+// successful sign-in if a pepper is configured.
+//
+// Ordering: everything fallible-but-pure (policy check, KDF, TOTP
+// enrollment, secret encryption, code generation) happens BEFORE the first
+// database write, so the only way to end up half-initialized is a database
+// error between InitAdmin and the two writes after it. That window also
+// exists in cmdAdminInit, and the remedy is the same: `aff admin reset`.
+func (s *AuthServer) Setup(ctx context.Context, req *affv1.AuthServiceSetupRequest) (*affv1.AuthServiceSetupResponse, error) {
+	ip := clientIP(ctx)
+
+	if _, err := s.store.GetAdmin(ctx); err == nil {
+		_ = s.store.RecordAuthEvent(ctx, "setup", ip, false, "admin already exists")
+		return nil, errSetupUnavailable
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return nil, errSetupUnavailable
+	}
+
+	// Real policy feedback, not a generic refusal: password policy is public
+	// (PLAN.md §4 states it verbatim), and the only caller who can reach a
+	// SUCCESSFUL Setup is the operator claiming the instance — there is no
+	// enrolled credential yet for this message to leak anything about.
+	if err := auth.IsWeak(req.Password); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	hash, err := auth.Hash(req.Password, auth.DefaultParams())
+	if err != nil {
+		return nil, status.Error(codes.Internal, "setup failed")
+	}
+	kdfParams, err := json.Marshal(auth.DefaultParams())
+	if err != nil {
+		return nil, status.Error(codes.Internal, "setup failed")
+	}
+	secret, provisioningURI, err := auth.Enroll("admin", "AnimeFeedFlux")
+	if err != nil {
+		return nil, status.Error(codes.Internal, "setup failed")
+	}
+	encSecret, err := auth.EncryptSecret(secret, s.secretKey)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "setup failed")
+	}
+	plainCodes, hashedCodes, err := auth.GenerateCodes(recoveryCodeCount)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "setup failed")
+	}
+
+	// InitAdmin is the atomic claim: two racing Setup calls both reach here,
+	// exactly one insert succeeds (store.ErrAdminExists for the loser, same
+	// refusal-not-overwrite contract cmdAdminInit relies on).
+	if err := s.store.InitAdmin(ctx, hash, string(kdfParams)); err != nil {
+		if errors.Is(err, store.ErrAdminExists) {
+			_ = s.store.RecordAuthEvent(ctx, "setup", ip, false, "admin already exists")
+			return nil, errSetupUnavailable
+		}
+		return nil, status.Error(codes.Internal, "setup failed")
+	}
+	if err := s.store.SetTOTPSecret(ctx, encSecret); err != nil {
+		return nil, status.Error(codes.Internal, "setup failed")
+	}
+	if err := s.store.StoreRecoveryCodes(ctx, hashedCodes); err != nil {
+		return nil, status.Error(codes.Internal, "setup failed")
+	}
+
+	_ = s.store.RecordAuthEvent(ctx, "setup", ip, true, "")
+	return &affv1.AuthServiceSetupResponse{
+		ProvisioningUri: provisioningURI,
+		RecoveryCodes:   plainCodes,
+	}, nil
 }
 
 // --- Login -------------------------------------------------------------
