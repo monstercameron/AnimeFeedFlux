@@ -934,9 +934,10 @@ what would actually happen.
 
 ## 11. Control-plane API (proto sketch)
 
-- `AuthService`: `Login` (password + TOTP), `RecoverWithCode`, `Logout`, `Session`,
-  `ChangePassword`, `ListSessions`, `RevokeSession`, `RevokeAllSessions`, `ReenrollTOTP`,
-  `RegenerateRecoveryCodes`.
+- `AuthService`: `Setup` (one-time first-run account creation — no session required, works only
+  while no admin row exists; §4 and §12.0), `Login` (password + TOTP), `RecoverWithCode`, `Logout`,
+  `Session`, `ChangePassword`, `ListSessions`, `RevokeSession`, `RevokeAllSessions`,
+  `ReenrollTOTP`, `RegenerateRecoveryCodes`.
 - `FeedService`: `List`, `Get`, `Create`, `Update`, `SetEnabled`, `Delete`, `RunNow`,
   `ValidateSpec`, `SetMembers` (aggregates, §14.2), `ExportTOML`, `ImportTOML`.
 - `SampleService`: `Sample` (unary dry run), `SampleStream` (server-stream), `ListSamples`,
@@ -1041,6 +1042,26 @@ load since the header mounts on every route.
    contradicting `TODOS.md` `D6-20`/`D6-21`'s "0 literals in web" close-out, which predates this file.
    See `TODOS.md` `D6-20`'s note for whether this is a defect to fix or a deliberate brand-name
    exemption `D6-19` should have named but didn't.
+
+### 12.0 First-run setup (`/setup`) — added 2026-08-15
+
+The web counterpart of `aff admin init` (which remains available), reachable without a session and
+usable exactly once per instance. See §4 for the open-first-come decision and its accepted race.
+
+- Password + confirmation, validated client-side against the same 15–128 length bounds `/recover`
+  mirrors; the server's `auth.IsWeak` (including the breached-password list, which never ships to
+  the WASM bundle) stays authoritative.
+- On success the page shows the otpauth:// provisioning URI and the ten recovery codes — the two
+  "shown once, stored hashed" values (§4) — and gates "Go to sign in" behind an "I've saved these"
+  checkbox, same stray-click protection as `/recover`'s re-enroll screen.
+- `Setup` never mints a session or a login ticket. The operator proves the enrollment round-trip by
+  signing in through `/login` like any other day.
+- Once the admin row exists, every call gets one generic `FailedPrecondition` ("setup unavailable")
+  regardless of cause — the single-sentinel anti-oracle rule from §4 applied to this endpoint. The
+  only fact its availability may reveal is "no admin exists yet", which the open-first-come design
+  concedes on purpose.
+- Route-guard behavior needs no special casing: ANON may open it, authed-ish states bounce to
+  `/generate`, ELEVATED to `/recover` — the same rules every unauthenticated route already gets.
 
 ### 12.1 Login (`/login`)
 
@@ -1934,7 +1955,7 @@ CLI, so the product is provably working while it still has no interface.
 | # | Milestone | Done when |
 |---|-----------|-----------|
 | D0 | Shell | Build pipeline, `<base href>`, routing, auth guard, WS reconnect, design tokens |
-| D1 | Auth pages | Login and recovery, generic errors, backoff surfaced, recovery drill passes |
+| D1 | Auth pages | Login, recovery, and one-time /setup; generic errors, backoff surfaced, recovery drill passes |
 | D2 | Generate | Feed rail, recipe editor, sampler with streaming and Slack preview, promote |
 | D3 | History | Runs tab with live watch; items tab with full CRUD, revisions, corrections |
 | D4 | Settings | Security, provider, generation, publishing, data, about |
