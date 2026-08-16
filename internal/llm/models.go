@@ -7,6 +7,8 @@ import (
 	"time"
 
 	openai "github.com/sashabaranov/go-openai"
+
+	"github.com/monstercameron/AnimeFeedFlux/internal/modelclass"
 )
 
 // models.go asks the provider which models this deployment's key can use.
@@ -145,31 +147,11 @@ func modelRank(m Model) int {
 // failure — an unclassified model still appears in the menu, just in the
 // "other" group. Nothing here may ever be used to REMOVE a model from the
 // list; see Model.Chat's doc comment.
+// The heuristic itself lives in internal/modelclass — a stdlib-only leaf —
+// because internal/feedspec needs it in the BROWSER build, and importing it
+// from here dragged this package's SchemaFlux/go-openai dependencies into
+// the WASM bundle (caught by check-wasm-secrets on go-openai's `authToken`
+// field, 2026-08-15). This name stays for every server-side caller.
 func ClassifyModel(id string) (chat, embedding bool) {
-	lower := strings.ToLower(id)
-
-	// Embedding first: "text-embedding-3-small" would otherwise match the
-	// generic text-model prefixes below.
-	if strings.Contains(lower, "embedding") {
-		return false, true
-	}
-
-	// Families that are definitively not text generation. Checked before the
-	// positive list so e.g. "gpt-4o-transcribe" is not offered as a chat
-	// model just because it starts with "gpt".
-	for _, no := range []string{
-		"whisper", "tts", "dall-e", "moderation", "transcribe", "realtime",
-		"audio", "image", "search", "similarity", "edit", "davinci-002", "babbage-002",
-	} {
-		if strings.Contains(lower, no) {
-			return false, false
-		}
-	}
-
-	for _, yes := range []string{"gpt", "o1", "o3", "o4", "chatgpt"} {
-		if strings.HasPrefix(lower, yes) {
-			return true, false
-		}
-	}
-	return false, false
+	return modelclass.ClassifyModel(id)
 }

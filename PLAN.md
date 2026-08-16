@@ -2105,6 +2105,8 @@ else in §14 waits.
 
 ## 19. Definition of done (v1)
 
+<!-- anchors: §19.1-§19.9 -->
+
 1. Three feeds live: `anime-trivia-daily`, `anime-fact-daily`, `anime-news-daily`.
 2. All three validate clean, in all three formats, with zero validator warnings.
 3. Slack subscribes to all three; over a 7-day window every generated item posts exactly once, no

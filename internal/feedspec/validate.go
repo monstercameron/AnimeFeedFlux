@@ -4,9 +4,16 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/monstercameron/AnimeFeedFlux/internal/generate"
-	"github.com/monstercameron/AnimeFeedFlux/internal/llm"
+	// prompttmpl and modelclass, NOT generate and llm: this package is
+	// compiled into the BROWSER (the /generate editor validates recipes
+	// client-side), and importing generate/llm here linked the entire
+	// server pipeline — SchemaFlux, go-openai — into the WASM bundle
+	// (check-wasm-secrets caught it on go-openai's authToken field,
+	// 2026-08-15). Both leaves carry exactly the two functions this file
+	// needs, stdlib-only.
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
+	"github.com/monstercameron/AnimeFeedFlux/internal/modelclass"
+	"github.com/monstercameron/AnimeFeedFlux/internal/prompttmpl"
 	"github.com/monstercameron/AnimeFeedFlux/internal/schedule"
 )
 
@@ -169,7 +176,7 @@ func validateModel(m ModelParams) []Problem {
 	if m.Model == "" {
 		return nil
 	}
-	if _, embedding := llm.ClassifyModel(m.Model); embedding {
+	if _, embedding := modelclass.ClassifyModel(m.Model); embedding {
 		return []Problem{{Field: "model", Reason: ReasonModelNotChat}}
 	}
 	return nil
@@ -287,14 +294,14 @@ func validateKind(s Spec) []Problem {
 
 // validatePrompts executes both templates against generate's fully populated
 // dummy context (§7: validation is by EXECUTION, not Parse — Parse alone
-// does not catch {{.Bogus}}). Uses generate.ValidateTemplate so this package
+// does not catch {{.Bogus}}). Uses prompttmpl.ValidateTemplate so this package
 // never grows a second, possibly divergent, template-checking code path.
 func validatePrompts(s Spec) []Problem {
 	var problems []Problem
-	if err := generate.ValidateTemplate(s.SystemPrompt); err != nil {
+	if err := prompttmpl.ValidateTemplate(s.SystemPrompt); err != nil {
 		problems = append(problems, Problem{Field: "system_prompt", Reason: ReasonTemplateInvalid})
 	}
-	if err := generate.ValidateTemplate(s.UserPrompt); err != nil {
+	if err := prompttmpl.ValidateTemplate(s.UserPrompt); err != nil {
 		problems = append(problems, Problem{Field: "user_prompt", Reason: ReasonTemplateInvalid})
 	}
 	return problems
