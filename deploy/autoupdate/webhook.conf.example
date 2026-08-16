@@ -1,0 +1,16 @@
+[
+  {
+    "//": "Deploy hook receiver config for the `webhook` package (apt install webhook). deploy-bootstrap.sh installs this to /etc/webhook.conf with the placeholder replaced by the real shared secret (which lives ONLY there and in the repo's AFF_DEPLOY_HOOK_SECRET actions secret — never in git). The Release workflow POSTs here via nginx's /internal/deploy-hook location on the publish vhost; the receiver just starts aff-autoupdate.sh, which does the tag comparison and the health-gated rollout, so a forged or replayed request with the right secret can at worst trigger a no-op re-check.",
+    "id": "aff-deploy",
+    "execute-command": "/usr/local/bin/aff-autoupdate.sh",
+    "command-working-directory": "/opt/animefeedflux",
+    "response-message": "update check started",
+    "trigger-rule": {
+      "match": {
+        "type": "value",
+        "value": "AFF_HOOK_SECRET_PLACEHOLDER",
+        "parameter": { "source": "header", "name": "X-Aff-Deploy-Token" }
+      }
+    }
+  }
+]

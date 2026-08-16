@@ -8,15 +8,29 @@ the decisions that were made and then reversed — see [`DEVLOG.md`](DEVLOG.md).
 is deliberate: a changelog that carries reasoning becomes unreadable, and a narrative that carries
 version diffs becomes unmaintainable.
 
-No software is released yet — nothing built here has been deployed anywhere, and no feed has ever
-been published. See `README.md` → "Status" for what is actually built versus what is still planned.
-
-`0.0.1-dev` versioned the **specification**, not an implementation; `-dev` sorts below any real
-release under semver precedence, so tagging a real build later cannot be shadowed by an early one.
-The number stays in the `0.0.x-dev` range through the build phases, and the first version that means
-"you can run this" is the one cut at the end of Phase C.
+`v0.1.0` (2026-08-15) is the first deployed release: the droplet runs the container image the
+Release workflow builds, and a systemd timer on the box picks up each new `v*` tag automatically.
+(`0.0.1-dev` versioned the **specification** only; `-dev` sorts below any real release under semver
+precedence, which is why tagging real builds now cannot be shadowed by it.)
 
 ## [Unreleased]
+
+## [0.1.0] — 2026-08-15
+
+First deployed release. Everything below shipped together after the day's promotion gate (see the
+2026-08-15/16 commits on `dev` for the six CI-caught fixes that preceded it).
+
+### Added — deployment and self-updating (TODOS.md C-phase)
+
+- **The app runs on the production droplet in Docker**, bootstrapped by `deploy-bootstrap.sh`:
+  nginx vhosts for `anime.earlcameron.com` (public feeds) and `admin.anime.earlcameron.com`
+  (home-IP allowlisted control plane), Let's Encrypt TLS on both, and the container bound to
+  loopback behind them.
+- **Releases deploy themselves.** Tag `vX.Y.Z` on `main` and push it: the Release workflow builds
+  and publishes the image, then POSTs a secret-gated deploy hook to the droplet, whose local
+  updater pulls the new tag and rolls it out behind the container healthcheck. A daily systemd
+  timer re-checks as a fallback for a lost hook delivery. No inbound SSH from CI — the box's
+  IP allowlist stays intact.
 
 ### Added — 2026-08-15, feeds choose how they run: scheduled, ad hoc, or watching for events
 

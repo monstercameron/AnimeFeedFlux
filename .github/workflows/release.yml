@@ -134,6 +134,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The droplet's SSH is IP-allowlisted to the home address, so runners
+      # can never push a deploy in — the hook flips it to pull: the box's
+      # webhook receiver (deploy/autoupdate/) starts its own health-gated
+      # update the moment this fires. Verification lives on the box
+      # (journalctl -u aff-autoupdate); this step only proves delivery.
+      - name: Deploy hook (pull-based droplet update)
+        env:
+          HOOK_SECRET: ${{ secrets.AFF_DEPLOY_HOOK_SECRET }}
+        run: |
+          if [ -z "$HOOK_SECRET" ]; then
+            echo "::notice::AFF_DEPLOY_HOOK_SECRET not set — skipping deploy hook."
+            exit 0
+          fi
+          curl -fsS -m 30 -X POST -H "X-Aff-Deploy-Token: $HOOK_SECRET" \
+            https://anime.earlcameron.com/internal/deploy-hook
+          echo "hook delivered — droplet update check started"
+
       - name: Check deploy is configured
         id: cfg
         env:

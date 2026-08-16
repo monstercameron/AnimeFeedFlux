@@ -1,0 +1,14 @@
+# aff-autoupdate.service — one auto-update check (driven by the .timer).
+# Installed by deploy-bootstrap.sh to /etc/systemd/system/. Oneshot: the
+# unit's success/failure IS the deploy's, because aff-autoupdate.sh execs
+# deploy-release.sh, which blocks on the container healthcheck — so
+# `systemctl status aff-autoupdate` and `journalctl -u aff-autoupdate`
+# answer "did the last update work" directly.
+[Unit]
+Description=AnimeFeedFlux auto-update to the newest v* release tag
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aff-autoupdate.sh

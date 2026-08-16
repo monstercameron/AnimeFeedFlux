@@ -354,6 +354,59 @@ if command -v nginx >/dev/null 2>&1; then
     nginx -t && systemctl reload nginx
 fi
 
+# --- 5.5 auto-update: webhook receiver + daily fallback timer ---------------
+#
+# The primary update path is PUSH-shaped but pull-executed: the Release
+# workflow POSTs to /internal/deploy-hook (nginx, publish vhost) the moment
+# an image is published; the loopback-only `webhook` receiver starts
+# aff-autoupdate.sh, which compares the newest v* tag against the pinned one
+# and hands off to deploy-release.sh's health-gated rollout. The timer is a
+# DAILY fallback for a lost delivery, not a poll. See deploy/autoupdate/.
+
+step "auto-update units"
+install -m 0755 "$DEPLOY_DIR/autoupdate/aff-autoupdate.sh" /usr/local/bin/aff-autoupdate.sh
+install -m 0644 "$DEPLOY_DIR/autoupdate/aff-autoupdate.service" /etc/systemd/system/aff-autoupdate.service
+install -m 0644 "$DEPLOY_DIR/autoupdate/aff-autoupdate.timer" /etc/systemd/system/aff-autoupdate.timer
+systemctl daemon-reload
+systemctl enable --now aff-autoupdate.timer >/dev/null 2>&1
+done_ "aff-autoupdate.sh + daily fallback timer enabled"
+
+step "deploy-hook webhook receiver"
+if ! command -v webhook >/dev/null 2>&1; then
+    apt-get install -y webhook
+    done_ "installed webhook"
+fi
+HOOK_SECRET_FILE="$CONF_DIR/deploy-hook-secret"
+if [ -f "$HOOK_SECRET_FILE" ]; then
+    # The secret file is created by the operator (or the first bootstrap run
+    # below) and mirrored into the repo's AFF_DEPLOY_HOOK_SECRET actions
+    # secret; it never appears in git.
+    hook_secret=$(cat "$HOOK_SECRET_FILE")
+    sed "s/AFF_HOOK_SECRET_PLACEHOLDER/$hook_secret/" \
+        "$DEPLOY_DIR/autoupdate/webhook.conf.example" > /etc/webhook.conf
+    chmod 0600 /etc/webhook.conf
+    # The Debian package binds 0.0.0.0 by default; loopback only — nginx is
+    # the sole doorway, and it strips everything but the one exact path.
+    install -d -m 0755 /etc/systemd/system/webhook.service.d
+    cat > /etc/systemd/system/webhook.service.d/override.conf <<'OVR'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/webhook -nopanic -hooks /etc/webhook.conf -ip 127.0.0.1 -port 9000
+OVR
+    systemctl daemon-reload
+    systemctl enable --now webhook >/dev/null 2>&1
+    systemctl restart webhook
+    done_ "webhook receiver listening on 127.0.0.1:9000"
+else
+    umask 077
+    openssl rand -hex 32 > "$HOOK_SECRET_FILE"
+    warn "generated a new deploy-hook secret at $HOOK_SECRET_FILE."
+    warn "Mirror it into the repo so the Release workflow can call the hook:"
+    warn "  gh secret set AFF_DEPLOY_HOOK_SECRET < $HOOK_SECRET_FILE"
+    warn "then re-run this script to install /etc/webhook.conf from it."
+    DEFERRED="$DEFERRED deploy-hook-secret"
+fi
+
 # --- 6. summary --------------------------------------------------------
 
 printf '\n==> bootstrap summary (mode: %s, domain: %s)\n' "$DEPLOY_MODE" "$PUBLIC_DOMAIN"

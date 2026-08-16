@@ -1,0 +1,22 @@
+# aff-autoupdate.timer — DAILY FALLBACK check for a new v* release.
+# Installed and enabled by deploy-bootstrap.sh.
+#
+# The PRIMARY update path is the deploy webhook: the Release workflow POSTs
+# to /internal/deploy-hook the moment the image is published, and the
+# receiver starts the same aff-autoupdate.sh immediately (see
+# deploy/autoupdate/webhook.conf.example and release.yml's notify step).
+# This timer only exists for the delivery that got lost — webhook down,
+# network blip, secret rotated mid-flight — so it runs once a day, not on a
+# tight poll (operator directive 2026-08-16: a 10-minute poll was "too
+# aggressive" for what is a deliberate, occasional release act).
+[Unit]
+Description=Daily fallback AnimeFeedFlux auto-update check
+
+[Timer]
+OnBootSec=5min
+OnCalendar=daily
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target
