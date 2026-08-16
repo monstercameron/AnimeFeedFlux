@@ -950,7 +950,7 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
 
 ### Feed CRUD 2026-08-11 (A7 series)
 
-- [x] `A7-01` **FIXED: a feed could not be deleted from anywhere in the UI.** `FeedService.Delete`
+- [x] `FC7-01` **FIXED: a feed could not be deleted from anywhere in the UI.** `FeedService.Delete`
       has been implemented, version-checked and tested on the server since the RPC layer was
       written, and nothing ever called it: a feed created by mistake could be disabled but never
       removed. Each rail row now has a ⋯ menu (destructive actions behind the kebab, D0-15) with
@@ -959,23 +959,23 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       sends `expected_version`, so a feed edited in another tab is never removed on a stale view.
       Verified end to end: create → update → delete, including that a wrong slug keeps the confirm
       button disabled.
-- [x] `A7-02` **FIXED: creating a feed was impossible.** The "+ New" draft carried no cron and no
+- [x] `FC7-02` **FIXED: creating a feed was impossible.** The "+ New" draft carried no cron and no
       timezone, and `internal/feedspec` rejects both as `cron_invalid` / `timezone_invalid` — so
       every new feed failed validation, on top of the budgets and kind fixed in `A5-06`. New drafts
       now start at 09:00 daily UTC. That is a real default, not a placeholder: once a day is what
       this app is for, and a morning slot means an overnight failure is visible when someone is
       awake. UTC because the browser's zone is not available to that code and a confidently wrong
       local zone is worse than an obvious one the operator will change.
-- [x] `A7-03` **FIXED: the feed list was hidden inside "Recipe settings".** The rail — every feed
+- [x] `FC7-03` **FIXED: the feed list was hidden inside "Recipe settings".** The rail — every feed
       with status, stale flag, last build, 7-day spend, enable toggle and Run Now — was nested in a
       disclosure about slugs and cron expressions, which is why the app looked like it had no feed
       management at all. It is now its own `Feeds (N)` disclosure, open by default when no feed is
       selected.
-- [x] `A7-04` **FIXED: a `[]any` passed to `h.Tag` printed `0x58930000` on the page.** `h.Tag` is
+- [x] `FC7-04` **FIXED: a `[]any` passed to `h.Tag` printed `0x58930000` on the page.** `h.Tag` is
       variadic; handing it a slice makes the slice itself an argument, so it is neither props nor a
       child. GWC stringified it, putting a pointer in the body text — and the element silently got
       none of its props.
-- [x] `A7-08` **FIXED: none of the CRUD controls were on screen.** The operator's follow-up was
+- [x] `FC7-08` **FIXED: none of the CRUD controls were on screen.** The operator's follow-up was
       "where is the option to CRUD a feed?????" and it was right — everything worked and nothing was
       visible. Save was at the bottom of a collapsed "Recipe settings" disclosure, Delete inside a ⋯
       inside a row inside a collapsed "Feeds" disclosure, and New was a text link. Worse, the Feeds
@@ -989,7 +989,7 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       `d.open = true`, so it proved the operations worked while saying nothing about whether anyone
       could reach them. There is now a second test that uses only visible controls and fails if a
       panel has to be forced open.
-- [x] `A7-09` **FIXED: deleting a feed burned its slug permanently.** Deletion is soft, and `slug` is
+- [x] `FC7-09` **FIXED: deleting a feed burned its slug permanently.** Deletion is soft, and `slug` is
       UNIQUE across every row including deleted ones, so a deleted feed held its name forever:
       delete `daily-anime-trivia`, try to recreate it, and the server answers *feed slug
       "daily-anime-trivia" already exists* — about a feed that appears in no list and cannot be
@@ -997,18 +997,18 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       suffix and the name goes back into circulation; the row itself stays, so the delete is still
       auditable rather than becoming a hard delete by stealth.
       Covered by `TestFeedDeleteReleasesSlugForReuse`.
-- [x] `A7-10` **FIXED: a new feed was created disabled, and a disabled feed cannot be previewed.**
+- [x] `FC7-10` **FIXED: a new feed was created disabled, and a disabled feed cannot be previewed.**
       So the first thing a newly created feed did was tell the operator three times that it was off,
       with no hint that they had to turn it on before anything would work. New feeds are enabled; the
       safety net for unwanted spend is the budgets and ceilings the draft carries plus the global
       kill switch, not a feed that silently does nothing.
-- [x] `A7-11` **FIXED: the sampler rendered `generate.This feed is disabled.`** An already-resolved
+- [x] `FC7-11` **FIXED: the sampler rendered `generate.This feed is disabled.`** An already-resolved
       sentence was being passed as `DisabledReasonKey`, and the shell's translator prefixed its
       namespace before failing to find it. It goes through the passthrough key with the text as an
       argument now — `StatePanelProps` has had a `DisabledReasonArgs` field the whole time, and the
       comment in the code claiming it did not was wrong.
 
-- [x] `A7-12` **FIXED: overlays did not float — every kebab menu and every modal reflowed the page.**
+- [x] `FC7-12` **FIXED: overlays did not float — every kebab menu and every modal reflowed the page.**
       `gwcui.Overlay` positions nothing: it sets a z-index and some `data-overlay-*` attributes, and
       leaves placement to the caller (the library's own anchored-overlay example passes
       `fixed left-… top-…` through `SurfaceClass`). Neither `web/ui.Kebab` nor `web/ui.Modal` ever
@@ -1024,16 +1024,16 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       the `visibility` key once a measurement existed. Omitting a key does not clear the property —
       the DOM diff has nothing to compare against — so the menu ended up correctly positioned, on
       top, and invisible. Every key is now present in every state.
-- [x] `A7-13` **FIXED: `/history` had a second, hand-rolled kebab that opened on CSS `:hover`.**
+- [x] `FC7-13` **FIXED: `/history` had a second, hand-rolled kebab that opened on CSS `:hover`.**
       No click, no touch, and it closed if the pointer strayed on the way to the item; it was also
       `position: absolute` inside the scrolling table, so the lower rows' menus were clipped by the
       table edge. Both tables now use the shared `web/ui.Kebab`, which brings a real open state,
-      Escape and outside-click handling, and the fixed positioning from `A7-12`. The item row's
+      Escape and outside-click handling, and the fixed positioning from `FC7-12`. The item row's
       "publish a correction" form used to unfold *inside* the dropdown; it is now a panel under the
       row, beside the revisions panel it already resembled. One kebab implementation in the app
       instead of two.
 
-- [x] `A7-14` **FIXED: clicking an open kebab reopened it — the menu flashed shut and came back, and
+- [x] `FC7-14` **FIXED: clicking an open kebab reopened it — the menu flashed shut and came back, and
       then would not close at all.** `gwcui.Overlay` dismisses on `pointerdown`, captured at the
       document, and treats anything outside the SURFACE as outside — which includes the trigger that
       opened it. So a click on an open menu ran two handlers in order: the dismissal closed it, then
@@ -1047,7 +1047,7 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       Verified on all three kebabs (feed row, strip, history row): open/closed/open/closed across
       four clicks, plus Escape and click-away, and the trigger still works afterwards.
 
-- [x] `A7-15` **FIXED: `/history`'s controls were six different sizes, and its two tabs had no URLs.**
+- [x] `FC7-15` **FIXED: `/history`'s controls were six different sizes, and its two tabs had no URLs.**
       Measured before: filter selects 29px next to date inputs 37px next to a text input 35px, in the
       same row; table buttons 32px beside 35px; three different label treatments on the Items filter
       row alone (inline before the search box, stacked over the feed menu, inline again before the
@@ -1063,7 +1063,7 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       the guard consults, and a path missing from it is treated as unknown and redirected — which is
       why `/history/items` first went to `/generate`.
 
-- [x] `A7-16` **FIXED: `/settings/data` was four operations with four different layouts.** The three
+- [x] `FC7-16` **FIXED: `/settings/data` was four operations with four different layouts.** The three
       figures the page exists to report were three muted sentences that read like a caption; the
       buttons were 333px slabs sized by a field beside them; and two of the four operations — Import
       and Vacuum — had an unlabeled overflow glyph as their ONLY control, so the page looked like it
@@ -1074,7 +1074,7 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       confirmations, which are the actual safety, are unchanged. The kebab rule (§12.6 / D0-15) is
       about destructive actions inside a LIST OF ROWS; when the operation IS the card, hiding it
       behind a glyph is not caution, it is concealment.
-- [x] `A7-17` **FIXED: the item search could not match a prefix — "triv" found nothing, "trivia"
+- [x] `FC7-17` **FIXED: the item search could not match a prefix — "triv" found nothing, "trivia"
       found everything.** The search box's contents went straight into `items_fts MATCH`, and FTS5
       matches whole tokens, so a search-as-you-type field returned zero results with total confidence
       until the word was finished. It also leaked FTS5's query LANGUAGE: `AND`, `NEAR`, `*`, `-`, `:`
@@ -1086,7 +1086,7 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       Covered by unit tests over the built string and an end-to-end test against the real FTS5 index
       (`TestItemListSearchMatchesPrefix`), because the first only proves what was built and the
       second proves SQLite agrees.
-- [x] `A7-18` **FIXED: the first search after `/history/items` loaded was always lost.** You typed,
+- [x] `FC7-18` **FIXED: the first search after `/history/items` loaded was always lost.** You typed,
       and the table sat on "Loading…" forever — not for a while, forever: the request wedged (the
       `A5-44` tunnel defect), and `retryRead`'s own timeout never fired either, because the timer
       that would fire it was waiting on the same stalled render loop. Both history tabs now hold
@@ -1096,7 +1096,7 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       directly on `/history/items` otherwise showed an empty table), and the loader converges on the
       latest filter, so a filter changed while a request is in flight is no longer swallowed.
 
-- [x] `A7-19` **FIXED: "Run now" told you nothing.** The click called `FeedService.RunNow`, which
+- [x] `FC7-19` **FIXED: "Run now" told you nothing.** The click called `FeedService.RunNow`, which
       opens a run row, hands it to the executor and returns a `run_id` — and the page threw that id
       away, reloaded the feed list, and showed no sign anything had happened. The run then spent real
       money, and the only way to learn what it did was to go to History and pick the feed out of a
@@ -1105,23 +1105,23 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       than streamed: `RunService.Watch` exists and would be tidier, but the streaming path in this
       app has needed its own care, and a run this page just started is worth two seconds of polling
       rather than a second streaming implementation to maintain.
-- [x] `A7-20` **FIXED: per-feed generation history was effectively unreachable.** Every feed row and
+- [x] `FC7-20` **FIXED: per-feed generation history was effectively unreachable.** Every feed row and
       the strip's ⋯ menu now link to `/history/runs?feed=<id>`, and the Runs tab reads that from the
       URL — so "show me this feed's runs" is a link, shareable and reload-proof, instead of an
       instruction to navigate elsewhere and re-choose the feed.
-- [x] `A7-21` **FIXED: the recipe form's Model field was free text while the strip's was a menu.**
+- [x] `FC7-21` **FIXED: the recipe form's Model field was free text while the strip's was a menu.**
       Backwards: the strip's is a per-preview choice, the recipe's is SAVED and used by every
       scheduled run, and §8 classifies "model not found" as a recipe-scoped Fatal that disables the
       feed — a typo there is indistinguishable from a deprecation until a run fails at 4am. Both now
       render through one `renderModelPicker` (126 models, chat grouped first, unlisted values pinned
       in, free-text fallback when the provider cannot be reached), so they cannot drift apart again.
 
-- [ ] `A7-05` **`FeedService.SetMembers` is still unreachable from the UI.** Aggregate feeds cannot
+- [ ] `FC7-05` **`FeedService.SetMembers` is still unreachable from the UI.** Aggregate feeds cannot
       have their member feeds chosen anywhere. Either build the control or mark aggregate feeds as
       not-yet-supported in the Kind menu — as it stands, an operator can create a feed of a kind
       that cannot be configured.
 
-- [x] `A7-06` **FIXED (workaround): an off-loop state update on `/generate` could never render.**
+- [x] `FC7-06` **FIXED (workaround): an off-loop state update on `/generate` could never render.**
       GWC v5.0.1 queues state updates made from a goroutine and books a drain; the drain defers
       itself while a render pass is in flight, and `PostAsync` will not book a second one while a
       booked drain is outstanding — so if that drain never runs, every later update joins a queue
@@ -1139,7 +1139,7 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       **This is a workaround for a framework defect and should be removed when that is fixed.**
       `/settings` saves were checked and are unaffected; `/history`'s reducer dispatches have their
       own nudge (`web/pages/history/asyncdispatch.go`).
-- [ ] `A7-07` **Report the GWC async-inbox wedge upstream** (see `A7-06`). The suspicious code is
+- [ ] `FC7-07` **Report the GWC async-inbox wedge upstream** (see `FC7-06`). The suspicious code is
       `internal/runtime/inbox.go`: `PostAsync` returns early when `inbox.scheduled` is true, and
       `DrainAsyncInbox` re-books itself via `scheduler.SetTimeout` while `wipRoot != nil` — if that
       re-booked drain is ever lost, nothing re-arms it.
@@ -1149,11 +1149,11 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
 Drove `/login` -> `/generate` -> New feed in a real browser (Playwright, `NODE_PATH` borrowed from
 CashFlux per `e2eweb/README.md`'s convention; login now renders — the `e2eweb` "SKIP, login mid-
 rewrite" note is stale). Screenshots in `.devrun/shots/`. Stopped short of Preview/Run now — those
-reach the real OpenAI key wired into this dev server. Four findings filed same day as `A7-22`..
-`A7-25` (this section originally misnumbered them `A7-08`..`A7-11`, colliding with tickets already
+reach the real OpenAI key wired into this dev server. Four findings filed same day as `FC7-22`..
+`FC7-25` (this section originally misnumbered them `FC7-08`..`FC7-11`, colliding with tickets already
 using those ids both earlier and later in this same series — corrected here, no content lost).
 
-- [x] `A7-22` **FIXED 2026-08-14, but the actual defect was smaller than first reported — read
+- [x] `FC7-22` **FIXED 2026-08-14, but the actual defect was smaller than first reported — read
       before assuming this is Fatal.** Original report: a brand-new feed's Model picker strip
       (`#gen-strip-model`) shows a non-chat embedding model (`text-embedding-3-large`) selected
       immediately after "New feed", instead of the "Default model" placeholder. First read as a
@@ -1170,7 +1170,7 @@ using those ids both earlier and later in this same series — corrected here, n
       in `web/pages/generate` writes `Spec.Model` outside a real `change` event (confirmed by
       instrumenting `change`/`input` listeners on both `#gen-strip-model` and
       `#generate-editor-model`: neither fired during the entire reproduction). Not filed upstream
-      separately — same disposition as `A7-25` below, since GWC is the user's own other project.
+      separately — same disposition as `FC7-25` below, since GWC is the user's own other project.
       **What was actually fixed**, since a display bug this close to "the model that generates every
       item" is still worth a hard backstop regardless of root cause: `internal/feedspec.Validate` now
       rejects a pinned `Model` that `internal/llm.ClassifyModel` positively identifies as an embedding
@@ -1186,9 +1186,9 @@ using those ids both earlier and later in this same series — corrected here, n
       import, a future regression here, this display bug if it ever starts writing what it shows),
       not a fix for a corruption this specific bug was ever proven to cause. The visible glitch
       itself is still open — this ticket closes the risk, not the flicker.
-- [x] `A7-29` **FIXED 2026-08-15: the visible glitch `A7-22` left open — model picker showing the
+- [x] `FC7-29` **FIXED 2026-08-15: the visible glitch `FC7-22` left open — model picker showing the
       wrong option selected on mount — closed for real, not just backstopped.** Cam hit it live
-      after `A7-22`/`A4-48` shipped ("the model selector bug") and called out that leaving the
+      after `FC7-22`/`A4-48` shipped ("the model selector bug") and called out that leaving the
       display broken while only guarding the data wasn't good enough. Re-investigated with
       `console.log` instrumentation inside the effect itself (temporary, removed before this
       landed): a one-shot post-mount correction — read the DOM's value once, force it if wrong —
@@ -1218,7 +1218,7 @@ using those ids both earlier and later in this same series — corrected here, n
       independent things that both had to be fixed for that one screen to read right.
       `go build`, `go vet`, `gofmt -l`, native `go test ./...`, and
       `GOOS=js GOARCH=wasm go test ./web/...` all clean.
-- [ ] `A7-23` **"Feeds (N)" header disagreed with the list rendered directly beneath it, once.**
+- [ ] `FC7-23` **"Feeds (N)" header disagreed with the list rendered directly beneath it, once.**
       On the very first paint of `/generate` right after login, the collapsible section read
       `Feeds (0) — status, schedule, spend, delete` while all three seed feeds were already fully
       rendered as cards below it (`.devrun/shots/03-post-login.png`). Both the count
@@ -1229,7 +1229,7 @@ using those ids both earlier and later in this same series — corrected here, n
       screenshot — after creating feeds 4, 5, 6 — showed a correct, matching count). Left open,
       unfixed: not reproduced a second time, so there is nothing to verify a fix against yet. Next
       step is a tighter repro (hammer login→/generate reloads) before touching the resource hook.
-- [ ] `A7-24` **Not a functional bug — downgraded from the original report.** Two "New feed"
+- [ ] `FC7-24` **Not a functional bug — downgraded from the original report.** Two "New feed"
       buttons exist (`generate-rail-new` in the Feeds panel, and the strip's own via
       `render_workbench.go:515`), but both call the exact same `railProps.OnNew` handler
       (`render.go:436`), which correctly resets `draft`/`selectedSlug`/`creatingNew`/`fieldErrs`
@@ -1237,7 +1237,7 @@ using those ids both earlier and later in this same series — corrected here, n
       consistency question (two entry points to one action, no stated reason for both), not left
       unfixed by mistake — deleting either button is a design call for a human, not something to do
       unasked.
-- [ ] `A7-25` **GWC's `Announcer.Region()` renders the literal text "-0" into both live regions on
+- [ ] `FC7-25` **GWC's `Announcer.Region()` renders the literal text "-0" into both live regions on
       every mount — root cause found, not upstreamed.** Confirmed on `/login`'s first paint (before
       any interaction): the polite and assertive regions each contain
       `<span aria-hidden="true">-0</span>`. Visually hidden (clipped, 1px), but a screen reader
@@ -1249,7 +1249,7 @@ using those ids both earlier and later in this same series — corrected here, n
       `web/pages/auth` never construct that string) and not patched here — GWC is vendored via
       `go.mod` (`v5.0.1`, no local fork/replace), so fixing it in-repo means either forking GWC or
       adding a `replace` directive, both scope decisions for whoever owns that project to make, not
-      something to slip in silently while fixing this repo's own bugs. Same disposition as `A7-07`.
+      something to slip in silently while fixing this repo's own bugs. Same disposition as `FC7-07`.
 
 ### Second browser walkthrough 2026-08-14 (further into J2, plus History/Settings/dark/narrow)
 
@@ -1257,7 +1257,7 @@ Re-walked login -> new feed -> Validate -> Save -> History -> Settings, this tim
 across desktop, dark mode, and a 375px viewport (`.devrun/shots2/`). Test feed created and deleted
 via `aff feed delete` afterward, same as the first pass.
 
-- [x] `A7-26` **FIXED 2026-08-14: `/settings` → Security's Active Sessions table was illegible —
+- [x] `FC7-26` **FIXED 2026-08-14: `/settings` → Security's Active Sessions table was illegible —
       every column truncated to 2-4 characters, including the IP address the table exists to show.**
       At 1280px the table measured ~320px wide (`.devrun/shots2/06-settings.png`): headers read
       `C..`/`Ac...`, cells read `127...`/`0 se...`/`N.`. Root cause: `.af-settings-card` is a CSS
@@ -1279,7 +1279,7 @@ via `aff feed delete` afterward, same as the first pass.
       and `.devrun/shots2/11-sessions-fixed.png` shows every column (Device, IP address, Last seen,
       Current, Actions) fully legible with room to spare. `go build`, `go vet`, `gofmt -l`, and the
       full `go test ./...` all stayed clean.
-- [ ] `A7-27` **A just-saved feed's card briefly renders broken during the Save transition.**
+- [ ] `FC7-27` **A just-saved feed's card briefly renders broken during the Save transition.**
       One screenshot caught it (`.devrun/shots2/04-after-save.png`): right after clicking Save, the
       new 4th feed card's action row (`Enabled / Run now / ⋯`) rendered with no title/slug above it,
       and the recipe-settings summary line (schedule/budget text) floated above the whole Feeds
@@ -1298,7 +1298,7 @@ worse than a missing feature, because the screen says the setting is in effect.
 
 #### The systemic one
 
-- [x] `A5-01` **FIXED 2026-08-11: every setting that has somewhere to go now goes there. — original report:
+- [x] `RS5-01` **FIXED 2026-08-11: every setting that has somewhere to go now goes there. — original report:
       WRITE-ONLY SETTINGS: at least eleven settings persist, round-trip through the UI, and are read by
       nothing.** Confirmed individually by four independent reviewers. Each showed a "Saved." confirmation
       that was true of the database and false of the system.
@@ -1312,116 +1312,116 @@ worse than a missing feature, because the screen says the setting is in effect.
       CREATE, filling only fields the request left empty. Update deliberately does not consult them, or a
       cleared author could never be cleared.
       `default_daily_token_budget` / `default_daily_run_budget` / `default_feed_window` — already read by
-      `/generate`'s new-feed draft (`A5-06`).
+      `/generate`'s new-feed draft (`RS5-06`).
       `staleness_threshold_minutes` — the rail now flags stale against it instead of a hardcoded 24h
       constant. `/healthz` and the nightly webhook keep their grace MULTIPLIER over each feed's own cron
       interval, which is not a disagreement to collapse: a flat minute count cannot serve an hourly feed
       and a weekly one at once.
-      the provider price table — `A5-02`.
-      Remaining, and split out rather than left ambiguous: `default_contact` (`A5-50`).
+      the provider price table — `RS5-02`.
+      Remaining, and split out rather than left ambiguous: `default_contact` (`RS5-50`).
 
 #### Blockers
 
-- [x] `A5-02` **FIXED: the price table now reaches the cost engine, and its units are honest. — original report: The Settings price table is disconnected from the cost and budget engine.**
+- [x] `RS5-02` **FIXED: the price table now reaches the cost engine, and its units are honest. — original report: The Settings price table is disconnected from the cost and budget engine.**
       `UpdateSettings` persists it into the `settings` row, while real per-run cost and §13's budget
       ceilings come from a separate, file-backed `internal/budget.Table` the RPC never touches.
       Editing rates on `/settings/provider` has zero effect on spend enforcement. Compounding it:
       the Rates panel's column headers say **$/1M tokens** while the field and its only consumer
       (`web/pages/generate/logic.go:276`) treat the value as **$/1K** — a 1000x unit mismatch that
       would poison the table even once it is wired.
-- [x] `A5-03` **FIXED: a fresh install now seeds real global ceilings. — original report: The global daily spend ceiling is silently absent on every fresh install.**
+- [x] `RS5-03` **FIXED: a fresh install now seeds real global ceilings. — original report: The global daily spend ceiling is silently absent on every fresh install.**
       `sysLoadGeneration` (`internal/rpc/system.go:239`) seeds only `Enabled`;
       `GlobalDailyTokenCeiling` and `GlobalDailySpendCeilingUsd` ship as 0, and
       `internal/budget.CheckRequest` treats 0 as "no cap" (gated on `> 0`). §13's backstop does not
       exist by default, and nothing in the UI says 0 means unlimited rather than zero-allowed.
-- [x] `A5-04` **FIXED: recipe import sends the expected version. — original report: Recipe import from `/settings/data` cannot succeed for any feed.** `doImport` never
+- [x] `RS5-04` **FIXED: recipe import sends the expected version. — original report: Recipe import from `/settings/data` cannot succeed for any feed.** `doImport` never
       sets `ExpectedVersion`, and every feed row starts at `version=1`, so the server's
       optimistic-concurrency check (`internal/rpc/feed.go:1177`) rejects every import. The generic
       error message also hides the cause. Related to the already-filed `A4-43` format confusion.
-- [x] `A5-05` **FIXED: creating an item from `/history` was impossible.** The create form never let
+- [x] `RS5-05` **FIXED: creating an item from `/history` was impossible.** The create form never let
       the operator pick a feed and never set `FeedId`, while the server hard-rejects `feed_id == 0`.
       The form now has a feed picker (create only — an existing item cannot move between feeds, its
       guid is already published per §5.5), defaulting to the first feed.
-- [x] `A5-06` **FIXED: a brand-new feed could never be saved.** `/generate`'s "+ New" draft set only
+- [x] `RS5-06` **FIXED: a brand-new feed could never be saved.** `/generate`'s "+ New" draft set only
       `ItemsPerRun` and `FeedWindow`; `internal/feedspec`'s `validateBudgets` rejects a zero daily
       token budget and a zero daily run budget, so the first save of every new feed failed validation
       on two fields the operator was never shown. The draft now seeds both from the admin's
       configured defaults with fallbacks, plus `TtlMinutes` (which shipped 0 and rendered
       `<ttl>0</ttl>` — the schema's `DEFAULT 15` never applied because the RPC always sends a value).
-- [x] `A5-07` **FIXED: the Preview cost estimate could never appear.** `samplerProps.Prices` was
+- [x] `RS5-07` **FIXED: the Preview cost estimate could never appear.** `samplerProps.Prices` was
       hardcoded `nil`, so `EstimateSampleCostUSD` never matched a model and the strip read "Estimate
       unavailable" permanently, against §12.3's requirement that cost be visible at the moment of
       spending. Now fed from the settings resource the page already fetches — though it only shows a
-      real number once `A5-02`'s rate table is real.
+      real number once `RS5-02`'s rate table is real.
 
 #### Major
 
-- [x] `A5-08` **FIXED: every unary RPC could hang forever.** `Conn.Usable` deliberately attempts calls
+- [x] `RS5-08` **FIXED: every unary RPC could hang forever.** `Conn.Usable` deliberately attempts calls
       while the ClientConn is Idle or Connecting, and gRPC parks them on a connection that may never
       arrive. `/history` and `/generate` both sat on "Loading…" with no error and no timeout on a hard
       page load. All 47 unary wrappers in `web/wsconn/clients.go` now carry a deadline (30s; 10m for
       `SampleService.Sample`, which runs a real generation); the two streaming wrappers deliberately
       do not.
-- [x] `A5-09` **FIXED: `/history` and `/generate` loaded nothing when opened directly.** Both mounted
+- [x] `RS5-09` **FIXED: `/history` and `/generate` loaded nothing when opened directly.** Both mounted
       their loaders while the session was still `appstate.Anon`. Now gated on the session actually
       being usable, keyed on the session state rather than on a `!= Disconnected` boolean that is
       already true at `Anon`.
-- [x] `A5-10` **FIXED: the `/history` Runs filter was a bare numeric feed-id box.** §12.4 specifies
+- [x] `RS5-10` **FIXED: the `/history` Runs filter was a bare numeric feed-id box.** §12.4 specifies
       "filter by feed, status, date range"; `RunFilter` and `BuildRunHistoryRequest` have always
       carried all four fields, but the only control was an `<input type="number">` asking for a
       database id that appears nowhere in the UI. Replaced with a feed menu, a status menu (including
       SKIPPED, so "what did the budget stop?" is answerable), a date range and a clear control — and
       the fields are styled instead of raw browser widgets.
-- [x] `A5-11` **FIXED: every Settings error view now offers Retry, and the feed list on /generate has one. — original report: `StatePanel.OnRetry` is declared but never set by any caller, app-wide.**
+- [x] `RS5-11` **FIXED: every Settings error view now offers Retry, and the feed list on /generate has one. — original report: `StatePanel.OnRetry` is declared but never set by any caller, app-wide.**
       `web/pages/settings/render.go`'s `screenWrapper` does not even accept a retry callback, so every
       error view on `/generate` and every `/settings` section offers no recovery short of a full page
       reload. §12.6.
-- [x] `A5-12` **FIXED: the recipe stakes are on the page again. — original report: The `/generate` rail — feed status, the stale-feed flag, the enable toggle, Run Now —
+- [x] `RS5-12` **FIXED: the recipe stakes are on the page again. — original report: The `/generate` rail — feed status, the stale-feed flag, the enable toggle, Run Now —
       is now buried inside the collapsed "Recipe settings" disclosure.** §12.3 requires the stale-feed
       flag to be surfaced, not hidden behind a click on every page load. The workbench redesign put it
       there; it needs its own home. Candidate: a compact status line on the strip.
-- [x] `A5-13` **FIXED: the always-zero budget readout is gone until something can fill it. — original report: The sampler's "remaining daily budget" is hardcoded `$0.00` forever.** The backing
+- [x] `RS5-13` **FIXED: the always-zero budget readout is gone until something can fill it. — original report: The sampler's "remaining daily budget" is hardcoded `$0.00` forever.** The backing
       state is never updated from any server response, and the streaming proto carries no field for
       it. Either wire it (needs a proto field) or remove the figure — a budget readout that is always
       zero is worse than none.
-- [x] `A5-14` **FIXED: the item search is debounced. — original report: The item search box fires a full FTS5 RPC per keystroke.** No debounce.
-- [x] `A5-15` **FIXED: the backdating check is scoped to one feed. — original report: The item form's no-backdating check is not scoped per feed.** `newestPublishedAt` is
+- [x] `RS5-14` **FIXED: the item search is debounced. — original report: The item search box fires a full FTS5 RPC per keystroke.** No debounce.
+- [x] `RS5-15` **FIXED: the backdating check is scoped to one feed. — original report: The item form's no-backdating check is not scoped per feed.** `newestPublishedAt` is
       computed across all currently-loaded items in a feed-agnostic list, so §5.5's increasing-pubDate
       protection blocks and warns on the wrong comparisons.
-- [x] `A5-16` **FIXED: /history Items has a feed filter. — original report: `/history` Items has no feed / origin / date-range filters** despite `ItemFilter` and
+- [x] `RS5-16` **FIXED: /history Items has a feed filter. — original report: `/history` Items has no feed / origin / date-range filters** despite `ItemFilter` and
       `BuildItemListRequest` already supporting them. §12.4.
-- [x] `A5-17` **FIXED: bulk delete/restore live behind the kebab. — original report: Bulk delete and restore are plain top-level buttons**, contradicting this repo's own
+- [x] `RS5-17` **FIXED: bulk delete/restore live behind the kebab. — original report: Bulk delete and restore are plain top-level buttons**, contradicting this repo's own
       ticked `D0-15` rule that destructive actions live behind the kebab.
-- [x] `A5-18` **PARTLY FIXED: three of the four dead fields are now read. — original report: Four of six `/settings/generation` fields were dead controls.** `DefaultDailyTokenBudget`,
+- [x] `RS5-18` **PARTLY FIXED: three of the four dead fields are now read. — original report: Four of six `/settings/generation` fields were dead controls.** `DefaultDailyTokenBudget`,
       `DefaultDailyRunBudget`, `DefaultFeedWindow` and `StalenessThresholdMinutes` persist and
       round-trip but were read nowhere. The first three are now read by `/generate`'s new-feed draft
-      (`A5-06`); staleness remains dead. See `A5-01`.
-- [x] `A5-19` **FIXED: a rate can name its model. — original report: "Add rate" creates an unusable row.** The new price row renders its model name as
+      (`RS5-06`); staleness remains dead. See `RS5-01`.
+- [x] `RS5-19` **FIXED: a rate can name its model. — original report: "Add rate" creates an unusable row.** The new price row renders its model name as
       plain text with no input or select, so the rate can never be assigned a model id.
-- [x] `A5-20` **FIXED: /recover has a way out of every step. — original report: `/recover` has no way out of a step.** Unlike `/login`, the Reset-Password /
+- [x] `RS5-20` **FIXED: /recover has a way out of every step. — original report: `/recover` has no way out of a step.** Unlike `/login`, the Reset-Password /
       Re-enroll-TOTP / Choose-Action steps have no Back control, so an elevated session that expires
       mid-flow leaves a hard reload as the only escape.
-- [x] `A5-21` **FIXED: three swallowed errors made failures look like nothing happening.**
+- [x] `RS5-21` **FIXED: three swallowed errors made failures look like nothing happening.**
       `/generate`'s feed-into-editor load (`if err != nil { return }`, leaving the previous feed's
       fields under the new feed's name), `/history`'s run-log expand (rendered an EMPTY log, which
       reads as "this run logged nothing" — the most misleading thing that row can say), and
       `/generate`'s Promote (no success handling: the candidate stayed listed and promotable, so
       clicking twice created the item twice, and the localStorage snapshot could resurface it after a
       refresh).
-- [x] `A5-22` **FIXED: the feed-picker failure is surfaced. — original report: `/settings/data`'s feed-picker load swallows its error** and is not folded into the
+- [x] `RS5-22` **FIXED: the feed-picker failure is surfaced. — original report: `/settings/data`'s feed-picker load swallows its error** and is not folded into the
       section's `ScreenError`, so a failed load renders as "no feeds exist".
-- [x] `A5-23` **FIXED: `/settings/security` showed "Password changed" next to a failure.** `pwSuccess`
+- [x] `RS5-23` **FIXED: `/settings/security` showed "Password changed" next to a failure.** `pwSuccess`
       was only ever set, never reset, so a failed attempt after a successful one rendered both banners
       at once.
-- [x] `A5-24` **FIXED: the shared Toggle was a 36x20px hit target**, inherited by every toggle in the
+- [x] `RS5-24` **FIXED: the shared Toggle was a 36x20px hit target**, inherited by every toggle in the
       app including the generation kill switch. Now 44x24. The `/generate` variable chips (88x20) and
       the "+ New" button (49x17, which had no padding rule at all) are 24px minimum too.
-- [x] `A5-25` **FIXED: a white flash on every reload for operators who chose Dark.** `ApplyStoredTheme`
+- [x] `RS5-25` **FIXED: a white flash on every reload for operators who chose Dark.** `ApplyStoredTheme`
       runs inside Mount, which cannot happen until the ~30MB wasm binary has loaded.
       `web/static/index.html` now stamps `data-theme` synchronously from localStorage before anything
       paints.
 
-- [x] `A5-43` **FIXED: on a cold load of `/history`, the Runs tab showed "Loading…" forever.**
+- [x] `RS5-43` **FIXED: on a cold load of `/history`, the Runs tab showed "Loading…" forever.**
       Cause: `FeedService.List` (for the filter menu) and `RunService.History` were issued
       concurrently as the page mounted, and on a cold load — the tunnel having just been replaced by
       the authenticated one — the run query was the one that never came back. Serialising them
@@ -1437,54 +1437,54 @@ worse than a missing feature, because the screen says the setting is in effect.
       (a stage marker in `guardUnary` showing three calls completing end to end), and the server
       (a log line in `RunServer.History`).
       Kept from that investigation, because each is worth having on its own: a deadline plus a
-      watchdog on every unary RPC (`A5-08`), the readiness gate (`A5-09`), a bounded retry for
+      watchdog on every unary RPC (`RS5-08`), the readiness gate (`RS5-09`), a bounded retry for
       reads, and `web/pages/history/asyncdispatch.go`'s note that a `ui.UseReducer` dispatch from a
       goroutine updates state without scheduling a render.
       **Still open underneath this:** the tunnel should not lose a stream just because two RPCs are
-      opened at once during startup. The page-level serialisation is a workaround; `A5-44` tracks
+      opened at once during startup. The page-level serialisation is a workaround; `RS5-44` tracks
       the real fix.
-- [ ] `A5-44` **The gRPC-over-WebSocket tunnel drops a concurrent stream opened during startup.**
-      Root cause behind `A5-43`. Two unary RPCs issued in the same tick, moments after the
+- [ ] `RS5-44` **The gRPC-over-WebSocket tunnel drops a concurrent stream opened during startup.**
+      Root cause behind `RS5-43`. Two unary RPCs issued in the same tick, moments after the
       authenticated reconnect, and one silently never completes — no error, no server-side arrival.
       Every page that fires more than one request at mount is exposed; `/history` is simply where it
       showed. Needs instrumentation of `grpctunnel`'s frames on the client side, which needs a debug
       build of GoGRPCBridge. Until it is fixed, a page that loads several things at mount should
       chain them.
 
-- [x] `A5-45` **FIXED: every enabled toggle in the app displayed "Reconnecting to the server".**
+- [x] `RS5-45` **FIXED: every enabled toggle in the app displayed "Reconnecting to the server".**
       `web/ui/toggle.go` rendered `DisabledReasonKey` whenever the key was set, regardless of whether
       the control was actually disabled. So the kill switch — a working control — carried a permanent
       notice that the server was unreachable. It also cost real debugging time here: the false banner
       was mistaken for a stuck DISCONNECTED state and sent an investigation into the transport before
       the primitive was read. The reason (and its `aria-describedby`) now render only while disabled.
-- [x] `A5-46` **FIXED: `/settings/publishing`'s public base URL now drives the publish plane.**
+- [x] `RS5-46` **FIXED: `/settings/publishing`'s public base URL now drives the publish plane.**
       `publish.Deps` gained `BaseURLFn`, read per request, seeded at boot from the stored setting and
       updated on save through a sink alongside the price table's. Trailing slashes are trimmed at the
       point of use — a stored `https://host/` would otherwise have produced `https://host//feeds/x.xml`,
       a different URL to most aggregators, and a feed whose guids changed is a feed that reposts
-      everything (§5.5). The rest of `A5-01`'s write-only settings are still write-only.
-- [x] `A5-47` **FIXED: the settings tabs are no longer a narrow column in a wide page** (`A6-01`).
+      everything (§5.5). The rest of `RS5-01`'s write-only settings are still write-only.
+- [x] `RS5-47` **FIXED: the settings tabs are no longer a narrow column in a wide page** (`RS6-01`).
       `.af-settings-card` is a grid with `repeat(auto-fit, minmax(20rem, 1fr))`, so a card with one
       field stays one column and a card with six fills the width; headings, prose and tables span all
       columns. `/settings/generation` is additionally split into "Global ceilings" / "Per-feed
-      defaults" / "Staleness" with units in every label (`A6-07`).
-- [x] `A5-48` **FIXED: status now carries colour, and cost carries weight** (`A6-02`, `A6-08`).
+      defaults" / "Staleness" with units in every label (`RS6-07`).
+- [x] `RS5-48` **FIXED: status now carries colour, and cost carries weight** (`RS6-02`, `RS6-08`).
       Item status renders as a tinted pill using the `RoleSuccess`/`RoleBorder` pairs the token set
       has always defined — the word stays, so colour is never the only encoding — and the runs
       table's Cost column uses full-strength ink and tabular figures.
-- [x] `A5-49` **FIXED: the `/generate` strip separates configuring from acting** (`A6-04`), with a
+- [x] `RS5-49` **FIXED: the `/generate` strip separates configuring from acting** (`RS6-04`), with a
       rule and real space between the two zones instead of leaving Preview as the seventh identical
       box on the row.
 
 #### Minor
 
-- [x] `A5-26` **FIXED (validated: empty model, duplicate model, negative rate; save refuses and names the row).** No validation on price-table saves: negative rates, duplicate model names and empty model
+- [x] `RS5-26` **FIXED (validated: empty model, duplicate model, negative rate; save refuses and names the row).** No validation on price-table saves: negative rates, duplicate model names and empty model
       strings are all accepted, unlike the effort and profile validation in the same handler.
-- [x] `A5-27` **FIXED (negatives clamp to zero, and "0 means no limit" is now stated on the group).** No negative-value validation on any of the six `/settings/generation` numeric fields,
+- [x] `RS5-27` **FIXED (negatives clamp to zero, and "0 means no limit" is now stated on the group).** No negative-value validation on any of the six `/settings/generation` numeric fields,
       client or server; and no help text on any of them.
-- [x] `A5-28` **FIXED 2026-08-11.** Server-side publishing validation covered only `public_base_url`: TTL
+- [x] `RS5-28` **FIXED 2026-08-11.** Server-side publishing validation covered only `public_base_url`: TTL
       could be saved negative and the og:image scheme was unchecked. Neither side stripped a trailing slash
-      from the base URL, which would double-slash every feed URL once `A5-01` wired it up — and `A5-01` has
+      from the base URL, which would double-slash every feed URL once `RS5-01` wired it up — and `RS5-01` has
       now wired it up, so that one had become live rather than hypothetical.
       `sysValidatePublishing` replaces the base-URL-only check: TTL bounded to [0, 7 days] (a ceiling to
       catch a typo, not to ration — a TTL is advisory), and og:image must be an absolute http(s) URL, since
@@ -1493,36 +1493,36 @@ worse than a missing feature, because the screen says the setting is in effect.
       every consumer remembering to trim.
       Validation still runs before the transaction opens, and a test proves a rejected publishing section
       leaves a provider change in the same request unwritten rather than half-applied.
-- [x] `A5-29` **FIXED: the run-row Expand button never relabelled to Collapse**, and the typed-delete
+- [x] `RS5-29` **FIXED: the run-row Expand button never relabelled to Collapse**, and the typed-delete
       confirmation input had no accessible name at all.
-- [ ] `A5-30` **STILL OPEN.** The cost chart's per-day hover detail has no keyboard-focusable equivalent.
-- [x] `A5-31` **FIXED (in-flight guard, Busy state, and the failure is surfaced).** The per-row session Revoke button has no in-flight guard, unlike every other mutation on
+- [ ] `RS5-30` **STILL OPEN.** The cost chart's per-day hover detail has no keyboard-focusable equivalent.
+- [x] `RS5-31` **FIXED (in-flight guard, Busy state, and the failure is surfaced).** The per-row session Revoke button has no in-flight guard, unlike every other mutation on
       that page.
-- [x] `A5-32` **FIXED (dead matcher deleted).** `web/pages/settings/confirm.go`'s `ConfirmationMatches` is dead code and disagrees with
+- [x] `RS5-32` **FIXED (dead matcher deleted).** `web/pages/settings/confirm.go`'s `ConfirmationMatches` is dead code and disagrees with
       the `web/ui.ConfirmMatches` actually wired to the modals (whitespace trimming).
-- [x] `A5-33` **FIXED 2026-08-11.** `/recover` had i18n keys for password-too-short/too-long, with real text in
+- [x] `RS5-33` **FIXED 2026-08-11.** `/recover` had i18n keys for password-too-short/too-long, with real text in
       every locale, referenced by nothing — so a too-short password failed silently: the server refused it
       and the page said nothing. The length is now checked before the request, rendered in the form's error
       slot and announced assertively. The server remains the gate; this stops a doomed round trip and says
       why. Bounds are duplicated from `web/pages/settings/validate.go` rather than imported, for the same
       reason `newFeedDraft` duplicates `internal/rpc`'s defaults — two sibling page packages, neither owning
       the other.
-- [x] `A5-34` **FIXED (renders as a percentage via a new Formatters.Percent).** Novelty similarity is interpolated as a raw 0..1 float instead of the catalogue's own
+- [x] `RS5-34` **FIXED (renders as a percentage via a new Formatters.Percent).** Novelty similarity is interpolated as a raw 0..1 float instead of the catalogue's own
       `FormatPercent` helper, whose doc comment exists for exactly this value.
-- [x] `A5-35` **PARTLY FIXED (export box is labelled and read-only; error detail still generic).** The `/settings/data` export textarea is unlabelled and not marked read-only despite looking
+- [x] `RS5-35` **PARTLY FIXED (export box is labelled and read-only; error detail still generic).** The `/settings/data` export textarea is unlabelled and not marked read-only despite looking
       editable; import/export/backup errors show a generic string while vacuum's shows the server's
       actual error.
-- [x] `A5-36` **PARTLY FIXED (Save is disabled without a title; indeterminate checkbox still open).** No client-side required-field validation on the item form (the server enforces
+- [x] `RS5-36` **PARTLY FIXED (Save is disabled without a title; indeterminate checkbox still open).** No client-side required-field validation on the item form (the server enforces
       title-required, the UI does not), and the select-all checkbox never shows an indeterminate state
       for a partial selection.
-- [x] `A5-37` **FIXED 2026-08-11.** — original report: `/login` announces a failed login twice to screen readers (two aria-live regions with
+- [x] `RS5-37` **FIXED 2026-08-11.** — original report: `/login` announces a failed login twice to screen readers (two aria-live regions with
       identical content) and uses `aria-live` without `role="alert"`, inconsistent with the shell.
       Fixed by removing the live region from the VISIBLE error paragraph, not from the announcer.
       `handleSubmit` already announces the same string through `announcer.Assertive`, and that is the
       copy worth keeping: two wrong passwords in a row produce identical text, and a live region whose
       content has not changed may announce nothing at all — so the repeat failure would go silent
       exactly when it matters. The paragraph keeps its id, which the failure branch focuses.
-- [x] `A5-38` **FIXED 2026-08-11 (tooling).** — original report: The i18n lint tool has no coverage for prose inside `h.Aria(...)`.
+- [x] `RS5-38` **FIXED 2026-08-11 (tooling).** — original report: The i18n lint tool has no coverage for prose inside `h.Aria(...)`.
       Fixed: `classifyAria` reads `h.Aria`'s FIRST argument to decide whether the second is prose,
       which is the only way to tell `aria-label="Close this dialog"` from `aria-live="assertive"`.
       `AriaProseAttrNames` is deliberately five entries — label, description, roledescription,
@@ -1532,11 +1532,11 @@ worse than a missing feature, because the screen says the setting is in effect.
       It found one real literal (`brand.go`'s `aria-label="AnimeFeedFlux"`, the product name) and the
       ratchet was already red on two `"…"` pager gap markers; all three are now `//nolint:i18n` with
       reasons, so the baseline stays at 0 rather than rising (D6-21).
-- [x] `A5-39` **FIXED (size, temperature and selection reset with the feed).** Switching to a fresh feed on `/generate` leaks the previous feed's candidate count and
+- [x] `RS5-39` **FIXED (size, temperature and selection reset with the feed).** Switching to a fresh feed on `/generate` leaks the previous feed's candidate count and
       temperature override; only `candidates`/`sampleID` reset.
-- [x] `A5-40` **PARTLY FIXED (the field now says it is inert; effort default still hardcoded).** The temperature override is a documented no-op under §8.1 with no disclosure in the UI,
+- [x] `RS5-40` **PARTLY FIXED (the field now says it is inert; effort default still hardcoded).** The temperature override is a documented no-op under §8.1 with no disclosure in the UI,
       and the effort default is hardcoded `"smart"` rather than read from Settings.
-- [x] `A5-41` **FIXED 2026-08-11.** — original report: The pager's Previous/Next handlers mutate the cursor pointer directly
+- [x] `RS5-41` **FIXED 2026-08-11.** — original report: The pager's Previous/Next handlers mutate the cursor pointer directly
       instead of going through `Dispatch`, leaving a matching `"next-page"` reducer case dead and untested.
       2026-08-11: the numbered jump control added by `D3-21` follows the same pattern — `OnJump` calls
       `cursor.JumpTo` directly — so there are now three direct mutations, not two. Recorded rather than
@@ -1555,13 +1555,13 @@ worse than a missing feature, because the screen says the setting is in effect.
       sibling fixed in `runs_ui.go` — `revisions-load-ok` called `Advance` on load, so Previous lit up
       on page 1, Refresh fetched a page that was never on screen, and with no Next control at all
       page 2 was unreachable. It now records `revisionsNextTk` and has a Next button.
-- [x] `A5-42` **FIXED 2026-08-11.** Stale doc comments in `web/pages/auth/` (`doc.go`, `backoff_display.go`,
+- [x] `RS5-42` **FIXED 2026-08-11.** Stale doc comments in `web/pages/auth/` (`doc.go`, `backoff_display.go`,
       `recover.go`) claimed `keyConnectionUnreachable`, `keyBackoffCleared` and `keyRecoverSavedConfirm` were
       not yet in the catalogue and leaned on D6-07's "a missing key renders the key itself" to cover the gap.
       All three are declared in `web/i18n` and resolve in every locale, which that package's own
       `TestEveryLocaleHasEveryKey` and `TestEveryCallSiteKeyIsDefined` enforce. Corrected rather than left:
       a comment claiming a key is missing sends the next reader after a bug that was already fixed.
-- [ ] `A5-50` **`settings.publishing.default_contact` has nowhere to go.** Split out of `A5-01`, which fixed
+- [ ] `RS5-50` **`settings.publishing.default_contact` has nowhere to go.** Split out of `RS5-01`, which fixed
       every other write-only setting. This one cannot be wired as things stand: `feeds` has `author`,
       `copyright`, `og_image` and `ttl_minutes` columns and no `contact` column, and `Feed` carries no
       contact field — so the control edits a value with no destination. Either add the column plus the proto
@@ -1578,10 +1578,10 @@ hairline boxes that all compete for the same attention.
 
 Two of its findings are already resolved and are recorded here only so the report reads honestly
 against the code: the Runs feed filter it saw as "a lone text input with 1200px of dead space" is
-now the feed/status/date-range row (`A5-10`), and the empty preview pane's stale "Select or save a
+now the feed/status/date-range row (`RS5-10`), and the empty preview pane's stale "Select or save a
 feed to sample it" copy is gone. It reviewed the bundle that was live at the time, not the tree.
 
-- [x] `A6-01` **FIXED — see A5-47.** **BLOCKER (design): every settings tab is a narrow field column adrift in a wide page.**
+- [x] `RS6-01` **FIXED — see RS5-47.** **BLOCKER (design): every settings tab is a narrow field column adrift in a wide page.**
       `.af-settings` caps the page at 64rem while `.af-settings input/select/textarea` caps fields at
       30rem, so Security, Provider, Generation and Publishing each render as a ~480px column of
       stacked fields inside a much wider frame — roughly two-thirds of the horizontal space empty, on
@@ -1590,44 +1590,44 @@ feed to sample it" copy is gone. It reviewed the bundle that was live at the tim
       either narrow the page measure to ~42–46rem for single-column tabs, or introduce a real
       two-column card layout for the tabs with more than about four fields (Generation and Provider
       both qualify). Every settings screen improves at once.
-- [x] `A6-02` **FIXED — see A5-48.** **The token set defines `RoleSuccess`, `RoleWarning` and `RoleLive` so that status
+- [x] `RS6-02` **FIXED — see RS5-48.** **The token set defines `RoleSuccess`, `RoleWarning` and `RoleLive` so that status
       carries colour, and the pages mostly do not spend it.** History Items' Status and Origin
       columns, About's "Never built", and Generate's disabled-reason banners are all places where a
       role exists with a WCAG-checked contrast pair and is not applied. One pass wiring the existing
       status strings (Published / Draft / Never built / Stale) to those roles raises scannability
       across the app without inventing anything.
-- [ ] `A6-03` **STILL OPEN (direction, not a single change).** **Spend the boldness where the signature already is, and stop spending it on forms.**
+- [ ] `RS6-03` **STILL OPEN (direction, not a single change).** **Spend the boldness where the signature already is, and stop spending it on forms.**
       The login rings and the Runs table's left-rule marks are the app's only real visual ideas and
       both are quiet enough to miss; meanwhile every settings row, every strip control and every panel
       wears the same 1px hairline box. Commit harder to the two signatures (and to the cost figures,
       which nobody has made loud yet) and strip uniform chrome off the repetitive form screens.
-- [x] `A6-04` **FIXED — see A5-49.** **The `/generate` strip gives the Preview button no spatial distinction.** Seven leading
+- [x] `RS6-04` **FIXED — see RS5-49.** **The `/generate` strip gives the Preview button no spatial distinction.** Seven leading
       controls render in identical bordered, same-radius, same-fill boxes and Preview is distinguished
       only by fill colour, sitting last after five unrelated controls of equal weight. Split the strip
       into two zones with a visible gap or divider — left = choose and configure, right = act
       (estimate + Preview) — so the verb is spatially distinct, not just chromatically.
-- [x] `A6-05` **PARTLY FIXED (the stale "select or save" copy is gone; the empty pane is compact).** **The empty preview pane is ~700x850px of chrome around one line of text.** Either let
+- [x] `RS6-05` **PARTLY FIXED (the stale "select or save" copy is gone; the empty pane is compact).** **The empty preview pane is ~700x850px of chrome around one line of text.** Either let
       the bordered box grow only once there is content, or spend the space on a short "what happens
       when you press Preview" explainer so a first run is not staring into a void.
-- [x] `A6-06` **FIXED — see A5-12.** **The recipe's slug, schedule and budget are exactly the facts that decide whether a
+- [x] `RS6-06` **FIXED — see RS5-12.** **The recipe's slug, schedule and budget are exactly the facts that decide whether a
       Preview click is safe, and they are at the bottom of the page behind a small muted disclosure.**
       Put a compact one-line summary of the active recipe (slug · schedule · remaining budget) above
-      the prompt fields, and keep the disclosure for the rarely-edited detail. Overlaps `A5-12`, which
+      the prompt fields, and keep the disclosure for the rarely-edited detail. Overlaps `RS5-12`, which
       is the same complaint from the correctness side — fix them together.
-- [x] `A6-07` **FIXED — see A5-47.** **`/settings/generation` is six unrelated ceilings rendered as one undifferentiated
+- [x] `RS6-07` **FIXED — see RS5-47.** **`/settings/generation` is six unrelated ceilings rendered as one undifferentiated
       stack of bare zeros with no units.** Global token ceiling, global spend ceiling, per-feed token
       budget, per-feed run budget, feed window and staleness threshold all look identical. Split into
       "Global ceilings" / "Per-feed defaults" / "Staleness" sub-groups using the hairline device
       `.af-settings-card` already has, and put units in the labels (tokens, $, minutes) the way
-      Publishing's "TTL (minutes)" already does. Pairs with `A5-03` and `A5-27`.
-- [x] `A6-08` **FIXED — see A5-48.** **The Cost column in the Runs table carries no more weight than Tokens or
+      Publishing's "TTL (minutes)" already does. Pairs with `RS5-03` and `RS5-27`.
+- [x] `RS6-08` **FIXED — see RS5-48.** **The Cost column in the Runs table carries no more weight than Tokens or
       Added/Rejected.** Money is the column an operator scans this table for; it should read as the
       figure, not as one of seven equal numeric columns.
-- [ ] `A6-09` **STILL OPEN.** **The reconnecting/disabled state on `/settings/generation` is a quiet caption where it
+- [ ] `RS6-09` **STILL OPEN.** **The reconnecting/disabled state on `/settings/generation` is a quiet caption where it
       should be a banner** — the same §12.3 complaint as the kill-switch reason.
-- [x] `A6-10` **PARTLY FIXED (the textarea is labelled and read-only).** **`/settings/data`'s import textarea is sized far beyond its use frequency, and its "…"
-      control is unlabelled.** Overlaps `A5-35`.
-- [ ] `A6-11` **STILL OPEN.** **The login ring signature is legible only on close inspection.** It is the one bold
+- [x] `RS6-10` **PARTLY FIXED (the textarea is labelled and read-only).** **`/settings/data`'s import textarea is sized far beyond its use frequency, and its "…"
+      control is unlabelled.** Overlaps `RS5-35`.
+- [ ] `RS6-11` **STILL OPEN.** **The login ring signature is legible only on close inspection.** It is the one bold
       thing in the app; commit to it or cut it.
 
 - [ ] `A4-46` **NEW: the dev loop had two silent failure modes that both present as application
@@ -1658,7 +1658,7 @@ feed to sample it" copy is gone. It reviewed the bundle that was live at the tim
          `reasoning.effort` value with no per-model capability check — this repo has no control over
          that (`internal/llm.go`'s own comment: "unknown values fall through to the library
          default"). Not filed as its own ticket — same disposition as the GWC upstream items
-         (`A7-25` etc.): a vendored dependency's gap, worth knowing before picking a model+effort
+         (`RS7-25` etc.): a vendored dependency's gap, worth knowing before picking a model+effort
          combo, not something to patch here. Cam's call: use `gpt-5.6-luna` instead — real generation
          call, no error, $0.0005134/1287 tokens.
       2. **The seed prompt reliably failed post-generation validation with a real model.** Even with

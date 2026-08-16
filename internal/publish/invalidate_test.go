@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,18 +22,21 @@ import (
 // byte-identical output and therefore the SAME ETag — a request carrying
 // that ETag as If-None-Match gets 304 either way, which makes the status
 // code useless as a cache-hit/miss signal in this specific test setup.
-func testDepsForInvalidate() (Deps, *int) {
+func testDepsForInvalidate() (Deps, *atomic.Int64) {
 	feeds := map[string]model.Feed{
 		"trivia": {ID: 1, Slug: "trivia", Title: "Trivia", Kind: model.KindGenerative, Enabled: true},
 	}
-	calls := 0
+	// Atomic, not a plain int: TestInvalidatorConcurrentUse drives this
+	// fixture from concurrent request goroutines, and a bare counter++ was
+	// a data race in the TEST ITSELF (caught by CI's -race, 2026-08-15).
+	var calls atomic.Int64
 	deps := Deps{
 		GetFeed: func(ctx context.Context, slug string) (model.Feed, bool, error) {
 			f, ok := feeds[slug]
 			return f, ok, nil
 		},
 		ListItems: func(ctx context.Context, feedID int64) ([]model.Item, error) {
-			calls++
+			calls.Add(1)
 			return nil, nil
 		},
 		ListFeeds: func(ctx context.Context) ([]model.Feed, error) {
@@ -74,20 +78,20 @@ func TestNewServerAndInvalidatorSharesTheHandlersCache(t *testing.T) {
 	}
 
 	get()
-	if *calls != 1 {
-		t.Fatalf("first request: ListItems called %d times, want 1", *calls)
+	if calls.Load() != 1 {
+		t.Fatalf("first request: ListItems called %d times, want 1", calls.Load())
 	}
 
 	get() // should be a cache hit — no re-render, no ListItems call
-	if *calls != 1 {
-		t.Fatalf("second request before invalidation: ListItems called %d times, want still 1 (cache hit)", *calls)
+	if calls.Load() != 1 {
+		t.Fatalf("second request before invalidation: ListItems called %d times, want still 1 (cache hit)", calls.Load())
 	}
 
 	inv.InvalidateFeed("trivia")
 
 	get() // must be a genuine MISS: the entry is gone, so ListItems runs again
-	if *calls != 2 {
-		t.Fatalf("request after InvalidateFeed: ListItems called %d times, want 2 (cache should have been dropped)", *calls)
+	if calls.Load() != 2 {
+		t.Fatalf("request after InvalidateFeed: ListItems called %d times, want 2 (cache should have been dropped)", calls.Load())
 	}
 }
 

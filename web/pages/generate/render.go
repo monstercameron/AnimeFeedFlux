@@ -438,7 +438,7 @@ func Render() ui.Node {
 		Connected: connected,
 		// settings.generation.staleness_threshold_minutes, which nothing read
 		// before: the rail used a hardcoded 24h constant, so lowering the
-		// threshold to catch a stalling feed changed nothing (A5-01).
+		// threshold to catch a stalling feed changed nothing (RS5-01).
 		StaleThresholdMinutes: settingsRes.Get().Value.GetSettings().GetGeneration().GetStalenessThresholdMinutes(),
 		Resource:              feedsRes,
 		Stats:                 statsRes,

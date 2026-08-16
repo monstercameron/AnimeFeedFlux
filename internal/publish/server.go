@@ -87,7 +87,7 @@ type Deps struct {
 	//
 	// nil, or a function returning "", falls back to defaultCacheControl. The
 	// setting was previously stored, displayed and read by nothing: the header
-	// was hardcoded, so the control said "Saved." and changed nothing (A5-01).
+	// was hardcoded, so the control said "Saved." and changed nothing (RS5-01).
 	CacheControlFn func() string
 	// CacheMaxBytes is the render cache's LRU ceiling in bytes, from
 	// AFF_CACHE_MAX_BYTES (PLAN.md §16, default 64MiB). Zero means unlimited,

@@ -12,7 +12,7 @@ import (
 
 // settings.publishing.default_cache_control persisted, round-tripped through
 // the UI, showed "Saved." — and changed nothing: writeEntry hardcoded
-// max-age=900 (A5-01, "at least eleven settings are read by nothing").
+// max-age=900 (RS5-01, "at least eleven settings are read by nothing").
 func cacheControlDeps(fn func() string) Deps {
 	feed := model.Feed{ID: 1, Slug: "trivia-daily", Title: "Trivia", Kind: model.KindGenerative, Language: "en", TTLMinutes: 60}
 	item := model.Item{

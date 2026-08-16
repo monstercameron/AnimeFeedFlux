@@ -1487,7 +1487,7 @@ func buildControlPlane(
 				baseURL.set(p.GetPublicBaseUrl())
 				// default_cache_control was stored, displayed, and read by
 				// nothing — the publish plane hardcoded max-age=900, so the
-				// control reported "Saved." and changed no header (A5-01).
+				// control reported "Saved." and changed no header (RS5-01).
 				baseURL.setCacheControl(p.GetDefaultCacheControl())
 			}
 		}),

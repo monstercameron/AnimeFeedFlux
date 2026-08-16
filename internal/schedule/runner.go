@@ -422,17 +422,28 @@ func (r *Runner) maybeDispatch(ctx context.Context, feedID int64) {
 	r.mu.Unlock()
 
 	atomic.AddInt32(&r.queueDepth, 1)
+	// inFlight.Add happens BEFORE the send, in the single-threaded scheduler
+	// loop, for two reasons that pull in opposite directions and are both
+	// satisfied only by this order:
+	//
+	//  1. vs shutdown's inFlight.Wait: every Add is issued by (and
+	//     happens-before) the point where this same goroutine stops calling
+	//     maybeDispatch and calls shutdown, so a fresh Add can never land
+	//     after Wait observed zero. (Adding from the worker would break
+	//     this — the reason the Add lives in this loop at all.)
+	//  2. vs the worker's Done: the previous version Added AFTER the send
+	//     succeeded, and a worker that received the id could run the whole
+	//     job and hit runOne's deferred Done() before this goroutine
+	//     executed Add(1) — "sync: negative WaitGroup counter", a panic the
+	//     race detector's scheduling perturbation reproduced in CI
+	//     (2026-08-15). Done must never be reachable before its Add.
+	//
+	// The ctx.Done arm undoes the Add it never handed to a worker.
+	r.inFlight.Add(1)
 	select {
 	case r.dispatchCh <- feedID:
-		// inFlight.Add happens here, in the single-threaded scheduler loop,
-		// specifically so it can never race with shutdown's inFlight.Wait:
-		// every Add is issued (and happens-before) the point where this same
-		// goroutine stops calling maybeDispatch and calls shutdown. Adding
-		// from the worker goroutine instead would let a fresh Add land after
-		// Wait has already observed zero and returned — a WaitGroup misuse
-		// Go's runtime detects and panics on.
-		r.inFlight.Add(1)
 	case <-ctx.Done():
+		r.inFlight.Done()
 		atomic.AddInt32(&r.queueDepth, -1)
 		r.mu.Lock()
 		r.running[feedID] = false

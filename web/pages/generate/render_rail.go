@@ -36,7 +36,7 @@ type railProps struct {
 	// It was a write-only setting: stored, editable, displayed by `aff system`,
 	// and read by nothing — this rail used a hardcoded 24h constant instead, so
 	// an operator lowering the threshold to catch a stalling feed changed a
-	// number on a screen and nothing about which rows flagged stale (A5-01).
+	// number on a screen and nothing about which rows flagged stale (RS5-01).
 	// Zero means unset and falls back to that same constant, so an untouched
 	// deployment behaves exactly as before.
 	StaleThresholdMinutes int32

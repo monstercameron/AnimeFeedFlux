@@ -10,7 +10,7 @@ import (
 // settings.publishing's identity defaults persisted, round-tripped through the
 // UI and reported "Saved." while seeding nothing — every new feed started with
 // blank author/copyright/og_image however carefully they were filled in
-// (A5-01, "at least eleven settings are read by nothing").
+// (RS5-01, "at least eleven settings are read by nothing").
 func seedPublishingDefaults(t *testing.T, s *FeedServer) {
 	t.Helper()
 	p := &affv1.Settings_Publishing{

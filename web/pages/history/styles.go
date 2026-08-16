@@ -348,7 +348,7 @@ func emitFilterAndTableStyles() {
 		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
 		css.Raw("border", "1px solid "+string(tokens.Color(tokens.RoleBorder))),
 	)
-	// A6-08: money is what an operator scans the runs table for, and it read
+	// RS6-08: money is what an operator scans the runs table for, and it read
 	// as one of seven equal numeric columns. Tabular figures so the decimal
 	// points line up, and full-strength ink instead of the muted body tone.
 	css.Global(".history-runs-table td:nth-child(8)",

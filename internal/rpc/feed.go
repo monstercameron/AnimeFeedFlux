@@ -837,7 +837,7 @@ func (s *FeedServer) Create(ctx context.Context, req *affv1.FeedServiceCreateReq
 	// default_ttl_minutes persisted, round-tripped through the UI and
 	// reported "Saved." while seeding nothing: every new feed started with
 	// blank identity columns however carefully those defaults were filled in
-	// (A5-01).
+	// (RS5-01).
 	//
 	// CREATE only. On Update a cleared author means the operator cleared it,
 	// and re-imposing the default there would make the field impossible to

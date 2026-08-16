@@ -671,7 +671,7 @@ func (s *SystemServer) UpdateSettings(ctx context.Context, req *affv1.SystemServ
 		// value is canonical for every reader.
 		//
 		// Neither side stripped it, and now that public_base_url actually
-		// reaches the publish plane (A5-01), a saved "https://example.com/"
+		// reaches the publish plane (RS5-01), a saved "https://example.com/"
 		// would double-slash every guid, atom:link, subscribe URL and JSON
 		// Feed URL at once. Normalising on save rather than on each read
 		// means there is one canonical form in the database instead of every
