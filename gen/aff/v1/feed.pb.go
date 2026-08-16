@@ -417,7 +417,14 @@ type FeedSpec struct {
 	DailyRunBudget   int32 `protobuf:"varint,31,opt,name=daily_run_budget,json=dailyRunBudget,proto3" json:"daily_run_budget,omitempty"`
 	// Only meaningful (and required, per ValidateSpec) when kind =
 	// FEED_KIND_GROUNDED.
-	Sources       []*SourceSpec `protobuf:"bytes,40,rep,name=sources,proto3" json:"sources,omitempty"`
+	Sources []*SourceSpec `protobuf:"bytes,40,rep,name=sources,proto3" json:"sources,omitempty"`
+	// Declares the provider's built-in web-search tool on this feed's
+	// generation calls, giving the model live web access it otherwise has
+	// none of (the model still decides per-run whether to search).
+	// Generative feeds only: a grounded feed's published links must come
+	// from its fetched candidate set (PLAN.md §9), so model-searched URLs
+	// would only ever be rejected — ValidateSpec refuses the combination.
+	WebSearch     bool `protobuf:"varint,42,opt,name=web_search,json=webSearch,proto3" json:"web_search,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -548,6 +555,13 @@ func (x *FeedSpec) GetSources() []*SourceSpec {
 		return x.Sources
 	}
 	return nil
+}
+
+func (x *FeedSpec) GetWebSearch() bool {
+	if x != nil {
+		return x.WebSearch
+	}
+	return false
 }
 
 // Recurrence is a schedule expressed as an interval from an anchor date,
@@ -2063,7 +2077,7 @@ const file_aff_v1_feed_proto_rawDesc = "" +
 	"\n" +
 	"SourceSpec\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x12\n" +
-	"\x04kind\x18\x02 \x01(\tR\x04kind\"\xb1\x04\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\"\xd0\x04\n" +
 	"\bFeedSpec\x12#\n" +
 	"\rschedule_mode\x18) \x01(\tR\fscheduleMode\x12\x12\n" +
 	"\x04cron\x18\x01 \x01(\tR\x04cron\x12\x1a\n" +
@@ -2082,7 +2096,9 @@ const file_aff_v1_feed_proto_rawDesc = "" +
 	"\anovelty\x18\x14 \x01(\v2\x17.aff.v1.NoveltySettingsR\anovelty\x12,\n" +
 	"\x12daily_token_budget\x18\x1e \x01(\x03R\x10dailyTokenBudget\x12(\n" +
 	"\x10daily_run_budget\x18\x1f \x01(\x05R\x0edailyRunBudget\x12,\n" +
-	"\asources\x18( \x03(\v2\x12.aff.v1.SourceSpecR\asources\"\xa6\x02\n" +
+	"\asources\x18( \x03(\v2\x12.aff.v1.SourceSpecR\asources\x12\x1d\n" +
+	"\n" +
+	"web_search\x18* \x01(\bR\twebSearch\"\xa6\x02\n" +
 	"\n" +
 	"Recurrence\x12/\n" +
 	"\tfrequency\x18\x01 \x01(\x0e2\x11.aff.v1.FrequencyR\tfrequency\x12\x1a\n" +

@@ -54,6 +54,12 @@ const (
 
 	ReasonGroundedRequiresSource  = "grounded_requires_source"
 	ReasonGenerativeForbidsSource = "generative_forbids_source"
+	// Grounded link integrity (§9) means a model-searched URL could only
+	// ever be rejected as link_not_in_candidate_set, so offering the tool
+	// to a grounded feed is a misconfiguration, not an option. Aggregates
+	// have no generator at all (§14.2).
+	ReasonGroundedForbidsWebSearch  = "grounded_forbids_web_search"
+	ReasonAggregateForbidsWebSearch = "aggregate_forbids_web_search"
 
 	ReasonAggregateRequiresMember = "aggregate_requires_member"
 	ReasonAggregateForbidsSource  = "aggregate_forbids_source"
@@ -267,6 +273,9 @@ func validateKind(s Spec) []Problem {
 		if len(s.Sources) == 0 {
 			problems = append(problems, Problem{Field: "sources", Reason: ReasonGroundedRequiresSource})
 		}
+		if s.Model.WebSearch {
+			problems = append(problems, Problem{Field: "model", Reason: ReasonGroundedForbidsWebSearch})
+		}
 		problems = append(problems, validatePrompts(s)...)
 
 	case model.KindAggregate:
@@ -283,6 +292,9 @@ func validateKind(s Spec) []Problem {
 		}
 		if s.SystemPrompt != "" || s.UserPrompt != "" {
 			problems = append(problems, Problem{Field: "prompts", Reason: ReasonAggregateForbidsPrompt})
+		}
+		if s.Model.WebSearch {
+			problems = append(problems, Problem{Field: "model", Reason: ReasonAggregateForbidsWebSearch})
 		}
 
 	default:

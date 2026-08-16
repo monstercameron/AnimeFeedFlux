@@ -270,6 +270,11 @@ func renderEditorForm(p editorProps) ui.Node {
 				}),
 				fieldError("model"),
 			),
+			// Generative feeds only: grounded link integrity (§9) rejects
+			// any URL outside the fetched candidate set, so the server
+			// refuses the combination — the control is simply absent rather
+			// than present-but-forbidden.
+			renderWebSearchToggle(t, d, onFieldChange),
 			wui.Input(wui.InputProps{
 				T: wt, ID: "generate-editor-temperature", LabelKey: "generate.editor.temperature", Type: "number",
 				Value: floatStr(spec.GetTemperature()), ErrorKey: tempErrKey, ErrorArgs: tempErrArgs,
@@ -409,6 +414,28 @@ func renderEditorActions(p editorActionsProps) ui.Node {
 // never set here, so wui.Select never skips registering it — see this
 // file's package doc comment's third hazard), so no isolation is needed;
 // safe to call inline in renderEditorForm's own fiber.
+// renderWebSearchToggle is the per-feed switch for the provider's built-in
+// web-search tool (spec.web_search). Rendered for generative feeds only:
+// grounded link integrity (§9) rejects any URL outside the fetched candidate
+// set, so the server refuses the combination and the control never appears.
+func renderWebSearchToggle(t Translator, d *affv1.Feed, onFieldChange func(func(*affv1.Feed))) ui.Node {
+	if d.GetKind() != affv1.FeedKind_FEED_KIND_GENERATIVE {
+		return nil
+	}
+	on := d.GetSpec().GetWebSearch()
+	return h.Div(h.ClassStr("af-field"),
+		h.Label(
+			h.Input(h.Type("checkbox"), h.ID("generate-editor-web-search"),
+				h.Checked(on),
+				h.OnChange(func(ui.ChangeEvent) {
+					onFieldChange(func(f *affv1.Feed) { ensureSpec(f).WebSearch = !on })
+				})),
+			h.Text(t.T("generate.editor.webSearch")),
+		),
+		h.P(h.ClassStr("af-field-hint"), h.Text(t.T("generate.editor.webSearchHint"))),
+	)
+}
+
 func renderKindSelect(t Translator, d *affv1.Feed, p editorProps) ui.Node {
 	wt := wui.T(t.T)
 	kinds := []affv1.FeedKind{affv1.FeedKind_FEED_KIND_GENERATIVE, affv1.FeedKind_FEED_KIND_GROUNDED, affv1.FeedKind_FEED_KIND_AGGREGATE}

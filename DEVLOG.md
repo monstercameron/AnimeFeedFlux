@@ -13,6 +13,39 @@ Newest entries at the top.
 
 ---
 
+## 2026-08-16 — Web search is a declaration, not a prompt, and it belongs to generative feeds only
+
+The assumption worth killing first: that a watch-mode feed prompted to "check the web daily" was
+checking the web. It was not, and could not — on OpenAI's Responses API, web access exists only if
+the request declares the built-in `web_search` tool. No declaration, no browsing, whatever the
+prompt says; the model just answers from training data or (as the live A/B below showed) declines.
+Every watch feed shipped so far was watching nothing.
+
+SchemaFlux (Cam's own library) spoke the Responses API and even carried function tools
+(`Tools`/`ToolChoice`, PS-004) but had no way to declare a *built-in* tool, which is a different
+wire shape: a bare `{"type":"web_search"}` with no name/parameters, nothing coming back for the
+caller to execute, and search-call output items in the response that the parser must skip the way
+it already skips reasoning items (it did, by luck of the `type != "message"` guard). v1.2.0 adds
+`Generating[T](...).WebSearch()` end to end, with the flag living in exactly one options field —
+SchemaFlux's own ST-010/DX-001 postmortems are both about a setting with two homes and a merge
+that knew about one, so the new flag deliberately has one home (`OpOptions.WebSearch`).
+
+On the AnimeFeedFlux side the interesting call was scope: `web_search` is a **generative-feed-only**
+setting, refused by ValidateSpec on grounded feeds rather than merely ignored. Grounded feeds
+enforce §9 link integrity — a published link must come from the fetched candidate set — so a
+model-searched URL could only ever die as `link_not_in_candidate_set`. A toggle that silently does
+nothing (or worse, makes every item fail validation) is a misconfiguration trap; refusing at save
+time, and not rendering the checkbox at all for non-generative kinds, makes the wrong state
+unrepresentable. Stage-2 formatting also never gets the tool: it restates fields stage 1 already
+produced, so web access there could only smuggle in facts that bypassed validation.
+
+Proof it works (Cam: "verify it searched the web"): an A/B in `live_websearch_test.go`, gated
+behind `AFF_LIVE_LLM=1` per the no-paid-calls-in-CI rule. Same prompt, same model, asked for
+Bitcoin's current USD price. With the flag: `63041.0`, "retrieved on August 16, 2026" — Coinbase's
+spot at that moment was `62999`, 0.07% away. Without it: "No live market-data source is
+available." The unsearched model *knew it couldn't know*; the searched one was right to four
+significant figures.
+
 ## 2026-08-15 — Schedule modes: ad hoc and watch, and why "watch" is mostly about NOT retrying
 
 Cam: "each feed needs a scheduler — frequency, fixed or ad hoc, or days, or on special events

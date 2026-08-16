@@ -344,6 +344,7 @@ func feedSpecFromProto(ps *affv1.FeedSpec) feedspec.Spec {
 		Model: feedspec.ModelParams{
 			Model:       ps.GetModel(),
 			Temperature: ps.GetTemperature(),
+			WebSearch:   ps.GetWebSearch(),
 			// SchemaFlux's actual per-call tuning knobs (Mode/Speed, §8.1)
 			// have no wire representation on FeedSpec yet; "balanced" is
 			// feedspec.Defaults()'s own choice, reused here rather than left
@@ -378,6 +379,7 @@ func feedSpecToProto(spec feedspec.Spec) *affv1.FeedSpec {
 		FeedWindow:           int32(spec.FeedWindow),
 		Model:                spec.Model.Model,
 		Temperature:          spec.Model.Temperature,
+		WebSearch:            spec.Model.WebSearch,
 		SystemPromptTemplate: spec.SystemPrompt,
 		UserPromptTemplate:   spec.UserPrompt,
 		Novelty: &affv1.NoveltySettings{

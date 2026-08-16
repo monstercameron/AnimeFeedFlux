@@ -391,7 +391,7 @@ if [ -f "$HOOK_SECRET_FILE" ]; then
     cat > /etc/systemd/system/webhook.service.d/override.conf <<'OVR'
 [Service]
 ExecStart=
-ExecStart=/usr/bin/webhook -nopanic -hooks /etc/webhook.conf -ip 127.0.0.1 -port 9000
+ExecStart=/usr/bin/webhook -nopanic -hooks /etc/webhook.conf -ip 127.0.0.1 -port 9309
 OVR
     systemctl daemon-reload
     systemctl enable --now webhook >/dev/null 2>&1

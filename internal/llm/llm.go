@@ -76,6 +76,13 @@ type Request struct {
 	// Empty means smart, which is what this package did implicitly before
 	// the setting existed by setting no tier.
 	Effort string
+
+	// WebSearch declares the provider's built-in web-search tool on the
+	// call (SchemaFlux v1.2.0's Generating.WebSearch), giving the model
+	// live web access it otherwise has none of. The model still decides
+	// per-call whether to search; false sends the exact request this
+	// package sent before the field existed.
+	WebSearch bool
 }
 
 // Result is what a Provider call produced, with SchemaFlux's own result
@@ -286,6 +293,9 @@ func (p *SchemaFluxProvider) Generate(ctx context.Context, req Request) (Result,
 	}
 	if req.RequestID != "" {
 		builder = builder.RequestID(req.RequestID)
+	}
+	if req.WebSearch {
+		builder = builder.WebSearch()
 	}
 
 	batch, err := builder.Run(ctx)

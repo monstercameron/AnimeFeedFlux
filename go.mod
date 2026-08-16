@@ -8,7 +8,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/monstercameron/GoGRPCBridge v1.1.2
 	github.com/monstercameron/GoWebComponents/v5 v5.0.1
-	github.com/monstercameron/schemaflux v1.1.0
+	github.com/monstercameron/schemaflux v1.2.0
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/pquerna/otp v1.5.0
 	github.com/sashabaranov/go-openai v1.20.4

@@ -904,12 +904,17 @@ func Render() ui.Node {
 		OnModel: func(v string) {
 			onFieldChange(func(f *affv1.Feed) { ensureSpec(f).Model = v })
 		},
-		Effort:   effort.Get(),
-		OnEffort: func(v string) { effort.Set(v) },
-		Size:     sampleSize.Get(),
-		OnSize:   func(n int32) { sampleSize.Set(n) },
-		Temp:     tempOverride.Get(),
-		OnTemp:   func(f float64) { tempOverride.Set(f) },
+		Effort:        effort.Get(),
+		OnEffort:      func(v string) { effort.Set(v) },
+		WebSearch:     dspec.GetWebSearch(),
+		ShowWebSearch: draft.Get().GetKind() == affv1.FeedKind_FEED_KIND_GENERATIVE,
+		OnWebSearch: func(on bool) {
+			onFieldChange(func(f *affv1.Feed) { ensureSpec(f).WebSearch = on })
+		},
+		Size:   sampleSize.Get(),
+		OnSize: func(n int32) { sampleSize.Set(n) },
+		Temp:   tempOverride.Get(),
+		OnTemp: func(f float64) { tempOverride.Set(f) },
 		// Feed CRUD, on the strip where it can be seen.
 		Creating:     creatingNew.Get(),
 		Dirty:        DraftDirty(loadedSnapshot.Get(), draft.Get()),

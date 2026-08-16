@@ -378,6 +378,7 @@ func generateSpecFrom(fs feedspec.Spec, trigger string, prices *budget.Table, de
 		Model:                resolvedModel,
 		Effort:               defaults.Effort,
 		WatchMode:            fs.IsWatch(),
+		WebSearch:            fs.Model.WebSearch && fs.Kind == model.KindGenerative,
 		Temperature:          fs.Model.Temperature,
 		ItemsPerRun:          fs.ItemsPerRun,
 		RecentTitlesN:        fs.Novelty.ExcludeLast,

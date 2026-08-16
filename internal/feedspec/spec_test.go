@@ -196,6 +196,30 @@ func TestValidate_GenerativeForbidsSource(t *testing.T) {
 	}
 }
 
+func TestValidate_GroundedForbidsWebSearch(t *testing.T) {
+	s := validGrounded()
+	s.Model.WebSearch = true
+	if problems := Validate(s); !hasProblem(problems, "model", ReasonGroundedForbidsWebSearch) {
+		t.Fatalf("expected %s on model, got %+v", ReasonGroundedForbidsWebSearch, problems)
+	}
+}
+
+func TestValidate_AggregateForbidsWebSearch(t *testing.T) {
+	s := validAggregate()
+	s.Model.WebSearch = true
+	if problems := Validate(s); !hasProblem(problems, "model", ReasonAggregateForbidsWebSearch) {
+		t.Fatalf("expected %s on model, got %+v", ReasonAggregateForbidsWebSearch, problems)
+	}
+}
+
+func TestValidate_GenerativeAllowsWebSearch(t *testing.T) {
+	s := validGenerative()
+	s.Model.WebSearch = true
+	if problems := Validate(s); len(problems) != 0 {
+		t.Fatalf("web search on a generative feed should be valid, got %+v", problems)
+	}
+}
+
 func TestValidate_AggregateRequiresMember(t *testing.T) {
 	s := validAggregate()
 	s.Members = nil

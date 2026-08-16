@@ -115,6 +115,8 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.editor.modelParams":                  {Text: "Model parameters"},
 	"generate.editor.model":                        {Text: "Model"},
 	"generate.editor.temperature":                  {Text: "Temperature"},
+	"generate.editor.webSearch":                    {Text: "Web search"},
+	"generate.editor.webSearchHint":                {Text: "Lets the model search the live web during generation. Without it the model has no web access at all. The model decides each run whether to search."},
 	"generate.editor.itemsPerRun":                  {Text: "Items per run"},
 	"generate.editor.feedWindow":                   {Text: "Feed window"},
 	"generate.editor.systemPrompt":                 {Text: "System prompt"},

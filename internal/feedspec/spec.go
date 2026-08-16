@@ -29,6 +29,14 @@ type ModelParams struct {
 	// Mode and Speed are SchemaFlux's actual per-call tuning knobs (§8.1).
 	Mode  string
 	Speed string
+	// WebSearch declares the provider's built-in web-search tool on this
+	// feed's generation calls (SchemaFlux v1.2.0's Generating.WebSearch),
+	// giving the model live web access it otherwise has none of; the model
+	// still decides per-run whether to search. Generative feeds only —
+	// ValidateSpec refuses it on grounded feeds, whose published links must
+	// come from the fetched candidate set (§9), so a model-searched URL
+	// could only ever be rejected as link_not_in_candidate_set.
+	WebSearch bool `toml:"web_search,omitempty" json:"web_search,omitempty"`
 }
 
 // Novelty holds the generative-feed repetition guard (§7, §9 step 5).

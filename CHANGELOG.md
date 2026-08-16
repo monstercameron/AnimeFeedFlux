@@ -15,6 +15,35 @@ precedence, which is why tagging real builds now cannot be shadowed by it.)
 
 ## [Unreleased]
 
+### Added — 2026-08-16, feeds can search the live web
+
+- **Per-feed "Web search" toggle** (generative feeds only, in the editor's model parameters):
+  declares OpenAI's built-in `web_search` tool on the feed's generation calls via SchemaFlux
+  v1.2.0. Without the declaration the model has no live web access at all — a prompt saying
+  "search the web" changes nothing on its own — so this is the switch that makes watch-mode
+  feeds ("post only when something happens") actually look at the world. The model still
+  decides each run whether searching is warranted.
+- Grounded feeds cannot enable it: their published links must come from the fetched candidate
+  set, so a model-searched URL would only ever be rejected. Saving such a spec is refused and
+  the toggle does not appear.
+
+### Fixed — 2026-08-16, editing gaps found while wiring the toggle
+
+- Changing a feed's **"Runs" mode** (scheduled / ad hoc / watch) now marks the draft unsaved and
+  participates in per-field conflict resolution; previously the field was missing from the
+  editor's change-detection list, so a mode-only edit left Save disabled. (The same list is why
+  the new web-search toggle works; a recurrence-only edit still has this gap — tracked as
+  `A10-05`.)
+- Golden-file render tests now pass on a Windows checkout: `.gitattributes` pins `*.golden` to
+  LF so byte-for-byte comparisons stop tripping over CRLF conversion (CI on Linux was and stays
+  green either way).
+
+### Fixed — 2026-08-16, deploy-hook port
+
+- The droplet's deploy-hook receiver moved from port 9000 (already occupied by another app on
+  the box) to 9309; nginx and the bootstrap script now agree. Already live on the droplet —
+  this commits the config the box is running.
+
 ## [0.1.0] — 2026-08-15
 
 First deployed release. Everything below shipped together after the day's promotion gate (see the

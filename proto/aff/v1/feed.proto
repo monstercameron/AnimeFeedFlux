@@ -144,6 +144,14 @@ message FeedSpec {
   // Only meaningful (and required, per ValidateSpec) when kind =
   // FEED_KIND_GROUNDED.
   repeated SourceSpec sources = 40;
+
+  // Declares the provider's built-in web-search tool on this feed's
+  // generation calls, giving the model live web access it otherwise has
+  // none of (the model still decides per-run whether to search).
+  // Generative feeds only: a grounded feed's published links must come
+  // from its fetched candidate set (PLAN.md §9), so model-searched URLs
+  // would only ever be rejected — ValidateSpec refuses the combination.
+  bool web_search = 42;
 }
 
 // Weekday is a day of the week, numbered to match Go's time.Weekday so the

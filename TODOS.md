@@ -2908,6 +2908,34 @@ one owner, not because a second language is planned.
       select that hides the builder for ad hoc; TOML round-trips the field; unknown modes rejected
       (`schedule_mode_unknown`). Check: `internal/feedspec/schedule_mode_test.go`,
       `internal/generate/watch_test.go`, `internal/ops` staleness suite green.
+- [x] `A10-04` **Per-feed web search** (SchemaFlux v1.2.0): `spec.web_search` declares OpenAI's
+      built-in `web_search` tool on stage-1 generation calls — without the declaration the model
+      has NO live web access at all, which is what watch-mode feeds exist to have. Generative
+      feeds only: grounded link integrity (§9) would reject every model-searched URL, so
+      ValidateSpec refuses the combination (`grounded_forbids_web_search`,
+      `aggregate_forbids_web_search`) and the editor checkbox only renders for generative feeds.
+      Stage-2 formatting never gets the tool (it restates stage-1 fields; web access there could
+      only smuggle in new facts). Wire: proto `FeedSpec.web_search = 42` →
+      `feedspec.ModelParams.WebSearch` → `generate.Spec.WebSearch` → `llm.Request.WebSearch` →
+      `Generating.WebSearch()`. Check: `internal/feedspec/spec_test.go` web-search trio; live
+      A/B proof in `internal/llm/live_websearch_test.go` (gated `AFF_LIVE_LLM=1`): with the flag
+      the model returned Bitcoin at $63,041 dated 2026-08-16 (Coinbase spot at that moment:
+      $62,999 — 0.07% apart); without it, it answered "no live market-data source is available".
+      UI: the toggle sits on the workbench strip's instrument cluster beside model/effort/temp
+      (the drawer-only first cut was invisible — same lesson as Save and the scheduler) and in
+      the recipe drawer's model fieldset; browser round-trip verified (toggle → dirty → save →
+      reload → persisted). Fixing that surfaced `feedScalarFields` (web/pages/generate/logic.go)
+      as a hand-maintained list: `web_search` AND the pre-existing `schedule_mode` were both
+      missing, so neither dirtied Save nor took part in per-field conflict resolution. Both
+      added. See A10-05 for the remaining recurrence gap.
+- [ ] `A10-05` **Recurrence edits don't register as a draft change**: `feedScalarFields` drives
+      dirty detection and per-field conflict resolution, and Recurrence is a message, not a
+      scalar, so a builder edit that changes ONLY the recurrence (e.g. every 1 day → every 2
+      weeks, same cron fallback) leaves Save disabled and is invisible to D2-16's merge dialog.
+      Found while adding `web_search` to the list (A10-04). Fix wants a canonical serialization
+      of Recurrence for the compare plus a parse-back for ApplyResolution — not a bolt-on;
+      consider deriving the field list from the proto descriptor so the list stops being
+      hand-maintained at all.
 
 ## D2 — Generate (`J2`, `J3`, `J4`, `J9`)
 

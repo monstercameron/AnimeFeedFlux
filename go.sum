@@ -44,6 +44,8 @@ github.com/monstercameron/GoWebComponents/v5 v5.0.1 h1:z1STMmGqFPX0+14ssmf8cJ9v8
 github.com/monstercameron/GoWebComponents/v5 v5.0.1/go.mod h1:grkE02YfOhN8D4b7Uajhl5Wi+cIFm3wOhg4SzkUBnds=
 github.com/monstercameron/schemaflux v1.1.0 h1:z9N9Xh/INptzXvqK3ilodrRL51DbiidKCsjGt9u4eFU=
 github.com/monstercameron/schemaflux v1.1.0/go.mod h1:rK6vvvh/fDyZ0oIsHFLy9xQiLpH7wNdyMZudkohCbug=
+github.com/monstercameron/schemaflux v1.2.0 h1:D1POsKRftN4DP1APc4/rnJL3yMGne5Qcuq9KIbqM2tE=
+github.com/monstercameron/schemaflux v1.2.0/go.mod h1:rK6vvvh/fDyZ0oIsHFLy9xQiLpH7wNdyMZudkohCbug=
 github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOFAw7w=
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
 github.com/oklog/ulid/v2 v2.1.2 h1:IEclFb9JNvzYA6MW2SCxbLzcHTVsfqm3PrqGQJH5zec=

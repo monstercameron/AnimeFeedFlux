@@ -830,6 +830,12 @@ here rather than discovered during A5.
   LLM layer", confined to one operation.
 - Minor: there is no per-call temperature knob, only Mode and Speed tiers. The
   recipe's temperature field is accepted and documented as a no-op until it is.
+- **Web access is opt-in per request** (SchemaFlux v1.2.0, revision 2026-08-16):
+  `Generating.WebSearch()` declares OpenAI's built-in `web_search` tool; without the
+  declaration the model has NO live web access at all, whatever the prompt asks.
+  The recipe's `web_search` field carries this for stage-1 generation on
+  generative feeds only — ValidateSpec refuses it on grounded feeds, whose §9
+  link integrity would reject every model-searched URL.
 
 - **A top-level array schema is rejected outright, so the generated type must be an OBJECT.**
   Found 2026-08-10 by the first real generation run (`A4-30`), not by any test:

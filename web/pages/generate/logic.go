@@ -425,9 +425,13 @@ func FailedLinks(verdicts []*affv1.LinkVerdict) []*affv1.LinkVerdict {
 var feedScalarFields = []string{
 	"title", "description", "language", "author", "copyright", "og_image",
 	"ttl_minutes", "enabled",
-	"cron", "timezone", "items_per_run", "feed_window", "model",
-	"temperature", "system_prompt_template", "user_prompt_template",
+	"cron", "timezone", "schedule_mode", "items_per_run", "feed_window", "model",
+	"temperature", "web_search", "system_prompt_template", "user_prompt_template",
 	"daily_token_budget", "daily_run_budget",
+	// Known gap: Recurrence is a message, not a scalar, so builder edits
+	// that change ONLY the recurrence do not register here — neither for
+	// dirty detection nor per-field conflict resolution. Tracked as a
+	// TODOS.md follow-up rather than a stringly codec bolted on in passing.
 }
 
 func feedFieldValue(f *affv1.Feed, key string) string {
@@ -456,6 +460,10 @@ func feedFieldValue(f *affv1.Feed, key string) string {
 		return spec.GetCron()
 	case "timezone":
 		return spec.GetTimezone()
+	case "schedule_mode":
+		return spec.GetScheduleMode()
+	case "web_search":
+		return strconv.FormatBool(spec.GetWebSearch())
 	case "items_per_run":
 		return strconv.Itoa(int(spec.GetItemsPerRun()))
 	case "feed_window":
@@ -575,6 +583,10 @@ func applyFeedField(f *affv1.Feed, key, value string) {
 		f.Spec.Cron = value
 	case "timezone":
 		f.Spec.Timezone = value
+	case "schedule_mode":
+		f.Spec.ScheduleMode = value
+	case "web_search":
+		f.Spec.WebSearch = value == "true"
 	case "items_per_run":
 		if n, err := strconv.Atoi(value); err == nil {
 			f.Spec.ItemsPerRun = int32(n)

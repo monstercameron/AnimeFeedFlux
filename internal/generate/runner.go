@@ -181,6 +181,15 @@ type Spec struct {
 	// so no §9.3 repair call and no novelty re-roll, both of which would
 	// badger the model into inventing content the mode exists to avoid.
 	WatchMode bool
+
+	// WebSearch declares the provider's built-in web-search tool on this
+	// feed's stage-1 generation calls (llm.Request.WebSearch). Generative
+	// feeds only — feedspec.ValidateSpec refuses it on grounded feeds,
+	// whose link integrity (§9) would reject every model-searched URL —
+	// and stage-2 formatting never gets it: formatting restates fields the
+	// stage-1 call already produced, so web access there could only
+	// smuggle in new facts.
+	WebSearch bool
 }
 
 const (
@@ -735,6 +744,7 @@ func runAttempt(ctx context.Context, deps Deps, spec Spec, opts Options, system,
 			Effort:    spec.Effort,
 			MaxItems:  spec.ItemsPerRun,
 			RequestID: requestID,
+			WebSearch: spec.WebSearch,
 		}
 		// deps.Provider.Generate is called on ctx UNWRAPPED — TODOS A4-31 is
 		// explicit that SchemaFlux already emits its own span for this call

@@ -368,15 +368,25 @@ type stripProps struct {
 	ModelsReason      string
 	Effort            string
 	OnEffort          func(string)
-	Size              int32
-	OnSize            func(int32)
-	Temp              float64
-	OnTemp            func(float64)
-	Estimate          string
-	Disabled          bool
-	Reason            string
-	Sampling          bool
-	OnPreview         func()
+
+	// WebSearch is the recipe's web_search flag (spec.web_search) on the
+	// strip's instrument cluster, beside the model it modifies — the drawer
+	// alone was invisible, per the same report that put Save up here.
+	// ShowWebSearch gates it to generative feeds: grounded link integrity
+	// (§9) rejects model-searched URLs, so the server refuses the
+	// combination and the control never appears.
+	WebSearch     bool
+	ShowWebSearch bool
+	OnWebSearch   func(bool)
+	Size          int32
+	OnSize        func(int32)
+	Temp          float64
+	OnTemp        func(float64)
+	Estimate      string
+	Disabled      bool
+	Reason        string
+	Sampling      bool
+	OnPreview     func()
 }
 
 // tempFieldValue renders the override, blank when unset.
@@ -621,6 +631,21 @@ func renderStrip(p stripProps) ui.Node {
 						}
 					})),
 			),
+			// Built every render, shown only for generative feeds: an
+			// appearing/disappearing cell would shift this fiber's hook
+			// slots (same rule as the retry button above).
+			h.Show(p.ShowWebSearch, h.Div(h.ClassStr("af-gen__strip-cell"),
+				h.Label(h.ClassStr("af-gen__websearch"),
+					h.Input(h.ID("gen-strip-websearch"), h.Type("checkbox"),
+						h.Checked(p.WebSearch),
+						h.Attr("title", t.T("generate.editor.webSearchHint")),
+						h.OnChange(func(ui.ChangeEvent) {
+							if p.OnWebSearch != nil {
+								p.OnWebSearch(!p.WebSearch)
+							}
+						})),
+					h.Text(t.T("generate.editor.webSearch"))),
+			)),
 		),
 		h.Div(h.ClassStr("af-gen__strip-right"),
 			// The cost sits ON the button's row, not in a panel elsewhere:

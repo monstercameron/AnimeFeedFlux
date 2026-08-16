@@ -15,6 +15,10 @@
 *.json      text eol=lf
 *.html      text eol=lf
 *.conf      text eol=lf
+# Golden files are compared byte-for-byte against renderer output, which
+# emits LF. text=auto's CRLF checkout on Windows fails every golden test
+# locally while CI (Linux, LF) passes — found 2026-08-16.
+*.golden    text eol=lf
 
 # Shell scripts run on the deployment box, and a CR at the end of the shebang line is a
 # "bad interpreter: /usr/bin/env bash^M" that names the wrong problem. Edited on Windows,
