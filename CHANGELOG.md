@@ -34,6 +34,10 @@ precedence, which is why tagging real builds now cannot be shadowed by it.)
   editor's change-detection list, so a mode-only edit left Save disabled. (The same list is why
   the new web-search toggle works; a recurrence-only edit still has this gap — tracked as
   `A10-05`.)
+- The SEC-46 session-revocation e2e test no longer flakes when it starts within ~10s of a
+  30-second TOTP step boundary (its three pinned codes assumed the server's clock stayed in the
+  starting step for the whole test; it now waits out a near boundary first). Caught by the
+  v0.2.0 release gate, which failed on a commit dev CI had passed minutes earlier.
 - Golden-file render tests now pass on a Windows checkout: `.gitattributes` pins `*.golden` to
   LF so byte-for-byte comparisons stop tripping over CRLF conversion (CI on Linux was and stays
   green either way).

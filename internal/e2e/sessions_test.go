@@ -46,6 +46,19 @@ func TestChangePasswordRevokesOtherSessions(t *testing.T) {
 	// consumes a fourth.
 	const totpPeriod = 30 * time.Second
 	ref := time.Now()
+	// The three-step pinning below assumes the server's "now" stays inside
+	// ref's own 30s step for the whole test: the ±1 skew window is anchored
+	// to the server clock at VALIDATION time, so if a step boundary passes
+	// between here and the ChangePassword call (~2-3s of real RPCs away),
+	// center-1 falls out of the window and the call fails Unauthenticated.
+	// That is exactly how this test flaked on the v0.2.0 release gate
+	// (passed dev CI, failed the tag run minutes later). If the boundary is
+	// close, start the test on the far side of it instead — a bounded, rare
+	// sleep beats a release gate that fails on clock phase.
+	if untilBoundary := totpPeriod - time.Duration(ref.UnixNano())%totpPeriod; untilBoundary < 10*time.Second {
+		time.Sleep(untilBoundary + time.Second)
+		ref = time.Now()
+	}
 
 	login1, err := app.LoginAt(ctx, adminPassword, totpSecret, ref)
 	if err != nil {
