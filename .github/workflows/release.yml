@@ -34,7 +34,11 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/${{ github.repository }}
+  # Lowercased literal, NOT ${{ github.repository }}: the repo is
+  # "monstercameron/AnimeFeedFlux" and GHCR rejects any uppercase in a
+  # repository name — the first real Release run failed exactly there
+  # ("repository name must be lowercase", 2026-08-16).
+  IMAGE: ghcr.io/monstercameron/animefeedflux
 
 jobs:
   verify:
