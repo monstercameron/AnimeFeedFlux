@@ -8,8 +8,8 @@
 </p>
 
 <p align="center">
-  <img alt="Version 0.0.2-dev" src="https://img.shields.io/badge/version-0.0.2--dev-blue">
-  <img alt="Status: building, not deployed" src="https://img.shields.io/badge/status-building%2C%20not%20deployed-orange">
+  <img alt="Version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-blue">
+  <img alt="Status: deployed and serving" src="https://img.shields.io/badge/status-deployed%20%26%20serving-brightgreen">
   <a href="https://github.com/monstercameron/AnimeFeedFlux/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/monstercameron/AnimeFeedFlux/actions/workflows/ci.yml/badge.svg?branch=dev"></a>
   <img alt="Go 1.26" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white">
   <img alt="Client: Go to WebAssembly" src="https://img.shields.io/badge/client-Go%20%E2%86%92%20WebAssembly-654FF0?logo=webassembly&logoColor=white">
@@ -20,23 +20,25 @@
 
 ---
 
-## Status: `v0.0.2-dev` — building, not deployed
+## Status: `v0.2.0` — deployed and serving
 
-This is no longer a specification with no code behind it: the core engine (store, renderers,
-generation, novelty, grounded news, scheduler, publish plane) and the headless control surface
-(auth, RPC, CLI, browser bridge) are both substantially built and covered by tests, including fuzz
-targets, a soak test, and a poll-load check that run in CI. A container build exists. None of that
-adds up to a running product yet — **nothing is deployed anywhere, no feed has ever been published,
-and the Slack integration has never been exercised against a live instance.** There is still no
-demo badge above, for that reason: there is nothing to point it at.
+The whole system is live: the engine, the publish plane, the gRPC control plane, and the
+WebAssembly admin UI all run in production, in Docker behind nginx on a single host. Feeds render
+and serve as spec-compliant RSS/Atom/JSON Feed; the admin UI covers first-run setup (password +
+mandatory TOTP + recovery codes), recipe editing with live preview sampling, per-feed scheduling
+(fixed cadence, ad hoc, or *watch* — "check on a schedule, post only when something happened"),
+provider/key management, run history, and spend tracking.
 
-See "Build order" below for what is done, in progress, and not started, phase by phase. The
-version still tags progress against the plan rather than a release; the first version meaning "you
-can run this" is still cut at the end of Phase C, which has barely started (container image only —
-no CI/CD pipeline, no staging host, no Slack proof, no production deploy).
+Releases ship themselves. Tagging `vX.Y.Z` on `main` runs a verify → build → publish pipeline
+(full test suite with the race detector, `govulncheck`, then a container image to GHCR), and the
+production host pulls the new tag via a secret-gated deploy hook with a health-gated rollout and a
+recorded rollback point — no inbound SSH from CI. The v0.2.0 release exercised the failure path
+for real: the verify gate failed on a flaky test, nothing was published or deployed until it was
+diagnosed and green (`DEVLOG.md`, 2026-08-16).
 
-If you are here expecting a running feed, it is not there yet. If you are here to read the design
-or the code against the plan it was built from, that is exactly what this is.
+What is genuinely not proven yet: the **live Slack proof** (`TODOS.md` C3). Every Slack constraint
+below is enforced mechanically and covered by tests, but a real Slack workspace polling a real feed
+for a week has not happened. That distinction — enforced vs. observed — is kept honest on purpose.
 
 ## The bet
 
@@ -46,6 +48,12 @@ AnimeFeedFlux is a feed **generator**. A recipe carries a prompt, a schedule, a 
 the scheduler runs it; an LLM produces the items; the result is published at a stable URL that any
 reader can subscribe to. The product surface is one sentence: **a URL that returns valid XML and
 never lies.**
+
+A recipe can also declare **web search** (the provider's built-in search tool), giving the model
+live web access for that feed's runs — which is what makes *watch* feeds real: without the
+declaration a model has no web access at all, whatever the prompt asks. Generative feeds only; a
+grounded feed's links must come from its fetched sources, so the combination is refused at save
+time rather than allowed to fail at publish time.
 
 ## Two kinds of item, and why the distinction is the whole design
 
@@ -91,11 +99,12 @@ Two planes, and the split is the security boundary:
 Built on the same stack as the rest of the Flux projects. What's actually in `go.mod` today:
 
 - **[GoWebComponents](https://github.com/monstercameron/GoWebComponents)** — the admin UI, Go
-  compiled to WebAssembly (not started — Phase D)
+  compiled to WebAssembly; no JavaScript framework, no npm
 - **[GoGRPCBridge](https://github.com/monstercameron/GoGRPCBridge)** and `google.golang.org/grpc` —
-  real gRPC from the browser, wired and tested (Phase B)
-- **[SchemaFlux](https://github.com/monstercameron/schemaflux)** — typed LLM operations, so the model
-  returns a Go value instead of text to parse
+  real gRPC from the browser over WebSocket
+- **[SchemaFlux](https://github.com/monstercameron/SchemaFlux)** — typed LLM operations, so the model
+  returns a Go value instead of text to parse; v1.2.0's `WebSearch()` is what powers per-feed web
+  search
 - **`modernc.org/sqlite`** — pure-Go SQLite with FTS5; chosen so the binary stays `CGO_ENABLED=0`
   and can run in a `distroless/static` image (§15.1)
 - **`go.opentelemetry.io/otel`** and friends — tracing/metrics, exported over OTLP
@@ -103,8 +112,9 @@ Built on the same stack as the rest of the Flux projects. What's actually in `go
   for the auth system in `internal/auth`
 - **`github.com/BurntSushi/toml`** — recipe/config parsing
 - **`github.com/oklog/ulid/v2`** — opaque item identity (§5.1)
-- Go, SQLite with FTS5, nginx, one droplet — the droplet, nginx vhosts, and TLS are still Phase C
-  work; nothing above is deployed to them yet
+- Go, SQLite with FTS5, nginx, one host — the container runs `CGO_ENABLED=0` in
+  `distroless/static`, data lives in a named Docker volume, and both planes sit behind nginx
+  vhosts with Let's Encrypt TLS (the control plane additionally behind an IP allowlist)
 
 ## Documents, and which one wins
 
@@ -125,47 +135,21 @@ by prose. They are all greppable, which is the point.
 
 ## Build order
 
-Core engine first, UI last. The plan is for the engine to be complete, deployed, and delivering
-feeds to Slack before a single UI component is written — so every RPC the UI will call has already
-been exercised by the CLI, and no screen gets built twice because a service changed shape. That
-ordering is holding: Phases A and B are the ones with real progress, and Phase D has not been
-touched.
-
-Task counts below are `[x]` checkboxes in `TODOS.md`, not a judgment of quality — see `PLAN.md` §18
-for what each phase's milestones actually require.
+Core engine first, UI last. The engine was complete, deployed, and serving before the first UI
+component was written — so every RPC the UI calls had already been exercised by the CLI, and no
+screen got built twice because a service changed shape. That ordering held all the way through.
 
 | Phase | What | Status |
 |---|---|---|
-| **A** | Core engine | In progress. Most milestones (store, renderers, compliance, sampling, publish plane, fuzz/soak/load) are done; skeleton and generation have a handful of tasks left. |
-| **B** | Control surface | In progress. RPC services and the browser bridge are done; auth and the CLI are nearly done; the headless flow-sanity suite is mostly green. |
-| **C** | Ship it | Just started. A Dockerfile and compose setup exist; the CI/CD pipeline, staging host, Slack proof, ops runbook, and production deploy have not begun. |
-| **D** | UI | Not started. |
-| **E** | After | Not started. |
+| **A** | Core engine | Done — store, renderers, compliance, generation, novelty, grounded news, scheduler, sampling, publish plane, fuzz/soak/load. |
+| **B** | Control surface | Done — auth, RPC services, browser bridge, CLI, headless flow-sanity suite. |
+| **C** | Ship it | Done except the live Slack proof (C3) — container, CI/CD release pipeline, production deploy, pull-based self-update, ops runbook. |
+| **D** | UI | Done — setup, generate workbench, history, settings, i18n (en/es), browser journey suite. |
+| **E** | After | Where new work lands — two-stage per-surface formatting, schedule modes, per-feed web search, and the rest of the post-ship series live in `TODOS.md`. |
 
-Exact counts, from `TODOS.md`, as of this writing:
-
-| Phase | Milestone | Done |
-|---|---|---|
-| A | A0 Skeleton | 43/60 |
-| A | A1 Store | 26/26 |
-| A | A2 Renderers | 21/21 |
-| A | A3 Compliance | 8/8 |
-| A | A4 Generation | 32/38 |
-| A | A5 Novelty | 10/12 |
-| A | A6 Grounded news | 16/19 |
-| A | A7 Scheduler | 17/21 |
-| A | A8 Sampling | 9/9 |
-| A | A9 Publish plane | 24/24 |
-| A | AF Fuzz/soak/load | 17/17 |
-| B | B0 Auth | 56/70 |
-| B | B1 RPC services | 19/19 |
-| B | B2 Bridge | 7/7 |
-| B | B3 CLI | 10/11 |
-| B | BF Flow sanity (headless) | 47/53 |
-| C | C0 Container | 16/19 |
-| C | C1–C5 | 0 of 63 |
-| D | D0–D5 | 0 of 99 |
-| E | — | 0 of 42 |
+`TODOS.md` is the live ledger (roughly 720 tasks checked as of v0.2.0, with the open tail
+enumerated rather than implied); exact per-milestone state belongs there, not here, because a
+count in a README is stale the day after it is written.
 
 ## What this will not do
 
