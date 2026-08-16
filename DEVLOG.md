@@ -13,6 +13,55 @@ Newest entries at the top.
 
 ---
 
+## 2026-08-16 — v0.2.0: the release gate failed closed on a clock, and that was the system working
+
+First release through the full automated chain (promote → tag → Release workflow → deploy hook →
+droplet self-update), run deliberately as a robustness test. Verdict: the pipeline held, and the
+one failure it produced was the gate doing its job.
+
+**The failure.** The v0.2.0 tag run's "Verify before shipping" job failed on
+`TestChangePasswordRevokesOtherSessions` (SEC-46) with `Unauthenticated` — on the exact commit
+dev CI had passed minutes earlier. Same code, same suite, different minute: that shape screams
+environment, not regression. Diagnosis: the test pins three TOTP codes to steps
+center−1/center/center+1 of a reference instant taken at test start, and its comment asserts
+"only THREE distinct steps are ever simultaneously valid across this whole fast test." That
+assertion has a hidden precondition nobody wrote down: the server's ±1-step skew window is
+anchored to the SERVER clock at validation time, so it is only the same window if no 30-second
+step boundary passes during the test's ~2.3s of real RPCs. Start the test 1 second before a
+boundary and center−1 falls out of the window before ChangePassword lands. Dev CI happened to
+start on the safe side of a boundary; the tag run did not. The failure was deterministic clock
+phase wearing a flake costume.
+
+**The fix** is the boring one: if the test starts within 10s of a boundary, sleep to the far
+side and re-take the reference. A bounded, rare sleep beats a release gate that fails on what
+second of the minute it happens to run — and beats the clever alternatives (injecting a clock
+into the e2e stack would rebuild half the harness to avoid a ≤11s sleep that triggers one run
+in three). Verified by running the test repeatedly; committed to dev (`e05a033`); the gate
+rerun went green without it, as expected for a phase-dependent failure.
+
+**What the failure proved about the pipeline.** The Release workflow's job chain
+(verify → build → deploy hook) meant the red Test step SKIPPED the image build and the hook —
+nothing reached GHCR, nothing poked the droplet, v0.1.0 kept serving untouched. Fail-closed,
+observed rather than assumed. After `gh run rerun --failed`: image published, hook fired, and
+the droplet was running v0.2.0 (healthy) within about a minute of publish, with
+`.previous-tag` holding v0.1.0 as the recorded rollback point. Public plane 200, feed XML 200,
+admin 200 from the allowlisted home IP — and the 403 I got probing admin FROM the droplet
+itself was the IP allowlist working, not a bug (worth remembering: a 403 in a droplet-side
+curl of the admin vhost is expected, always test admin from home).
+
+**Two more finds on the way, both of the "hand-maintained list" species.**
+`feedScalarFields` (web/pages/generate/logic.go) drives BOTH Save-dirty detection and per-field
+conflict resolution, and it is maintained by hand: `web_search` wasn't in it (the new toggle
+checked visually but never enabled Save — caught only because the browser round-trip test
+asserted dirtiness, not just the checkbox), and neither was the A10-03 `schedule_mode` field,
+meaning a mode-only edit has never dirtied Save since watch/adhoc shipped. Both added;
+recurrence has the same gap and is filed as A10-05 with a note to derive the list from the
+proto descriptor so it stops being a list anyone maintains. And golden render tests turn out
+to have been failing on every Windows checkout while CI stayed green: `.gitattributes`'
+`text=auto` checked the `.golden` files out as CRLF while the renderer emits LF — the fix is
+`*.golden text eol=lf`, and the lesson is that a byte-for-byte comparison file is "endings not
+negotiable" by definition and should have been in that block from the start.
+
 ## 2026-08-16 — Web search is a declaration, not a prompt, and it belongs to generative feeds only
 
 The assumption worth killing first: that a watch-mode feed prompted to "check the web daily" was
