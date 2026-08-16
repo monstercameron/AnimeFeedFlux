@@ -34,24 +34,32 @@ func (s ListState) String() string {
 	}
 }
 
-// CandidateView is one of the sampler's four ways to look at a
+// CandidateView is one of the sampler's five ways to look at a
 // SampleCandidate (PLAN.md §12.3, TODOS.md D2-19..22). Order matches the
 // plan's own enumeration ("1. rendered, 2. raw validated fields, 3. the
 // exact feed XML, 4. the Slack card preview") and CandidateViews below
 // preserves it so a tab strip built by ranging over CandidateViews shows
 // them in the plan's stated order, ending on the one PLAN.md calls out as
 // "the one that matters."
+//
+// ViewEmbed (§6.1) was added fourth rather than appended fifth, deliberately:
+// the Slack card stays last because the plan's ordering argument is about
+// what an operator should look at LAST before promoting, and the embed did
+// not displace Slack as that thing — Slack is where these items are actually
+// read. The embed sits next to the feed XML because both answer "what does
+// this become on a public surface".
 type CandidateView int
 
 const (
 	ViewRendered CandidateView = iota
 	ViewRawFields
 	ViewFeedXML
+	ViewEmbed
 	ViewSlackCard
 )
 
 // CandidateViews is every view, in display order.
-var CandidateViews = []CandidateView{ViewRendered, ViewRawFields, ViewFeedXML, ViewSlackCard}
+var CandidateViews = []CandidateView{ViewRendered, ViewRawFields, ViewFeedXML, ViewEmbed, ViewSlackCard}
 
 // TranslationKey returns the generate.* i18n key for this view's tab
 // label (TODOS.md D6-11: "all four candidate views... through i18n").
@@ -63,6 +71,8 @@ func (v CandidateView) TranslationKey() string {
 		return "generate.sampler.view.rawFields"
 	case ViewFeedXML:
 		return "generate.sampler.view.feedXML"
+	case ViewEmbed:
+		return "generate.sampler.view.embed"
 	case ViewSlackCard:
 		return "generate.sampler.view.slackCard"
 	default:

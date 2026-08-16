@@ -59,14 +59,6 @@ type KebabProps struct {
 // visually separated to the end (OrderKebabItems), the trigger has a real
 // accessible name, and the menu is a trapped-focus, Esc-closable
 // AccessibleOverlay rather than a hand-rolled absolutely-positioned div.
-// kebabAnchorKey collapses the anchor effect's two deps into one comparable
-// value for UseEffectOf, which is measurably cheaper than the variadic form
-// in wasm (A8-50).
-type kebabAnchorKey struct {
-	open      bool
-	triggerID string
-}
-
 func Kebab(p KebabProps) Node {
 	triggerID := p.ID + "-trigger"
 	menuID := p.ID + "-menu"
@@ -79,13 +71,23 @@ func Kebab(p KebabProps) Node {
 	// Where the menu goes. See kebabAnchor for why this is measured rather
 	// than expressed in CSS.
 	anchor := gwcui.UseState(kebabRect{})
-	gwcui.UseEffectOf(func() func() {
+	// UseLayoutEffect, not UseEffect: this MEASURES the trigger's geometry
+	// and then sets state from it (TODOS.md A8-51). A passive effect runs
+	// after the browser has painted, so the menu appeared once at the
+	// previous render's coordinates and only then jumped to the right place —
+	// a correctness problem that reads as flicker, not just a wasted render.
+	// A layout effect runs after the commit mutates the DOM and before paint,
+	// which is what this needs and what the library documents it for.
+	//
+	// It stays variadic: v5.0.1 ships no UseLayoutEffectOf, so there is no
+	// typed single-dep form to convert to here (unlike A8-50's effects).
+	gwcui.UseLayoutEffect(func() func() {
 		if !p.Open {
 			return nil
 		}
 		anchor.Set(measureKebabAnchor(triggerID, len(ordered)))
 		return nil
-	}, kebabAnchorKey{open: p.Open, triggerID: triggerID})
+	}, p.Open, triggerID)
 
 	triggerRules := []css.Rule{
 		css.Display.InlineFlex,

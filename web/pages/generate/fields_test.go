@@ -206,8 +206,8 @@ func TestListStateAndCandidateViewNamesAreDistinct(t *testing.T) {
 		t.Errorf("an out-of-range state stringified as %q", got)
 	}
 
-	// Every view's tab label goes through i18n (D6-11), and the four keys
-	// must be distinct or two tabs render with the same label.
+	// Every view's tab label goes through i18n (D6-11), and the keys must
+	// be distinct or two tabs render with the same label.
 	keys := map[string]bool{}
 	for _, v := range CandidateViews {
 		k := v.TranslationKey()
@@ -219,8 +219,8 @@ func TestListStateAndCandidateViewNamesAreDistinct(t *testing.T) {
 		}
 		keys[k] = true
 	}
-	if len(CandidateViews) != 4 {
-		t.Errorf("CandidateViews has %d entries, want the plan's four", len(CandidateViews))
+	if len(CandidateViews) != 5 {
+		t.Errorf("CandidateViews has %d entries, want the plan's four plus the embed (§6.1)", len(CandidateViews))
 	}
 	if got := CandidateView(99).TranslationKey(); got != "generate.sampler.view.unknown" {
 		t.Errorf("an out-of-range view keyed to %q", got)

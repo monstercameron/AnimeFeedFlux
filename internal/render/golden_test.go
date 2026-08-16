@@ -9,7 +9,7 @@ import (
 	"github.com/monstercameron/AnimeFeedFlux/internal/testutil"
 )
 
-// This file locks the four renderers' exact byte output down with golden
+// This file locks the five renderers' exact byte output down with golden
 // files (PLAN.md §5.6, §17.1): a deliberate format change is a reviewed diff
 // via `go test -run Golden ./internal/render/ -update`, an accidental one is
 // a test failure. Cases cover a plain channel, a channel carrying a trivia
@@ -174,6 +174,36 @@ func TestGoldenPermalink(t *testing.T) {
 			got, err := Permalink(tc.c, tc.it)
 			if err != nil {
 				t.Fatalf("Permalink(%s): %v", tc.name, err)
+			}
+			testutil.Assert(t, tc.name, got)
+		})
+	}
+}
+
+// TestGoldenEmbed locks the embed document's bytes down for the same reason
+// as the four above, plus one specific to this renderer: it is the only
+// output whose CSS is part of the contract. A stylesheet edited by accident
+// is invisible in a "does it contain the title" assertion and obvious in a
+// golden diff.
+//
+// The trivia case is here deliberately. The answer must be absent from these
+// bytes, and a golden makes that a reviewable property of the file rather
+// than something only a test name claims.
+func TestGoldenEmbed(t *testing.T) {
+	cases := []struct {
+		name string
+		c    model.Channel
+		o    EmbedOptions
+	}{
+		{"embed_basic", testutil.SampleChannel(3), EmbedOptions{}},
+		{"embed_trivia", triviaChannel(), EmbedOptions{Count: 5, Theme: "dark"}},
+		{"embed_ugly", uglyChannel(), EmbedOptions{Theme: "light"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Embed(tc.c, tc.o)
+			if err != nil {
+				t.Fatalf("Embed(%s): %v", tc.name, err)
 			}
 			testutil.Assert(t, tc.name, got)
 		})

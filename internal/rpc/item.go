@@ -54,8 +54,31 @@ import (
 	"github.com/monstercameron/AnimeFeedFlux/internal/ids"
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
 	"github.com/monstercameron/AnimeFeedFlux/internal/publish"
+	"github.com/monstercameron/AnimeFeedFlux/internal/sanitize"
 	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 )
+
+// itemSanitizeHTML is the sanitize chokepoint for every markup field that
+// enters through this service.
+//
+// internal/generate/contract.go sanitizes what the GENERATION pipeline
+// produces, and for a long time that was described as though it covered
+// everything — but this file is a second, entirely independent ingress:
+// Create and Update take body_html/answer_html straight off the request, and
+// PromoteSample takes them off a stored sample payload. Those values are
+// written into a document COMPLETELY UNESCAPED downstream (render/
+// permalink.go, render/rss.go's content:encoded), so "the generation pipeline
+// sanitized it" is not a property this path can inherit — it never went
+// through that pipeline.
+//
+// Applied unconditionally, including to values that ARE already sanitized
+// (PromoteSample's candidates): sanitize.HTML is idempotent by contract (see
+// its decodeEntities doc comment, which exists specifically so
+// HTML(HTML(s)) == HTML(s)), so a second pass costs a string walk and buys a
+// boundary that holds regardless of which path the value arrived on. A
+// chokepoint that is only correct when every caller remembers it is not a
+// chokepoint.
+func itemSanitizeHTML(s string) string { return sanitize.HTML(s) }
 
 // itemTimeLayout mirrors internal/store's unexported timeLayout (items.go:
 // "the one format every timestamp column uses: RFC3339Nano, UTC"). It must
@@ -738,14 +761,21 @@ func (s *ItemServer) Create(ctx context.Context, req *affv1.ItemServiceCreateReq
 		itemCreateAfterReadNewestHook()
 	}
 
+	// Sanitized before the content hash is computed, so the hash identifies
+	// what is actually STORED and rendered rather than what was submitted —
+	// otherwise two submissions differing only in markup this package strips
+	// would hash differently while producing byte-identical published items.
+	bodyHTML := itemSanitizeHTML(in.GetBodyHtml())
+	answerHTML := itemSanitizeHTML(in.GetAnswerHtml())
+
 	it := model.Item{
 		FeedID:      feedID,
 		ItemKey:     s.ids.NewItemKey(now),
-		ContentHash: itemContentHash(feedID, title, in.GetSummaryText(), in.GetBodyHtml(), in.GetLink()),
+		ContentHash: itemContentHash(feedID, title, in.GetSummaryText(), bodyHTML, in.GetLink()),
 		Title:       title,
 		SummaryText: in.GetSummaryText(),
-		BodyHTML:    in.GetBodyHtml(),
-		AnswerHTML:  in.GetAnswerHtml(),
+		BodyHTML:    bodyHTML,
+		AnswerHTML:  answerHTML,
 		Link:        in.GetLink(),
 		SourceName:  in.GetSourceName(),
 		Origin:      model.OriginManual,
@@ -970,8 +1000,8 @@ func (s *ItemServer) Update(ctx context.Context, req *affv1.ItemServiceUpdateReq
 	updated := old
 	updated.Title = title
 	updated.SummaryText = in.GetSummaryText()
-	updated.BodyHTML = in.GetBodyHtml()
-	updated.AnswerHTML = in.GetAnswerHtml()
+	updated.BodyHTML = itemSanitizeHTML(in.GetBodyHtml())
+	updated.AnswerHTML = itemSanitizeHTML(in.GetAnswerHtml())
 	updated.Link = in.GetLink()
 	updated.SourceName = in.GetSourceName()
 	updated.PublishedAt = newPublished
@@ -1144,14 +1174,21 @@ func (s *ItemServer) PromoteSample(ctx context.Context, req *affv1.ItemServicePr
 		return nil, status.Errorf(codes.NotFound, "rpc: %v", err)
 	}
 
+	// Re-sanitized even though a candidate reached the sample payload through
+	// internal/generate's own sanitize pass: see itemSanitizeHTML for why this
+	// path does not get to inherit that, and why a second (idempotent) pass is
+	// the price of a boundary that holds no matter how the value arrived.
+	candBodyHTML := itemSanitizeHTML(cand.GetBodyHtml())
+	candAnswerHTML := itemSanitizeHTML(cand.GetAnswerHtml())
+
 	now := s.now()
 	it := model.Item{
 		ItemKey:     s.ids.NewItemKey(now),
-		ContentHash: itemContentHash(feedID, cand.GetTitle(), cand.GetSummaryText(), cand.GetBodyHtml(), cand.GetLink()),
+		ContentHash: itemContentHash(feedID, cand.GetTitle(), cand.GetSummaryText(), candBodyHTML, cand.GetLink()),
 		Title:       cand.GetTitle(),
 		SummaryText: cand.GetSummaryText(),
-		BodyHTML:    cand.GetBodyHtml(),
-		AnswerHTML:  cand.GetAnswerHtml(),
+		BodyHTML:    candBodyHTML,
+		AnswerHTML:  candAnswerHTML,
 		Link:        cand.GetLink(),
 		SourceName:  cand.GetSourceName(),
 		Origin:      model.OriginSampled,
@@ -1293,12 +1330,16 @@ func (s *ItemServer) PublishCorrection(ctx context.Context, req *affv1.ItemServi
 	}
 
 	key := s.ids.NewItemKey(now)
-	hash := itemContentHash(original.FeedID, correctionTitle, req.GetSummaryText(), req.GetBodyHtml(), original.Link)
+	// A correction is a brand-new published item built from caller-supplied
+	// markup, so it goes through the same gate Create and Update do — it
+	// reaches content:encoded and the permalink by exactly the same route.
+	correctionBodyHTML := itemSanitizeHTML(req.GetBodyHtml())
+	hash := itemContentHash(original.FeedID, correctionTitle, req.GetSummaryText(), correctionBodyHTML, original.Link)
 
 	var itemID int64
 	for attempt := 0; ; attempt++ {
 		itemID, err = itemInsertCorrectionOnce(ctx, db, original.FeedID, key, hash, correctionTitle,
-			req.GetSummaryText(), req.GetBodyHtml(), original.Link, original.SourceName, stamp, now, correctsID)
+			req.GetSummaryText(), correctionBodyHTML, original.Link, original.SourceName, stamp, now, correctsID)
 		if err == nil {
 			break
 		}

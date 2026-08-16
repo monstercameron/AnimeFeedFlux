@@ -126,6 +126,39 @@ func renderEditorEmpty(editorEmptyProps) ui.Node {
 	return h.Section(h.ClassStr("af-generate__editor"), h.P(h.Text(deps.I18n.T("generate.editor.noSelection"))))
 }
 
+// renderScheduleSection is the feed's scheduler as a FIRST-CLASS section of
+// the main column — always visible for a loaded feed, never inside the
+// collapsed recipe drawer. Lifted out on 2026-08-15 after the operator
+// could not find it there ("the scheduling needs to be user configurable"):
+// the one control that decides WHEN a feed does anything was two
+// interactions deep, below the fold, behind a disclosure.
+//
+// It owns the cron-escape-hatch reveal state for the same reason the old
+// call site did (toggling must not remount the schedule component), and the
+// hook runs unconditionally before the no-draft branch per the positional
+// hook rule this package documents throughout.
+func renderScheduleSection(p editorProps) ui.Node {
+	showCron := ui.UseState(false)
+	if p.Draft == nil {
+		return h.Fragment()
+	}
+	spec := p.Draft.GetSpec()
+	if spec == nil {
+		spec = &affv1.FeedSpec{}
+	}
+	cronErrKey, cronErrArgs := fieldErrorKV(p.FieldErrs, "cron")
+	tzErrKey, tzErrArgs := fieldErrorKV(p.FieldErrs, "timezone")
+	return h.Section(
+		h.ClassStr("af-gen__schedule"),
+		ui.CreateElement(renderSchedule, scheduleProps{
+			T: deps.I18n, Spec: spec, Now: time.Now(), OnChange: p.OnFieldChange,
+			ShowCron: showCron.Get(), OnToggle: func(v bool) { showCron.Set(v) },
+			CronErrKey: cronErrKey, CronErr: cronErrArgs,
+			TZErrKey: tzErrKey, TZErr: tzErrArgs,
+		}),
+	)
+}
+
 // fieldErrorKV adapts one FieldErrors lookup (a server-supplied, already
 // resolved message string — MapFieldErrors in logic.go copies
 // FieldError.Message verbatim, it is not a catalogue key) into the
@@ -146,11 +179,6 @@ func fieldErrorKV(fe FieldErrors, key string) (string, []any) {
 func renderEditorForm(p editorProps) ui.Node {
 	t := deps.I18n
 	wt := wui.T(t.T)
-	// Whether the cron escape hatch is revealed. Held here rather than inside
-	// the schedule component so toggling it does not remount that component
-	// and drop focus mid-edit — the same reason the kebab's open state lives
-	// in its wrapper.
-	showCron := ui.UseState(false)
 	d := p.Draft
 	spec := d.GetSpec()
 	if spec == nil {
@@ -167,8 +195,6 @@ func renderEditorForm(p editorProps) ui.Node {
 
 	titleErrKey, titleErrArgs := fieldErrorKV(p.FieldErrs, "title")
 	langErrKey, langErrArgs := fieldErrorKV(p.FieldErrs, "language")
-	cronErrKey, cronErrArgs := fieldErrorKV(p.FieldErrs, "cron")
-	tzErrKey, tzErrArgs := fieldErrorKV(p.FieldErrs, "timezone")
 	tempErrKey, tempErrArgs := fieldErrorKV(p.FieldErrs, "temperature")
 	itemsErrKey, itemsErrArgs := fieldErrorKV(p.FieldErrs, "items_per_run")
 	windowErrKey, windowErrArgs := fieldErrorKV(p.FieldErrs, "feed_window")
@@ -214,23 +240,12 @@ func renderEditorForm(p editorProps) ui.Node {
 		}),
 		renderKindSelect(t, d, p),
 
-		// The schedule builder (render_schedule.go), which replaced a raw cron
-		// text field. Cron cannot express "every other Thursday", "every 3
-		// weeks" or "the second Tuesday" AT ALL, so those schedules were not
-		// merely awkward to enter here — they were unenterable, and an
-		// approximation ran on the wrong days silently.
-		//
-		// The next-runs list this now shows is what D2-09 asked for and was
-		// recorded as impossible: the note said no RPC returns nominal fire
-		// times, which is true and turned out not to matter. internal/schedule
-		// is ordinary Go, so the browser evaluates the schedule itself, live,
-		// before anything is saved.
-		ui.CreateElement(renderSchedule, scheduleProps{
-			T: t, Spec: spec, Now: time.Now(), OnChange: onFieldChange,
-			ShowCron: showCron.Get(), OnToggle: func(v bool) { showCron.Set(v) },
-			CronErrKey: cronErrKey, CronErr: cronErrArgs,
-			TZErrKey: tzErrKey, TZErr: tzErrArgs,
-		}),
+		// The schedule builder is NOT here anymore: it is a first-class,
+		// always-visible section of the main column
+		// (renderScheduleSection, mounted by render.go), lifted out of this
+		// drawer on 2026-08-15 after the operator could not find it —
+		// "the scheduling needs to be user configurable" — two interactions
+		// deep inside a collapsed disclosure.
 
 		h.Fieldset(
 			h.Legend(h.Text(t.T("generate.editor.modelParams"))),
@@ -276,36 +291,6 @@ func renderEditorForm(p editorProps) ui.Node {
 					onFieldChange(func(f *affv1.Feed) { ensureSpec(f).FeedWindow = int32(parseIntOr(v, int(spec.GetFeedWindow()))) })
 				},
 			}),
-		),
-
-		h.Fieldset(
-			h.Legend(h.Text(t.T("generate.editor.prompts"))),
-			h.P(h.ClassStr("af-field-hint"), h.Text(t.T("generate.editor.promptVariablesHint"))),
-			h.Ul(h.ClassStr("af-prompt-vars"),
-				// These are literal Go text/template variable names the
-				// prompt templates below interpolate at generation time
-				// (logic.go's PromptVars) — identifiers/operator surface
-				// per TODOS.md D6-19, not prose: translating "{{.Today}}"
-				// would break the template it documents, so it is excluded
-				// on purpose rather than missed.
-				h.Li(h.Text("{{.Today}}")), h.Li(h.Text("{{.Weekday}}")), h.Li(h.Text("{{.Season}}")), //nolint:i18n -- template variable identifiers, must not be translated
-				h.Li(h.Text("{{.FeedTitle}}")), h.Li(h.Text("{{.ItemsPerRun}}")), //nolint:i18n -- template variable identifiers, must not be translated
-				h.Li(h.Text("{{.RecentTitles}}")), h.Li(h.Text("{{.Candidates}}")), //nolint:i18n -- template variable identifiers, must not be translated
-			),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.For("generate-editor-system-prompt"), h.Text(t.T("generate.editor.systemPrompt"))),
-				h.Textarea(h.ID("generate-editor-system-prompt"), h.Value(spec.GetSystemPromptTemplate()), h.OnInput(func(v string) {
-					onFieldChange(func(f *affv1.Feed) { ensureSpec(f).SystemPromptTemplate = v })
-				})),
-				fieldError("system_prompt_template"),
-			),
-			h.Div(h.ClassStr("af-field"),
-				h.Label(h.For("generate-editor-user-prompt"), h.Text(t.T("generate.editor.userPrompt"))),
-				h.Textarea(h.ID("generate-editor-user-prompt"), h.Value(spec.GetUserPromptTemplate()), h.OnInput(func(v string) {
-					onFieldChange(func(f *affv1.Feed) { ensureSpec(f).UserPromptTemplate = v })
-				})),
-				fieldError("user_prompt_template"),
-			),
 		),
 
 		h.Fieldset(

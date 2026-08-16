@@ -58,6 +58,14 @@ type errSample struct {
 }
 
 func (e errSample) Error() string {
+	// A server-classified failure carries the taxonomy in front of the
+	// message (§8). One that only carries a message — ErrorKind left at its
+	// zero value — has nothing to classify: prefixing "ERROR_KIND_
+	// UNSPECIFIED:" would read as a leaked internal enum name rather than
+	// the taxonomy the prefix exists to show.
+	if e.kind == affv1.ErrorKind_ERROR_KIND_UNSPECIFIED {
+		return e.message
+	}
 	return fmt.Sprintf("%s: %s", e.kind.String(), e.message)
 }
 

@@ -673,3 +673,105 @@ func TestSample_AggregateFeed_Rejected(t *testing.T) {
 		t.Fatalf("aggregate feed must not reach the provider, got %d calls", provider.GenerateCallCount())
 	}
 }
+
+// TestSample_EmbedPreview_RendersTheRealEmbed proves the sampler's embed
+// preview (PLAN.md §6.1, §12.3) is the publish plane's own document and not
+// an admin-only lookalike: a complete HTML document, carrying the candidate,
+// through the same render.Embed the /embed/{slug} route uses.
+func TestSample_EmbedPreview_RendersTheRealEmbed(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	provider := llm.NewFake()
+	provider.QueueResult(llm.Result{Items: []llm.GeneratedItem{smpValidItem("Cowboy Bebop Trivia Question")}})
+	bud := &fakeBudget{decision: allowDecision()}
+	feed := smpTestFeed()
+	srv, _, _ := smpNewTestServer(t, feed, smpTestSpec(), provider, bud, alwaysEnabled, now)
+
+	resp, err := srv.Sample(context.Background(), &affv1.SampleServiceSampleRequest{FeedId: 7, SampleSize: 1})
+	if err != nil {
+		t.Fatalf("Sample: %v", err)
+	}
+	got := resp.Candidates[0].GetEmbedPreviewHtml()
+
+	if !strings.HasPrefix(got, "<!doctype html>") {
+		t.Fatalf("embed preview is not a complete document:\n%s", got)
+	}
+	for _, want := range []string{
+		"Cowboy Bebop Trivia Question", // the candidate itself
+		"A short plain-text summary",   // its summary, which is what the embed shows
+		`<li class="aff-item">`,        // the real renderer's markup
+		"Subscribe by RSS",             // the whole document, not a fragment
+		`/feeds/` + feed.Slug + `.xml`, // pointing at this feed
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("embed preview missing %q:\n%s", want, got)
+		}
+	}
+	// The embed never renders body HTML — that rule is what keeps a trivia
+	// answer off somebody else's page, and a preview that showed more than
+	// the real thing would be worse than no preview at all.
+	if strings.Contains(got, "Full body with an") {
+		t.Error("embed preview rendered BodyHTML; the real embed does not")
+	}
+}
+
+// TestSample_EmbedPreview_HidesTheAnswer is the §5.5 rule at the preview
+// boundary. An operator judging a trivia candidate by its embed preview must
+// see exactly what a reader would see: the question, never the answer.
+func TestSample_EmbedPreview_HidesTheAnswer(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	provider := llm.NewFake()
+	item := smpValidItem("Which studio animated Cowboy Bebop")
+	item.AnswerHTML = "<p>ANSWER-SUNRISE</p>"
+	provider.QueueResult(llm.Result{Items: []llm.GeneratedItem{item}})
+	bud := &fakeBudget{decision: allowDecision()}
+	srv, _, _ := smpNewTestServer(t, smpTestFeed(), smpTestSpec(), provider, bud, alwaysEnabled, now)
+
+	resp, err := srv.Sample(context.Background(), &affv1.SampleServiceSampleRequest{FeedId: 7, SampleSize: 1})
+	if err != nil {
+		t.Fatalf("Sample: %v", err)
+	}
+	c := resp.Candidates[0]
+	if strings.Contains(c.GetEmbedPreviewHtml(), "ANSWER-SUNRISE") {
+		t.Fatal("the embed preview leaked the trivia answer")
+	}
+	if !strings.Contains(c.GetEmbedPreviewHtml(), "Which studio animated Cowboy Bebop") {
+		t.Fatal("the embed preview did not render the question")
+	}
+	// The answer is still available to the operator through the raw-fields
+	// view, which is what that view is for.
+	if c.GetAnswerHtml() == "" {
+		t.Error("answer_html should still reach the client for the raw view")
+	}
+}
+
+// TestSample_PreviewsStampTheCandidate: generate.Sample never assigns a
+// published_at (it is stamped at promote, PLAN.md §12.3), so an unstamped
+// candidate reaching a preview rendered the zero time — "1 Jan 0001" in the
+// embed, and a year-0001 pubDate in the feed XML that internal/feedvalidate's
+// own date rules treat as an error. Both previews now show the timestamp
+// promoting would assign.
+func TestSample_PreviewsStampTheCandidate(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	provider := llm.NewFake()
+	provider.QueueResult(llm.Result{Items: []llm.GeneratedItem{smpValidItem("Cowboy Bebop Trivia Question")}})
+	bud := &fakeBudget{decision: allowDecision()}
+	srv, _, _ := smpNewTestServer(t, smpTestFeed(), smpTestSpec(), provider, bud, alwaysEnabled, now)
+
+	resp, err := srv.Sample(context.Background(), &affv1.SampleServiceSampleRequest{FeedId: 7, SampleSize: 1})
+	if err != nil {
+		t.Fatalf("Sample: %v", err)
+	}
+	c := resp.Candidates[0]
+
+	for _, v := range []struct{ name, doc string }{
+		{"embed preview", c.GetEmbedPreviewHtml()},
+		{"feed XML", c.GetRenderedXml()},
+	} {
+		if strings.Contains(v.doc, "0001") {
+			t.Errorf("%s rendered the zero time:\n%s", v.name, v.doc)
+		}
+		if !strings.Contains(v.doc, "2026") {
+			t.Errorf("%s carries no publish date at all:\n%s", v.name, v.doc)
+		}
+	}
+}

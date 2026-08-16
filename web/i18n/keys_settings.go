@@ -176,6 +176,47 @@ var settingsMessages = gwci18n.NamespaceCatalog{
 	// {arg1} day count, {arg2} total — the chart's accessible summary.
 	"settings.provider.cost.chartLabel": {Text: "Daily spend over {arg1} days, {arg2} in total"},
 
+	// Provider cards (2026-08-15 redesign: one card per provider, active one
+	// marked, keys stored encrypted or read from the environment).
+	"settings.provider.providers.title": {Text: "Providers"},
+	"settings.provider.providers.help":  {Text: "Generation uses one provider at a time. Add any OpenAI-compatible endpoint — a local model server, a gateway, a reseller — and switch with one click. Keys are configured here and stored encrypted on the server."},
+
+	"settings.provider.builtin.help":       {Text: "OpenAI at its own address. Paste its API key below — it is stored encrypted on the server."},
+	"settings.provider.builtin.keyFromEnv": {Text: "Using the server environment key (dev fallback) — paste a key below to store it properly"},
+
+	"settings.provider.active.badge": {Text: "Active"},
+	"settings.provider.active.use":   {Text: "Use this provider"},
+
+	"settings.provider.profile.namePlaceholder": {Text: "OpenRouter"},
+	"settings.provider.profile.baseUrlHelp":     {Text: "Leave empty for the provider's own default address."},
+	"settings.provider.profile.removeLabel":     {Text: "Remove"},
+	"settings.provider.profile.addHelp":         {Text: "Anything that speaks the OpenAI API: OpenRouter, Azure, a local llama.cpp or Ollama."},
+
+	"settings.provider.key.label":             {Text: "API key"},
+	"settings.provider.key.placeholder":       {Text: "Paste a key to store it"},
+	"settings.provider.key.placeholderStored": {Text: "•••••••• stored — paste a new key to replace it"},
+	"settings.provider.key.stored":            {Text: "Key stored on the server, encrypted"},
+	"settings.provider.key.fromEnv":           {Text: "Key read from {arg1}"},
+	"settings.provider.key.none":              {Text: "No key yet"},
+	"settings.provider.key.willStore":         {Text: "Key will be stored, encrypted, when you save"},
+	"settings.provider.key.willClear":         {Text: "Stored key will be removed when you save"},
+	"settings.provider.key.clear":             {Text: "Remove stored key"},
+	"settings.provider.key.undoClear":         {Text: "Keep stored key"},
+	"settings.provider.key.help":              {Text: "Stored encrypted with the server's secret key and never shown again — only replaced or removed."},
+
+	"settings.provider.envVar.label": {Text: "Key environment variable (optional)"},
+	"settings.provider.envVar.help":  {Text: "Used when no key is stored here. A stored key wins over the variable."},
+
+	"settings.provider.backend.label":      {Text: "Wire protocol"},
+	"settings.provider.backend.help":       {Text: "Which API dialect the active provider speaks. The provider card picks the address; this picks the protocol."},
+	"settings.provider.backend.openai":     {Text: "OpenAI (default)"},
+	"settings.provider.backend.anthropic":  {Text: "Anthropic"},
+	"settings.provider.backend.openrouter": {Text: "OpenRouter"},
+	"settings.provider.backend.cerebras":   {Text: "Cerebras"},
+	"settings.provider.backend.deepseek":   {Text: "DeepSeek"},
+	"settings.provider.backend.qwen":       {Text: "Qwen"},
+	"settings.provider.backend.zai":        {Text: "Z.ai"},
+
 	"settings.provider.title":                      {Text: "Provider"},
 	"settings.provider.activeProvider":             {Text: "Active provider"},
 	"settings.provider.activeProvider.placeholder": {Text: "openai"},
@@ -194,8 +235,11 @@ var settingsMessages = gwci18n.NamespaceCatalog{
 	"settings.provider.priceTable.err.emptyModel": {Text: "Row {arg1} has no model — a rate with no model never applies to anything."},
 	"settings.provider.priceTable.err.duplicate":  {Text: "Row {arg1} repeats a model that already has a rate."},
 	"settings.provider.priceTable.err.negative":   {Text: "Row {arg1} has a negative rate."},
-	"settings.provider.priceTable.col.in":         {Text: "Input $ per 1K tokens"},
-	"settings.provider.priceTable.col.out":        {Text: "Output $ per 1K tokens"},
+	"settings.provider.priceTable.col.in":         {Text: "Input $ per 1M tokens"},
+	"settings.provider.priceTable.col.out":        {Text: "Output $ per 1M tokens"},
+	"settings.provider.priceTable.col.remove":     {Text: "Remove"},
+	"settings.provider.priceTable.removeLabel":    {Text: "Remove"},
+	"settings.provider.priceTable.removeRow":      {Text: "Remove the {arg1} rate"},
 	"settings.provider.saveError":                 {Text: "Couldn't save provider settings."},
 	"settings.provider.saved":                     {Text: "Saved."},
 	"settings.provider.save":                      {Text: "Save"},

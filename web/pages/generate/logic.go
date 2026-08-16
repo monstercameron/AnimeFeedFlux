@@ -361,6 +361,13 @@ func CandidateViewContent(v CandidateView, c *affv1.SampleCandidate) string {
 		return b.String()
 	case ViewFeedXML:
 		return c.GetRenderedXml()
+	case ViewEmbed:
+		// The embed's document source. renderCandidateDetail displays this
+		// view as a live sandboxed iframe rather than as text (the embed is a
+		// visual surface, and its source tells an operator nothing they can
+		// judge) — this branch is what a caller gets who wants the bytes:
+		// the i18n callsite tests, and anything that needs a text fallback.
+		return c.GetEmbedPreviewHtml()
 	case ViewSlackCard:
 		return c.GetSlackPreviewText()
 	default:

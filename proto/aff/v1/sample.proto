@@ -45,9 +45,10 @@ message LinkVerdict {
   bool ok = 2;
 }
 
-// SampleCandidate is one generated-but-unpublished item, shown three ways
-// per PLAN.md §12.3: rendered, raw fields, and the exact feed XML fragment
-// that would be emitted.
+// SampleCandidate is one generated-but-unpublished item, shown five ways per
+// PLAN.md §12.3: rendered, raw fields, the exact feed XML fragment that would
+// be emitted, the embed document it would appear in (§6.1), and the Slack
+// card — the last being the one §12.3 calls "the one that matters".
 message SampleCandidate {
   // Server-assigned handle used by PromoteSample (ItemService) and
   // DiscardSample. Not a real item id — nothing has been persisted as an
@@ -68,6 +69,13 @@ message SampleCandidate {
   // so a trivia answer leaking into summary_text is visible immediately
   // (PLAN.md §12.3, §5.5).
   string slack_preview_text = 21;
+  // The complete embed document this candidate would appear in (§6.1),
+  // rendered through the same render.Embed the /embed/{slug} route uses.
+  // A whole document rather than a fragment because that is what the
+  // renderer produces and what the client displays — the client shows it in
+  // a sandboxed iframe, so a fragment would need the client to reassemble a
+  // document and get the styling right a second way.
+  string embed_preview_html = 22;
 
   NoveltyVerdict novelty = 30;
   // Only populated for grounded feeds.

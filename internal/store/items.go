@@ -8,6 +8,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -135,20 +136,47 @@ func (s *Store) GetFeedBySlug(ctx context.Context, slug string) (model.Feed, err
 // --- items --------------------------------------------------------------
 
 const itemColumns = `id, feed_id, item_key, content_hash, title, summary_text, body_html,
-	answer_html, link, source_name, published_at, origin, version,
+	answer_html, link, source_name, formats_json, published_at, origin, version,
 	created_at, updated_at, edited_at, deleted_at`
+
+// encodeFormats serializes it.Formats for items.formats_json: "" when no
+// variant is set (the column default, and the render-from-raw state), the
+// JSON object otherwise.
+func encodeFormats(f model.ItemFormats) (string, error) {
+	if f.Empty() {
+		return "", nil
+	}
+	raw, err := json.Marshal(f)
+	if err != nil {
+		return "", fmt.Errorf("store: encoding item formats: %w", err)
+	}
+	return string(raw), nil
+}
+
+// decodeFormats is encodeFormats' inverse; "" decodes to the zero value.
+func decodeFormats(raw string) (model.ItemFormats, error) {
+	var f model.ItemFormats
+	if raw == "" {
+		return f, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &f); err != nil {
+		return model.ItemFormats{}, fmt.Errorf("store: parsing items.formats_json: %w", err)
+	}
+	return f, nil
+}
 
 func scanItem(sc rowScanner) (model.Item, error) {
 	var (
 		it                                model.Item
 		origin                            string
 		answerHTML, link, sourceName      sql.NullString
+		formatsJSON                       string
 		publishedAt, createdAt, updatedAt string
 		editedAt, deletedAt               sql.NullString
 	)
 	if err := sc.Scan(
 		&it.ID, &it.FeedID, &it.ItemKey, &it.ContentHash, &it.Title, &it.SummaryText, &it.BodyHTML,
-		&answerHTML, &link, &sourceName, &publishedAt, &origin, &it.Version,
+		&answerHTML, &link, &sourceName, &formatsJSON, &publishedAt, &origin, &it.Version,
 		&createdAt, &updatedAt, &editedAt, &deletedAt,
 	); err != nil {
 		return model.Item{}, err
@@ -157,6 +185,12 @@ func scanItem(sc rowScanner) (model.Item, error) {
 	it.Link = link.String
 	it.SourceName = sourceName.String
 	it.Origin = model.Origin(origin)
+
+	formats, ferr := decodeFormats(formatsJSON)
+	if ferr != nil {
+		return model.Item{}, ferr
+	}
+	it.Formats = formats
 
 	var err error
 	if it.PublishedAt, err = parseTime(publishedAt); err != nil {
@@ -211,14 +245,18 @@ func truncatePublishedAt(t time.Time) time.Time {
 func (s *Store) InsertItem(ctx context.Context, it model.Item) (int64, error) {
 	now := formatTime(time.Now())
 	published := truncatePublishedAt(it.PublishedAt)
+	formatsJSON, err := encodeFormats(it.Formats)
+	if err != nil {
+		return 0, err
+	}
 	res, err := s.writer.ExecContext(ctx, `
 		INSERT INTO items (feed_id, item_key, content_hash, title, summary_text, body_html,
-		                    answer_html, link, source_name, published_at, origin,
+		                    answer_html, link, source_name, formats_json, published_at, origin,
 		                    created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		it.FeedID, it.ItemKey, it.ContentHash, it.Title, it.SummaryText, it.BodyHTML,
 		nullString(it.AnswerHTML), nullString(it.Link), nullString(it.SourceName),
-		formatTime(published), string(it.Origin),
+		formatsJSON, formatTime(published), string(it.Origin),
 		now, now)
 	if err != nil {
 		return 0, fmt.Errorf("store: inserting item %q: %w", it.ItemKey, err)
@@ -305,10 +343,16 @@ func (s *Store) ListItems(ctx context.Context, feedID int64, limit int, includeD
 func (s *Store) UpdateItem(ctx context.Context, it model.Item, expectedVersion int64) error {
 	now := time.Now()
 	published := truncatePublishedAt(it.PublishedAt)
+	// formats_json is CLEARED on edit, deliberately: the variants were
+	// formatted from the raw fields as they stood at generation time, and an
+	// edited item served with stale variants would show the old content on
+	// every surface while the raw fields say otherwise. Falling back to the
+	// raw fields is always honest.
 	res, err := s.writer.ExecContext(ctx, `
 		UPDATE items
 		SET title = ?, summary_text = ?, body_html = ?, answer_html = ?, link = ?, source_name = ?,
-		    published_at = ?, origin = ?, edited_at = ?, updated_at = ?, version = version + 1
+		    formats_json = '', published_at = ?, origin = ?, edited_at = ?, updated_at = ?,
+		    version = version + 1
 		WHERE id = ? AND version = ?`,
 		it.Title, it.SummaryText, it.BodyHTML, nullString(it.AnswerHTML), nullString(it.Link), nullString(it.SourceName),
 		formatTime(published), string(it.Origin), formatTime(now), formatTime(now),

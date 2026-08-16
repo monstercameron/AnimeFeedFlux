@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Trivia Daily</title>
+<meta name="generator" content="AnimeFeedFlux v0.0.2-dev">
+<style>
+:root{color-scheme:dark;--bg:#131317;--fg:#ecedf1;--muted:#9a9aa6;
+  --line:#2a2a33;--accent:#8fa6ff}
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  -webkit-text-size-adjust:100%;text-rendering:optimizeLegibility}
+/* The frame's height is fixed by whoever embedded it and its content is
+   not, so the list takes the overflow and scrolls while the heading and
+   the subscribe link stay put. Letting the document overflow instead
+   sliced the subscribe link in half at the default height — which is what
+   it looked like in a browser, and it read as a broken widget rather than
+   as a widget with more content than room. */
+.aff{padding:18px 20px;height:100%;display:flex;flex-direction:column}
+.aff-feed{margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--muted);flex:none}
+.aff-items{margin:0;padding:0;list-style:none;
+  flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+/* One column, not a date rail beside the text. The rail was a fifth of the
+   width printing the same date on every row — a feed publishes a run at a
+   time, so those labels repeat by construction — and it left a hole
+   whenever an item had no date at all. As a caption it costs nothing when
+   it is absent and stops competing with the title when it is present. */
+.aff-item{padding:14px 0;border-top:1px solid var(--line)}
+.aff-item:first-child{border-top:0}
+.aff-when{display:block;margin-bottom:5px;
+  font:11px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums;letter-spacing:.02em;color:var(--muted)}
+.aff-title{display:block;font-size:15.5px;font-weight:650;line-height:1.35;
+  letter-spacing:-.005em;text-wrap:balance}
+/* Clamped, not truncated by the frame. Summaries are model-authored and
+   their length is not a fixed quantity — one long one would otherwise push
+   every other item out of a fixed-height frame. Three lines is enough to
+   judge an item and short enough that the rows stay a list. */
+.aff-summary{margin:5px 0 0;color:var(--muted);font-size:13.5px;line-height:1.5;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+  overflow:hidden}
+.aff-empty{margin:0;color:var(--muted);flex:1 1 auto}
+.aff-sub{margin:0;padding-top:12px;margin-top:auto;
+  border-top:1px solid var(--line);
+  font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  flex:none}
+a{color:inherit;text-decoration:none}
+.aff-title a{text-decoration-color:transparent;text-decoration-line:underline;
+  text-decoration-thickness:1.5px;text-underline-offset:3px;
+  transition:text-decoration-color .12s ease}
+.aff-title a:hover{text-decoration-color:var(--accent)}
+.aff-sub a{color:var(--accent)}
+.aff-sub a:hover{text-decoration:underline;text-underline-offset:3px}
+a:focus-visible{outline:2px solid var(--accent);outline-offset:3px;
+  border-radius:2px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<section class="aff">
+<h1 class="aff-feed"><a href="https://feeds.example.com/trivia-daily" target="_blank" rel="noopener noreferrer">Trivia Daily</a></h1>
+<ol class="aff-items">
+<li class="aff-item">
+<time class="aff-when" datetime="2026-08-09T12:01:39Z">9 Aug 2026 · 12:01 UTC</time>
+<span class="aff-title"><a href="https://feeds.example.com/trivia-daily/items/trivia" target="_blank" rel="noopener noreferrer">Which studio animated Cowboy Bebop?</a></span>
+<p class="aff-summary">Which studio animated Cowboy Bebop? Tap through to reveal the answer.</p>
+</li>
+<li class="aff-item">
+<time class="aff-when" datetime="2026-08-09T12:00:01Z">9 Aug 2026 · 12:00 UTC</time>
+<span class="aff-title"><a href="https://feeds.example.com/trivia-daily/items/01" target="_blank" rel="noopener noreferrer">Sample Item 01</a></span>
+<p class="aff-summary">Summary text for sample item 01.</p>
+</li>
+<li class="aff-item">
+<time class="aff-when" datetime="2026-08-09T12:00:00Z">9 Aug 2026 · 12:00 UTC</time>
+<span class="aff-title"><a href="https://feeds.example.com/trivia-daily/items/00" target="_blank" rel="noopener noreferrer">Sample Item 00</a></span>
+<p class="aff-summary">Summary text for sample item 00.</p>
+</li>
+</ol>
+<p class="aff-sub"><a href="https://feeds.example.com/trivia-daily.xml" target="_blank" rel="noopener noreferrer">Subscribe by RSS</a></p>
+</section>
+</body>
+</html>

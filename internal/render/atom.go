@@ -112,7 +112,7 @@ func writeAtomEntry(b *bytes.Buffer, c model.Channel, it model.Item) {
 	if it.Link != "" {
 		b.WriteString(`    <link rel="alternate" href="` + EscapeText(it.Link) + `"/>` + "\n")
 	}
-	b.WriteString(`    <summary type="text">` + EscapeText(it.SummaryText) + "</summary>\n")
+	b.WriteString(`    <summary type="text">` + EscapeText(it.RenderCardText()) + "</summary>\n")
 
 	// type="html" means the value is escaped character data whose content
 	// happens to be HTML markup, not raw XML — so this is EscapeText, the

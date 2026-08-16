@@ -74,16 +74,74 @@ func renderSchedule(p scheduleProps) ui.Node {
 	// apply writes a mutated draft back to the feed as a recurrence. Every
 	// control funnels through this, so there is exactly one place the feed is
 	// updated and exactly one shape it is updated into.
+	//
+	// The draft is re-derived INSIDE the mutation, from the feed as it stands
+	// when the change is applied — not from the `draft` computed above at
+	// render time. That closes a lost-update window: every control writes the
+	// WHOLE recurrence, so if two changes landed without a render between them
+	// (a fast click after a select, an automated run) the second would write a
+	// draft that never saw the first, silently reverting it. Deriving late
+	// makes each change a read-modify-write against current state instead.
 	apply := func(mutate func(*ScheduleDraft)) {
-		d := draft
-		mutate(&d)
-		rec := d.ToProto()
-		p.OnChange(func(f *affv1.Feed) { ensureSpec(f).Recurrence = rec })
+		p.OnChange(func(f *affv1.Feed) {
+			s := ensureSpec(f)
+			d := DraftFromProto(s.GetRecurrence(), p.Now)
+			mutate(&d)
+			s.Recurrence = d.ToProto()
+		})
 	}
+
+	// The schedule MODE (§7 revision 2026-08-15): scheduled (default), ad
+	// hoc (manual-only — the builder below is irrelevant and hidden), or
+	// watch (the schedule is a check cadence; quiet runs are expected).
+	mode := p.Spec.GetScheduleMode()
+	modeOpts := []struct{ value, labelKey string }{
+		{"", "generate.editor.schedule.mode.scheduled"},
+		{"adhoc", "generate.editor.schedule.mode.adhoc"},
+		{"watch", "generate.editor.schedule.mode.watch"},
+	}
+	modeSel := make([]any, 0, len(modeOpts)+2)
+	modeSel = append(modeSel,
+		h.ID("generate-schedule-mode"),
+		h.OnChange(func(e ui.ChangeEvent) {
+			v := e.GetValue()
+			p.OnChange(func(f *affv1.Feed) { ensureSpec(f).ScheduleMode = v })
+		}),
+	)
+	for _, o := range modeOpts {
+		selected := o.value == mode || (o.value == "" && mode == "scheduled")
+		modeSel = append(modeSel, h.Option(h.Value(o.value), h.SelectedIf(selected), h.Text(t.T(o.labelKey))))
+	}
+	modeHelpKey := "generate.editor.schedule.mode.help.scheduled"
+	switch mode {
+	case "adhoc":
+		modeHelpKey = "generate.editor.schedule.mode.help.adhoc"
+	case "watch":
+		modeHelpKey = "generate.editor.schedule.mode.help.watch"
+	}
+
+	builderHidden := mode == "adhoc"
 
 	return h.Fieldset(
 		h.ClassStr("af-schedule"),
 		h.Legend(h.Text(t.T("generate.editor.schedule"))),
+
+		h.Div(h.ClassStr("af-schedule__row"),
+			h.Label(h.For("generate-schedule-mode"), h.Text(t.T("generate.editor.schedule.mode"))),
+			h.Select(modeSel...),
+		),
+		h.P(h.ClassStr("af-field-help"), h.Text(t.T(modeHelpKey))),
+
+		h.Show(!builderHidden, renderScheduleBuilder(p, t, tz, draft, apply)),
+	)
+}
+
+// renderScheduleBuilder is the frequency/day/time builder — everything that
+// only matters when the schedule actually fires (scheduled and watch modes;
+// an ad-hoc feed hides it rather than showing controls nothing reads).
+func renderScheduleBuilder(p scheduleProps, t Translator, tz string, draft ScheduleDraft, apply func(func(*ScheduleDraft))) ui.Node {
+	return h.Div(
+		h.ClassStr("af-schedule__builder"),
 
 		// "Every [N] [unit]"
 		h.Div(h.ClassStr("af-schedule__row"),
@@ -111,68 +169,13 @@ func renderSchedule(p scheduleProps) ui.Node {
 			),
 		),
 
-		// Weekly: which days.
-		h.Show(draft.Unit == UnitWeek, h.Div(h.ClassStr("af-schedule__row"),
-			h.Span(h.ClassStr("af-schedule__label"), h.Text(t.T("generate.editor.schedule.onDays"))),
-			weekdayChips(t, draft, apply),
-		)),
+		// Weekly: which days. Included conditionally rather than wrapped in
+		// h.Show for the same reason cronEscapeHatch is — see its doc comment.
+		// Every row here sets display:flex, which beats the `hidden` attribute
+		// h.Show relies on, so a "hidden" row is simply a visible row.
+		weeklyRow(t, draft, apply),
 
-		// Monthly/yearly: day-of-month or nth-weekday.
-		h.Show(draft.Unit == UnitMonth || draft.Unit == UnitYear, h.Fragment(
-			h.Div(h.ClassStr("af-schedule__row"),
-				h.Label(h.For("generate-schedule-monthmode"), h.Text(t.T("generate.editor.schedule.monthlyMode"))),
-				h.Select(
-					h.ID("generate-schedule-monthmode"),
-					h.OnChange(func(e ui.ChangeEvent) {
-						apply(func(d *ScheduleDraft) { d.Mode = MonthlyMode(e.GetValue()) })
-					}),
-					h.Option(h.Value(string(MonthlyOnDay)), h.SelectedIf(draft.Mode == MonthlyOnDay),
-						h.Text(t.T("generate.editor.schedule.monthlyMode.day"))),
-					h.Option(h.Value(string(MonthlyOnWeekday)), h.SelectedIf(draft.Mode == MonthlyOnWeekday),
-						h.Text(t.T("generate.editor.schedule.monthlyMode.weekday"))),
-				),
-			),
-			h.Show(draft.Mode == MonthlyOnDay, h.Div(h.ClassStr("af-schedule__row"),
-				h.Label(h.For("generate-schedule-monthday"), h.Text(t.T("generate.editor.schedule.dayOfMonth"))),
-				h.Select(
-					h.ID("generate-schedule-monthday"),
-					h.OnChange(func(e ui.ChangeEvent) {
-						n, err := strconv.Atoi(e.GetValue())
-						if err != nil {
-							n = 1
-						}
-						apply(func(d *ScheduleDraft) { d.MonthDay = n })
-					}),
-					monthDayOptions(t, draft.MonthDay),
-				),
-			)),
-			h.Show(draft.Mode == MonthlyOnWeekday, h.Div(h.ClassStr("af-schedule__row"),
-				h.Label(h.For("generate-schedule-setpos"), h.Text(t.T("generate.editor.schedule.onThe"))),
-				h.Select(
-					h.ID("generate-schedule-setpos"),
-					h.OnChange(func(e ui.ChangeEvent) {
-						n, err := strconv.Atoi(e.GetValue())
-						if err != nil {
-							n = 1
-						}
-						apply(func(d *ScheduleDraft) { d.SetPosition = n })
-					}),
-					setPosOptions(t, draft.SetPosition),
-				),
-				h.Select(
-					h.ID("generate-schedule-monthweekday"),
-					h.Aria("label", t.T("generate.editor.schedule.onDays")),
-					h.OnChange(func(e ui.ChangeEvent) {
-						n, err := strconv.Atoi(e.GetValue())
-						if err != nil {
-							return
-						}
-						apply(func(d *ScheduleDraft) { d.MonthWeekday = time.Weekday(n) })
-					}),
-					weekdayOptions(t, draft.MonthWeekday),
-				),
-			)),
-		)),
+		monthlyRows(t, draft, apply),
 
 		// Time of day + timezone.
 		h.Div(h.ClassStr("af-schedule__row"),
@@ -203,20 +206,7 @@ func renderSchedule(p scheduleProps) ui.Node {
 		// The anchor, shown only when the interval makes it meaningful.
 		// At interval 1 it changes nothing, and a control that cannot change
 		// anything is a control that invites a wrong theory about what it does.
-		h.Show(draft.Interval > 1, h.Div(h.ClassStr("af-schedule__row"),
-			h.Label(h.For("generate-schedule-anchor"), h.Text(t.T("generate.editor.schedule.startingOn"))),
-			h.Input(
-				h.ID("generate-schedule-anchor"),
-				h.Type("date"),
-				h.Value(draft.Anchor),
-				h.OnChange(func(e ui.ChangeEvent) {
-					v := e.GetValue()
-					apply(func(d *ScheduleDraft) { d.Anchor = v })
-				}),
-			),
-		)),
-		h.Show(draft.Interval > 1, h.P(h.ClassStr("af-field-hint"),
-			h.Text(t.T("generate.editor.schedule.startingHelp")))),
+		anchorRow(t, draft, apply),
 
 		// Readback, then the dates.
 		h.P(h.ClassStr("af-schedule__readback"), h.Text(ScheduleReadback(t, draft, tz))),
@@ -230,26 +220,7 @@ func renderSchedule(p scheduleProps) ui.Node {
 					h.OnChange(func(ui.ChangeEvent) { p.OnToggle(!p.ShowCron) })),
 				h.Text(t.T("generate.editor.schedule.advanced")),
 			),
-			h.Show(p.ShowCron, h.Fragment(
-				h.P(h.ClassStr("af-field-hint"), h.Text(t.T("generate.editor.schedule.advancedHelp"))),
-				wui.Input(wui.InputProps{
-					T: wui.T(t.T), ID: "generate-editor-cron", LabelKey: "generate.editor.cron",
-					Value: p.Spec.GetCron(), ErrorKey: p.CronErrKey, ErrorArgs: p.CronErr,
-					OnChange: func(v string) {
-						// Writing a cron expression CLEARS the structured
-						// recurrence, because Spec.Firing prefers the
-						// structured one — leaving both set would mean the
-						// operator edits cron and the feed keeps running on
-						// the recurrence, with the UI showing the cron they
-						// typed. One schedule per feed, always.
-						p.OnChange(func(f *affv1.Feed) {
-							s := ensureSpec(f)
-							s.Cron = v
-							s.Recurrence = nil
-						})
-					},
-				}),
-			)),
+			cronEscapeHatch(p),
 		),
 	)
 }
@@ -411,4 +382,147 @@ func parseTimeOfDay(v string) (hour, minute int, ok bool) {
 		return 0, 0, false
 	}
 	return hh, mm, true
+}
+
+// cronEscapeHatch renders the cron field, or nothing at all.
+//
+// NOT h.Show. h.Show hides by setting the `hidden` ATTRIBUTE, which the user
+// agent implements as display:none and which therefore loses to any rule that
+// sets a display of its own — and wui.Input's wrapper sets one. The result was
+// visible in the first browser screenshot of this control: an unchecked
+// "use a cron expression instead" box with the cron field sitting open
+// underneath it, which is the opposite of what the checkbox says.
+//
+// web/shell/expiry.go hit the identical trap and records the same conclusion:
+// a control that is not supposed to be there should not be in the DOM. This
+// branch is safe to take because nothing inside it calls a hook.
+func cronEscapeHatch(p scheduleProps) ui.Node {
+	if !p.ShowCron {
+		return h.Fragment()
+	}
+	t := p.T
+	return h.Fragment(
+		h.P(h.ClassStr("af-field-hint"), h.Text(t.T("generate.editor.schedule.advancedHelp"))),
+		wui.Input(wui.InputProps{
+			T: wui.T(t.T), ID: "generate-editor-cron", LabelKey: "generate.editor.cron",
+			Value: p.Spec.GetCron(), ErrorKey: p.CronErrKey, ErrorArgs: p.CronErr,
+			OnChange: func(v string) {
+				// Writing a cron expression CLEARS the structured recurrence,
+				// because Spec.Firing prefers the structured one — leaving both
+				// set would mean the operator edits cron while the feed keeps
+				// running on the recurrence, with the UI showing the cron they
+				// typed. One schedule per feed, always.
+				p.OnChange(func(f *affv1.Feed) {
+					s := ensureSpec(f)
+					s.Cron = v
+					s.Recurrence = nil
+				})
+			},
+		}),
+	)
+}
+
+// weeklyRow is the day-of-week picker, present only for weekly schedules.
+func weeklyRow(t Translator, d ScheduleDraft, apply func(func(*ScheduleDraft))) ui.Node {
+	if d.Unit != UnitWeek {
+		return h.Fragment()
+	}
+	return h.Div(h.ClassStr("af-schedule__row"),
+		h.Span(h.ClassStr("af-schedule__label"), h.Text(t.T("generate.editor.schedule.onDays"))),
+		weekdayChips(t, d, apply),
+	)
+}
+
+// monthlyRows is the day-of-month / nth-weekday picker, present only for
+// monthly and yearly schedules.
+func monthlyRows(t Translator, d ScheduleDraft, apply func(func(*ScheduleDraft))) ui.Node {
+	if d.Unit != UnitMonth && d.Unit != UnitYear {
+		return h.Fragment()
+	}
+
+	var dayRow ui.Node = h.Fragment()
+	if d.Mode == MonthlyOnDay {
+		dayRow = h.Div(h.ClassStr("af-schedule__row"),
+			h.Label(h.For("generate-schedule-monthday"), h.Text(t.T("generate.editor.schedule.dayOfMonth"))),
+			h.Select(
+				h.ID("generate-schedule-monthday"),
+				h.OnChange(func(e ui.ChangeEvent) {
+					n, err := strconv.Atoi(e.GetValue())
+					if err != nil {
+						n = 1
+					}
+					apply(func(dd *ScheduleDraft) { dd.MonthDay = n })
+				}),
+				monthDayOptions(t, d.MonthDay),
+			),
+		)
+	} else {
+		dayRow = h.Div(h.ClassStr("af-schedule__row"),
+			h.Label(h.For("generate-schedule-setpos"), h.Text(t.T("generate.editor.schedule.onThe"))),
+			h.Select(
+				h.ID("generate-schedule-setpos"),
+				h.OnChange(func(e ui.ChangeEvent) {
+					n, err := strconv.Atoi(e.GetValue())
+					if err != nil {
+						n = 1
+					}
+					apply(func(dd *ScheduleDraft) { dd.SetPosition = n })
+				}),
+				setPosOptions(t, d.SetPosition),
+			),
+			h.Select(
+				h.ID("generate-schedule-monthweekday"),
+				h.Aria("label", t.T("generate.editor.schedule.onDays")),
+				h.OnChange(func(e ui.ChangeEvent) {
+					n, err := strconv.Atoi(e.GetValue())
+					if err != nil {
+						return
+					}
+					apply(func(dd *ScheduleDraft) { dd.MonthWeekday = time.Weekday(n) })
+				}),
+				weekdayOptions(t, d.MonthWeekday),
+			),
+		)
+	}
+
+	return h.Fragment(
+		h.Div(h.ClassStr("af-schedule__row"),
+			h.Label(h.For("generate-schedule-monthmode"), h.Text(t.T("generate.editor.schedule.monthlyMode"))),
+			h.Select(
+				h.ID("generate-schedule-monthmode"),
+				h.OnChange(func(e ui.ChangeEvent) {
+					apply(func(dd *ScheduleDraft) { dd.Mode = MonthlyMode(e.GetValue()) })
+				}),
+				h.Option(h.Value(string(MonthlyOnDay)), h.SelectedIf(d.Mode == MonthlyOnDay),
+					h.Text(t.T("generate.editor.schedule.monthlyMode.day"))),
+				h.Option(h.Value(string(MonthlyOnWeekday)), h.SelectedIf(d.Mode == MonthlyOnWeekday),
+					h.Text(t.T("generate.editor.schedule.monthlyMode.weekday"))),
+			),
+		),
+		dayRow,
+	)
+}
+
+// anchorRow is the "starting on" date, present only when the interval makes
+// it meaningful. At interval 1 it changes nothing, and a control that cannot
+// change anything invites a wrong theory about what it does.
+func anchorRow(t Translator, d ScheduleDraft, apply func(func(*ScheduleDraft))) ui.Node {
+	if d.Interval <= 1 {
+		return h.Fragment()
+	}
+	return h.Fragment(
+		h.Div(h.ClassStr("af-schedule__row"),
+			h.Label(h.For("generate-schedule-anchor"), h.Text(t.T("generate.editor.schedule.startingOn"))),
+			h.Input(
+				h.ID("generate-schedule-anchor"),
+				h.Type("date"),
+				h.Value(d.Anchor),
+				h.OnChange(func(e ui.ChangeEvent) {
+					v := e.GetValue()
+					apply(func(dd *ScheduleDraft) { dd.Anchor = v })
+				}),
+			),
+		),
+		h.P(h.ClassStr("af-field-hint"), h.Text(t.T("generate.editor.schedule.startingHelp"))),
+	)
 }

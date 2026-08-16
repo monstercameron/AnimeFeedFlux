@@ -222,10 +222,37 @@ func Validate(in Candidate, opts Options) (model.Item, []Rejection, error) {
 	}
 
 	// --- AnswerHTML / answer-leak (§5.5: Slack has no spoiler mechanism) ---
-	answerHTML := in.AnswerHTML
-	if answerText := plainText(answerHTML); answerText != "" && summary != "" {
+	//
+	// AnswerHTML is sanitized on exactly the same terms as BodyHTML above, and
+	// for exactly the same reason: both are model-authored markup, and both are
+	// written into a document COMPLETELY UNESCAPED downstream — render/
+	// permalink.go emits it inside <details>, render/rss.go concatenates it into
+	// content:encoded. Until this call existed only BodyHTML was sanitized, so
+	// `sanitize.HTML` had one call site in the entire tree and an `answer_html`
+	// carrying <script> reached the public page and every subscriber's reader
+	// verbatim. permalink.go's own doc comment claimed both fields "have already
+	// been through the generation pipeline's sanitiser" — true of one, false of
+	// the other, which is what made it invisible.
+	//
+	// The leak check below deliberately runs on the RAW value, not the
+	// sanitized one: sanitize drops <script>/<style> text entirely, so checking
+	// the sanitized form could miss an answer hidden in markup this package is
+	// trying to catch leaking into the summary. Rejecting on the raw text is
+	// the conservative direction (more rejections, never fewer).
+	answerHTML := sanitize.HTML(in.AnswerHTML)
+	if answerText := plainText(in.AnswerHTML); answerText != "" && summary != "" {
 		if strings.Contains(strings.ToLower(summary), strings.ToLower(answerText)) {
 			reject("summary_text", ReasonAnswerLeaked)
+		}
+	}
+	// Same absolute-URL rule the body is held to, for the same §5.1 reason —
+	// both land in content:encoded, and RSS has no base-URL mechanism, so a
+	// relative href in an answer is exactly as unresolvable as one in a body.
+	for _, m := range anchorHrefRe.FindAllStringSubmatch(in.AnswerHTML, -1) {
+		href := firstNonEmpty(m[1], m[2], m[3])
+		if !isAbsoluteURL(href) {
+			reject("answer_html", ReasonBodyRelativeLink)
+			break
 		}
 	}
 

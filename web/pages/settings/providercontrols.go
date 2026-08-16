@@ -61,48 +61,85 @@ func renderEffortSelect(value string, disabled bool, onChange func(string)) ui.N
 	)
 }
 
-// renderProfileSelect chooses which configured endpoint is in use. The
-// built-in default is always the first option and is never removable — an
-// operator must always have a way back to a known-good provider after
-// misconfiguring a custom one.
-func renderProfileSelect(profiles []*affv1.ProviderProfile, active string, disabled bool, onChange func(string)) ui.Node {
-	opts := make([]any, 0, len(profiles)+4)
+// providerBackends are the wire protocols this build's SchemaFlux registers
+// (mirrors internal/rpc's validProviderBackends the same way defaultEffort
+// mirrors defaultProviderEffort: the RPC rejects anything else on save, so
+// drift surfaces as a refused save, never as silent divergence). The empty
+// value IS openai — the server normalizes both spellings — so the menu
+// carries one option for it rather than an "openai" and a "default" that
+// mean the same thing.
+var providerBackends = []struct{ value, labelKey string }{
+	{"", "settings.provider.backend.openai"},
+	{"anthropic", "settings.provider.backend.anthropic"},
+	{"openrouter", "settings.provider.backend.openrouter"},
+	{"cerebras", "settings.provider.backend.cerebras"},
+	{"deepseek", "settings.provider.backend.deepseek"},
+	{"qwen", "settings.provider.backend.qwen"},
+	{"zai", "settings.provider.backend.zai"},
+}
+
+// renderBackendSelect replaces the free-text "active provider" field: the
+// server accepts exactly seven values, and a field whose every valid answer
+// is known is a menu, not a typing test with a 4am failure mode.
+func renderBackendSelect(value string, disabled bool, onChange func(string)) ui.Node {
+	if value == "openai" {
+		value = ""
+	}
+	opts := make([]any, 0, len(providerBackends)+3)
 	opts = append(opts,
-		h.ID("settings-provider-profile"),
+		h.ID("settings-provider-backend"),
 		h.Disabled(disabled),
 		h.OnChange(ui.UseEvent(func(e ui.InputEvent) { onChange(e.GetValue()) })),
-		h.Option(h.Value(""), h.SelectedIf(active == ""), h.Text(t("settings.provider.profile.builtin"))),
 	)
-	for _, p := range profiles {
-		name := p.GetName()
-		label := name
-		// A profile whose key variable is not actually set on the server is
-		// flagged in the menu itself, not only in the row below: choosing it
-		// is the moment that matters, and finding out afterwards means a
-		// failed run.
-		if p.GetApiKeyEnv() != "" && !p.GetKeyPresent() {
-			label = t("settings.provider.profile.noKeyOption", name, p.GetApiKeyEnv())
-		}
-		opts = append(opts, h.Option(h.Value(name), h.SelectedIf(name == active), h.Text(label)))
+	for _, b := range providerBackends {
+		opts = append(opts, h.Option(
+			h.Value(b.value),
+			h.SelectedIf(b.value == value),
+			h.Text(t(b.labelKey)),
+		))
 	}
 	return h.Div(
 		h.ClassStr("af-model-field"),
-		h.Label(h.For("settings-provider-profile"), h.Text(t("settings.provider.profile.label"))),
+		h.Label(h.For("settings-provider-backend"), h.Text(t("settings.provider.backend.label"))),
 		h.Select(opts...),
+		h.P(h.ClassStr("af-field-help"), h.Text(t("settings.provider.backend.help"))),
 	)
 }
 
-// renderProfileEditor is the list of manually configured OpenAI-compatible
-// providers: anything speaking the same wire protocol at a different base
-// URL (a local Ollama or llama.cpp shim, OpenRouter, an Azure deployment, a
-// self-hosted gateway).
+// renderProviderCards is the provider list: one card per configured
+// provider, plus the built-in OpenAI default as a fixed first card. Each
+// card shows where its calls go (base URL), where its credential comes from
+// (a stored encrypted key, an environment variable, or nowhere yet), and
+// whether it is the one generation currently uses — with switching a
+// one-click "Use this provider" on the card itself rather than a separate
+// dropdown the operator has to correlate with the list below it.
 //
-// **No field here takes a key.** PLAN.md §4 keeps key material in the
-// environment only — never in the database, never in a backup, never sent to
-// a browser — so a profile names the environment VARIABLE holding its key.
-// The server reports whether that variable is set; the value never leaves
-// it. That is why the third column is "key variable" and not "key".
-func renderProfileEditor(profiles []*affv1.ProviderProfile, disabled bool, onChange func([]*affv1.ProviderProfile)) ui.Node {
+// Keys typed here are WRITE-ONLY: they ride the save as
+// ProviderProfile.api_key, are stored encrypted with AFF_SECRET_KEY
+// server-side, and every response carries the field empty (the 2026-08-15
+// revision of §4's environment-only rule — see the proto and DEVLOG).
+// builtinKeyState is the built-in (profile-less) provider's key controls,
+// threaded from render_provider.go's own state: the production path is a
+// key stored from this page; the SCHEMAFLUX_API_KEY env var is only a
+// dev/bootstrap fallback (operator directive 2026-08-15).
+type builtinKeyState struct {
+	// Stored: an encrypted key is stored server-side for the built-in
+	// provider.
+	Stored bool
+	// EnvPresent: the dev-fallback env var is set on the server.
+	EnvPresent bool
+	// Pending is the key typed this session, not yet saved.
+	Pending string
+	// PendingClear: the stored key is queued for removal on save.
+	PendingClear bool
+	OnKey        func(string)
+	OnClear      func(bool)
+}
+
+func renderProviderCards(
+	profiles []*affv1.ProviderProfile, active string, builtin builtinKeyState, disabled bool,
+	onProfiles func([]*affv1.ProviderProfile), onActive func(string),
+) ui.Node {
 	replace := func(i int, mut func(*affv1.ProviderProfile)) {
 		next := make([]*affv1.ProviderProfile, len(profiles))
 		for j, p := range profiles {
@@ -110,86 +147,248 @@ func renderProfileEditor(profiles []*affv1.ProviderProfile, disabled bool, onCha
 			next[j] = &cp
 		}
 		mut(next[i])
-		onChange(next)
+		onProfiles(next)
 	}
 
-	rows := make([]any, 0, len(profiles)+2)
-	rows = append(rows, h.ClassStr("af-profiles"))
+	activeControl := func(name string) ui.Node {
+		if name == active {
+			return h.Span(h.ClassStr("af-provider-card__active"), h.Text(t("settings.provider.active.badge")))
+		}
+		return affui.Button(affui.ButtonProps{
+			T: t, LabelKey: "settings.provider.active.use", Variant: affui.ButtonSecondary,
+			Disabled: disabled,
+			OnClick:  func() { onActive(name) },
+		})
+	}
+
+	cards := make([]any, 0, len(profiles)+3)
+	cards = append(cards, h.ClassStr("af-providers"))
+
+	// The built-in default: not removable, not renamable. Always first, so a
+	// misconfigured custom provider always has a known-good neighbour to
+	// switch back to. Its key is configured HERE like any other provider's;
+	// the env var only covers a dev box that booted with one.
+	builtinKeyText := t("settings.provider.key.none")
+	builtinKeyClass := "af-provider-card__key-state af-warning"
+	switch {
+	case builtin.PendingClear:
+		builtinKeyText = t("settings.provider.key.willClear")
+	case builtin.Pending != "":
+		builtinKeyText = t("settings.provider.key.willStore")
+		builtinKeyClass = "af-provider-card__key-state af-success"
+	case builtin.Stored:
+		builtinKeyText = t("settings.provider.key.stored")
+		builtinKeyClass = "af-provider-card__key-state af-success"
+	case builtin.EnvPresent:
+		builtinKeyText = t("settings.provider.builtin.keyFromEnv")
+		builtinKeyClass = "af-provider-card__key-state af-success"
+	}
+	builtinKeyPlaceholder := t("settings.provider.key.placeholder")
+	if builtin.Stored {
+		builtinKeyPlaceholder = t("settings.provider.key.placeholderStored")
+	}
+	var builtinKeyActions ui.Node = h.Span()
+	switch {
+	case builtin.PendingClear:
+		builtinKeyActions = affui.Button(affui.ButtonProps{
+			T: t, LabelKey: "settings.provider.key.undoClear", Variant: affui.ButtonSecondary,
+			Disabled: disabled,
+			OnClick:  func() { builtin.OnClear(false) },
+		})
+	case builtin.Stored:
+		builtinKeyActions = affui.Button(affui.ButtonProps{
+			T: t, LabelKey: "settings.provider.key.clear", Variant: affui.ButtonSecondary,
+			Disabled: disabled,
+			OnClick:  func() { builtin.OnClear(true) },
+		})
+	}
+	cards = append(cards, h.Div(
+		h.ClassStr(providerCardClass(active == "")),
+		h.Div(h.ClassStr("af-provider-card__header"),
+			h.H4(h.Text(t("settings.provider.profile.builtin"))),
+			activeControl(""),
+		),
+		h.P(h.ClassStr("af-field-help"), h.Text(t("settings.provider.builtin.help"))),
+		h.Div(h.ClassStr("af-provider-card__field"),
+			h.Label(h.For("settings-provider-builtin-key"), h.Text(t("settings.provider.key.label"))),
+			h.P(h.ClassStr(builtinKeyClass), h.Text(builtinKeyText)),
+			h.Div(h.ClassStr("af-provider-card__key-row"),
+				h.Input(
+					h.ID("settings-provider-builtin-key"), h.Type("password"),
+					h.Value(builtin.Pending), h.Disabled(disabled),
+					h.AutoComplete("off"),
+					h.Attr("placeholder", builtinKeyPlaceholder),
+					h.OnInput(ui.UseEvent(func(e ui.InputEvent) { builtin.OnKey(e.GetValue()) })),
+				),
+				builtinKeyActions,
+			),
+			h.P(h.ClassStr("af-field-help"), h.Text(t("settings.provider.key.help"))),
+		),
+	))
+
 	for i, p := range profiles {
 		i, p := i, p
-		rows = append(rows, h.Div(
-			h.ClassStr("af-profiles__row"),
-			h.Input(
-				h.Type("text"), h.Value(p.GetName()), h.Disabled(disabled),
-				h.Aria("label", t("settings.provider.profile.name")),
-				h.Attr("placeholder", t("settings.provider.profile.name")),
-				h.OnInput(ui.UseEvent(func(e ui.InputEvent) {
-					v := e.GetValue()
-					replace(i, func(pp *affv1.ProviderProfile) { pp.Name = v })
-				})),
+		nameID := "settings-provider-name-" + strconv.Itoa(i)
+		urlID := "settings-provider-url-" + strconv.Itoa(i)
+		keyID := "settings-provider-key-" + strconv.Itoa(i)
+		envID := "settings-provider-env-" + strconv.Itoa(i)
+
+		keyPlaceholder := t("settings.provider.key.placeholder")
+		if p.GetHasStoredKey() {
+			keyPlaceholder = t("settings.provider.key.placeholderStored")
+		}
+
+		var keyActions ui.Node = h.Span()
+		switch {
+		case p.GetClearStoredKey():
+			keyActions = affui.Button(affui.ButtonProps{
+				T: t, LabelKey: "settings.provider.key.undoClear", Variant: affui.ButtonSecondary,
+				Disabled: disabled,
+				OnClick: func() {
+					replace(i, func(pp *affv1.ProviderProfile) { pp.ClearStoredKey = false })
+				},
+			})
+		case p.GetHasStoredKey():
+			keyActions = affui.Button(affui.ButtonProps{
+				T: t, LabelKey: "settings.provider.key.clear", Variant: affui.ButtonSecondary,
+				Disabled: disabled,
+				OnClick: func() {
+					replace(i, func(pp *affv1.ProviderProfile) {
+						pp.ClearStoredKey = true
+						pp.ApiKey = ""
+					})
+				},
+			})
+		}
+
+		cards = append(cards, h.Div(
+			h.ClassStr(providerCardClass(active == p.GetName() && p.GetName() != "")),
+			h.Div(h.ClassStr("af-provider-card__header"),
+				h.Div(h.ClassStr("af-provider-card__name"),
+					h.Label(h.For(nameID), h.Text(t("settings.provider.profile.name"))),
+					h.Input(
+						h.ID(nameID), h.Type("text"), h.Value(p.GetName()), h.Disabled(disabled),
+						h.Attr("placeholder", t("settings.provider.profile.namePlaceholder")),
+						h.OnInput(ui.UseEvent(func(e ui.InputEvent) {
+							v := e.GetValue()
+							replace(i, func(pp *affv1.ProviderProfile) { pp.Name = v })
+						})),
+					),
+				),
+				activeControl(p.GetName()),
 			),
-			h.Input(
-				h.Type("url"), h.Value(p.GetBaseUrl()), h.Disabled(disabled),
-				h.Aria("label", t("settings.provider.profile.baseUrl")),
-				h.Attr("placeholder", "https://host/v1"),
-				h.OnInput(ui.UseEvent(func(e ui.InputEvent) {
-					v := e.GetValue()
-					replace(i, func(pp *affv1.ProviderProfile) { pp.BaseUrl = v })
-				})),
+			h.Div(h.ClassStr("af-provider-card__field"),
+				h.Label(h.For(urlID), h.Text(t("settings.provider.profile.baseUrl"))),
+				h.Input(
+					h.ID(urlID), h.Type("url"), h.Value(p.GetBaseUrl()), h.Disabled(disabled),
+					h.Attr("placeholder", "https://host/v1"),
+					h.OnInput(ui.UseEvent(func(e ui.InputEvent) {
+						v := e.GetValue()
+						replace(i, func(pp *affv1.ProviderProfile) { pp.BaseUrl = v })
+					})),
+				),
+				h.P(h.ClassStr("af-field-help"), h.Text(t("settings.provider.profile.baseUrlHelp"))),
 			),
-			h.Input(
-				h.Type("text"), h.Value(p.GetApiKeyEnv()), h.Disabled(disabled),
-				h.Aria("label", t("settings.provider.profile.keyEnv")),
-				h.Attr("placeholder", "PROVIDER_API_KEY"),
-				h.OnInput(ui.UseEvent(func(e ui.InputEvent) {
-					v := e.GetValue()
-					replace(i, func(pp *affv1.ProviderProfile) { pp.ApiKeyEnv = v })
-				})),
+			h.Div(h.ClassStr("af-provider-card__field"),
+				h.Label(h.For(keyID), h.Text(t("settings.provider.key.label"))),
+				h.P(h.ClassStr(providerKeyStateClass(p)), h.Text(providerKeyStateText(p))),
+				h.Div(h.ClassStr("af-provider-card__key-row"),
+					h.Input(
+						h.ID(keyID), h.Type("password"), h.Value(p.GetApiKey()), h.Disabled(disabled),
+						h.AutoComplete("off"),
+						h.Attr("placeholder", keyPlaceholder),
+						h.OnInput(ui.UseEvent(func(e ui.InputEvent) {
+							v := e.GetValue()
+							replace(i, func(pp *affv1.ProviderProfile) {
+								pp.ApiKey = v
+								if v != "" {
+									pp.ClearStoredKey = false
+								}
+							})
+						})),
+					),
+					keyActions,
+				),
+				h.P(h.ClassStr("af-field-help"), h.Text(t("settings.provider.key.help"))),
 			),
-			h.Span(
-				h.ClassStr(profileKeyClass(p)),
-				h.Text(profileKeyText(p)),
+			h.Div(h.ClassStr("af-provider-card__field"),
+				h.Label(h.For(envID), h.Text(t("settings.provider.envVar.label"))),
+				h.Input(
+					h.ID(envID), h.Type("text"), h.Value(p.GetApiKeyEnv()), h.Disabled(disabled),
+					h.Attr("placeholder", "PROVIDER_API_KEY"),
+					h.OnInput(ui.UseEvent(func(e ui.InputEvent) {
+						v := e.GetValue()
+						replace(i, func(pp *affv1.ProviderProfile) { pp.ApiKeyEnv = v })
+					})),
+				),
+				h.P(h.ClassStr("af-field-help"), h.Text(t("settings.provider.envVar.help"))),
 			),
-			h.Button(
-				h.Type("button"), h.ClassStr("af-profiles__remove"), h.Disabled(disabled),
-				h.Aria("label", t("settings.provider.profile.remove", p.GetName())),
-				h.OnClick(ui.UseEvent(func() {
-					next := make([]*affv1.ProviderProfile, 0, len(profiles)-1)
-					next = append(next, profiles[:i]...)
-					next = append(next, profiles[i+1:]...)
-					onChange(next)
-				})),
-				h.Text("×"), //nolint:i18n -- glyph, the accessible name is on aria-label
+			h.Div(h.ClassStr("af-provider-card__footer"),
+				h.Button(
+					h.Type("button"), h.ClassStr("af-provider-card__remove"), h.Disabled(disabled),
+					h.Aria("label", t("settings.provider.profile.remove", p.GetName())),
+					h.OnClick(ui.UseEvent(func() {
+						next := make([]*affv1.ProviderProfile, 0, len(profiles)-1)
+						next = append(next, profiles[:i]...)
+						next = append(next, profiles[i+1:]...)
+						onProfiles(next)
+						if active == p.GetName() {
+							onActive("")
+						}
+					})),
+					h.Text(t("settings.provider.profile.removeLabel")),
+				),
 			),
 		))
 	}
 
-	rows = append(rows, affui.Button(affui.ButtonProps{
-		T: t, LabelKey: "settings.provider.profile.add", Variant: affui.ButtonSecondary,
-		Disabled: disabled,
-		OnClick: func() {
-			onChange(append(append([]*affv1.ProviderProfile(nil), profiles...), &affv1.ProviderProfile{}))
-		},
-	}))
-	return h.Div(rows...)
+	cards = append(cards, h.Div(
+		h.ClassStr("af-provider-card af-provider-card--add"),
+		affui.Button(affui.ButtonProps{
+			T: t, LabelKey: "settings.provider.profile.add", Variant: affui.ButtonSecondary,
+			Disabled: disabled,
+			OnClick: func() {
+				onProfiles(append(append([]*affv1.ProviderProfile(nil), profiles...), &affv1.ProviderProfile{}))
+			},
+		}),
+		h.P(h.ClassStr("af-field-help"), h.Text(t("settings.provider.profile.addHelp"))),
+	))
+
+	return h.Div(cards...)
 }
 
-func profileKeyText(p *affv1.ProviderProfile) string {
+func providerCardClass(active bool) string {
+	if active {
+		return "af-provider-card af-provider-card--active"
+	}
+	return "af-provider-card"
+}
+
+// providerKeyStateText names where this provider's credential comes from
+// right now — the stored encrypted key, the named env var, or nowhere —
+// plus the one pending state (a clear queued behind Save).
+func providerKeyStateText(p *affv1.ProviderProfile) string {
 	switch {
-	case p.GetApiKeyEnv() == "":
-		return t("settings.provider.profile.noKeyEnv")
-	case p.GetKeyPresent():
-		return t("settings.provider.profile.keySet")
-	default:
+	case p.GetClearStoredKey():
+		return t("settings.provider.key.willClear")
+	case p.GetApiKey() != "":
+		return t("settings.provider.key.willStore")
+	case p.GetHasStoredKey():
+		return t("settings.provider.key.stored")
+	case p.GetApiKeyEnv() != "" && p.GetKeyPresent():
+		return t("settings.provider.key.fromEnv", p.GetApiKeyEnv())
+	case p.GetApiKeyEnv() != "":
 		return t("settings.provider.profile.keyMissing")
+	default:
+		return t("settings.provider.key.none")
 	}
 }
 
-func profileKeyClass(p *affv1.ProviderProfile) string {
-	if p.GetApiKeyEnv() != "" && p.GetKeyPresent() {
-		return "af-profiles__key af-success"
+func providerKeyStateClass(p *affv1.ProviderProfile) string {
+	if p.GetClearStoredKey() || (!p.GetKeyPresent() && p.GetApiKey() == "") {
+		return "af-provider-card__key-state af-warning"
 	}
-	return "af-profiles__key af-warning"
+	return "af-provider-card__key-state af-success"
 }
 
 // costWindows are the spans the chart offers. A week reads day-to-day, a

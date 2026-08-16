@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -904,5 +905,71 @@ func TestPasswordResetNotOnGRPCSurface(t *testing.T) {
 				"must stay local-only (CLI, direct DB access), never reachable over the bridge "+
 				"by any caller, authenticated or not", m.MethodName)
 		}
+	}
+}
+
+// --- re-proof backoff -------------------------------------------------------
+//
+// verifyCurrentCredentials is the gate behind ChangePassword,
+// RegenerateRecoveryCodes, ReenrollTOTP's non-elevated path and
+// SystemServer.Backup. It exists because §4 says a live session token must
+// not be sufficient on its own for those actions — but it counted no failures
+// and consulted no backoff, so a caller holding a stolen session could
+// brute-force the password and the TOTP code against it at full speed. What
+// that buys an attacker is not reach (they already had the session) but the
+// PASSWORD, which survives session revocation.
+
+func TestVerifyCurrentCredentials_RecordsFailuresAgainstTheBackoff(t *testing.T) {
+	srv, _, secret := newTestServer(t)
+	ctx := withPeerIP(t.Context(), "203.0.113.9")
+	now := time.Now()
+
+	// The tracker forgives the first two failures (a real operator mistyping),
+	// so drive past the grace window and then assert the gate actually closes.
+	for i := range 4 {
+		err := srv.verifyCurrentCredentials(ctx, "not-the-password", validCode(t, secret, now), now)
+		if !errors.Is(err, errCredentialCheckFailed) {
+			t.Fatalf("attempt %d: err = %v, want errCredentialCheckFailed", i, err)
+		}
+	}
+
+	if !srv.backoff.blocked("203.0.113.9", now) {
+		t.Fatal("repeated wrong-password re-proofs did not trip the backoff")
+	}
+}
+
+func TestVerifyCurrentCredentials_BlockedIPIsRefusedEvenWithTheRightPassword(t *testing.T) {
+	srv, _, secret := newTestServer(t)
+	ctx := withPeerIP(t.Context(), "203.0.113.10")
+	now := time.Now()
+
+	for range 4 {
+		_ = srv.verifyCurrentCredentials(ctx, "not-the-password", validCode(t, secret, now), now)
+	}
+
+	// Correct credentials, still refused: being inside the window is what the
+	// window is for. And it is reported as an ordinary credential failure —
+	// "you are being throttled" is exactly the distinguishable signal §4's
+	// one-generic-message rule withholds.
+	err := srv.verifyCurrentCredentials(ctx, testPassword, validCode(t, secret, now), now)
+	if !errors.Is(err, errCredentialCheckFailed) {
+		t.Fatalf("err = %v, want errCredentialCheckFailed while backed off", err)
+	}
+}
+
+func TestVerifyCurrentCredentials_SuccessClearsTheCounter(t *testing.T) {
+	srv, _, secret := newTestServer(t)
+	ctx := withPeerIP(t.Context(), "203.0.113.11")
+	now := time.Now()
+
+	// One failure, inside the grace window so nothing is blocked yet.
+	if err := srv.verifyCurrentCredentials(ctx, "wrong", validCode(t, secret, now), now); !errors.Is(err, errCredentialCheckFailed) {
+		t.Fatalf("err = %v, want errCredentialCheckFailed", err)
+	}
+	if err := srv.verifyCurrentCredentials(ctx, testPassword, validCode(t, secret, now), now); err != nil {
+		t.Fatalf("correct credentials were refused: %v", err)
+	}
+	if srv.backoff.blocked("203.0.113.11", now.Add(time.Second)) {
+		t.Fatal("a successful re-proof left the caller backed off")
 	}
 }

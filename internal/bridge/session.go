@@ -37,6 +37,27 @@ type Session struct {
 	// nothing about validity is cached — see interceptor_sectest_test.go for
 	// the test that pins this down.
 	Token string
+
+	// ClientIP is the address of the browser that opened this socket, as
+	// distinct from the address the gRPC transport sees.
+	//
+	// It exists because every legitimate connection arrives through nginx over
+	// loopback, so peer.FromContext (internal/rpc's clientIP) reports the
+	// PROXY on every single call. Two things silently depended on that value
+	// being the client's: auth_events.ip, which recorded 127.0.0.1 for every
+	// login attempt ever made and so could not attribute anything; and the
+	// per-IP login backoff, which collapsed into one global counter — meaning
+	// an attacker's failed attempts throttled the real operator, and the
+	// per-IP granularity the design called for bought nothing.
+	//
+	// Populated by ServeHTTP from X-Real-IP (see clientIPFromRequest), which is
+	// trustworthy here for the same reason tls.go trusts X-Forwarded-Proto:
+	// nginx is the only ingress, it sets the header unconditionally from
+	// $remote_addr, and the container port is bound to loopback so nothing
+	// reaches this listener without passing through it. Empty when no such
+	// header is present (a direct connection, a test), and callers fall back
+	// to the transport peer address — never the reverse.
+	ClientIP string
 }
 
 // SessionValidator checks a raw session cookie value against store state as

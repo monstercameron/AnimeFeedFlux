@@ -262,6 +262,41 @@ func TestValidate_ItemsPerRunOutOfRange(t *testing.T) {
 	}
 }
 
+func TestValidate_EmptyModelPasses(t *testing.T) {
+	s := validGenerative()
+	s.Model.Model = ""
+	if problems := Validate(s); hasProblem(problems, "model", ReasonModelNotChat) {
+		t.Errorf("empty model (deployment default) must not be rejected, got %+v", problems)
+	}
+}
+
+func TestValidate_EmbeddingModelRejected(t *testing.T) {
+	s := validGenerative()
+	s.Model.Model = "text-embedding-3-large"
+	if problems := Validate(s); !hasProblem(problems, "model", ReasonModelNotChat) {
+		t.Fatalf("expected %s, got %+v", ReasonModelNotChat, problems)
+	}
+}
+
+func TestValidate_ChatModelPasses(t *testing.T) {
+	s := validGenerative()
+	s.Model.Model = "gpt-5.4-mini"
+	if problems := Validate(s); hasProblem(problems, "model", ReasonModelNotChat) {
+		t.Errorf("expected a chat model to pass, got %+v", problems)
+	}
+}
+
+func TestValidate_UnclassifiedModelPasses(t *testing.T) {
+	// ClassifyModel is deliberately generous: an id it cannot positively
+	// classify either way must still validate, or a real but unrecognised
+	// future chat model would be rejected outright.
+	s := validGenerative()
+	s.Model.Model = "some-future-model-family-9"
+	if problems := Validate(s); hasProblem(problems, "model", ReasonModelNotChat) {
+		t.Errorf("expected an unclassified model id to pass, got %+v", problems)
+	}
+}
+
 func TestValidate_FeedWindowOutOfRange(t *testing.T) {
 	s := validGenerative()
 	s.FeedWindow = 0

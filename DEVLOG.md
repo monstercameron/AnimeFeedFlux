@@ -13,6 +13,219 @@ Newest entries at the top.
 
 ---
 
+## 2026-08-15 — Schedule modes: ad hoc and watch, and why "watch" is mostly about NOT retrying
+
+Cam: "each feed needs a scheduler — frequency, fixed or ad hoc, or days, or on special events
+(check daily and if the LLM finds something, post it)." Frequency/days/time already existed (the
+2026-08-11 builder); the genuinely new axis was HOW the schedule is interpreted, which landed as
+`schedule_mode`: scheduled / adhoc / watch.
+
+Ad hoc was plumbing (skip before `Firing()`, staleness interval 0, hide the builder, and — easy to
+miss — skip schedule VALIDATION while the fields are ignored, or a stale cron string blocks saving
+a feed nothing will ever fire). Watch was the interesting one, because the engine had three
+separate mechanisms whose whole job is to refuse an empty answer:
+
+1. **The §9.3 repair call** fires when zero items validate — feeding "you returned nothing" back
+   as an error and asking again.
+2. **The novelty retry loop** re-rolls a generative feed up to N times when nothing novel came out.
+3. **The staleness watchdog** alarms when a feed hasn't published within a grace multiple of its
+   interval.
+
+For a watch feed every one of those turns "nothing happened today" — the CORRECT answer most days —
+into pressure to invent an event. So watch mode is defined mostly by what it disables: the system
+prompt (application-owned, appended, not overridable by the recipe) explicitly grants the empty
+answer; an empty RAW batch returns after exactly one model call as `skipped/nothing_noteworthy`
+(its own reason token, so history reads as the mode working rather than a generation problem);
+and staleness exempts the feed. The distinction that keeps validation honest: an empty batch is
+quiet ONLY when the model returned zero items — items that all flunked validation are still
+malformed output, repair call and all, watch mode or not (`lastRawCount` vs `len(valid)`).
+
+Unknown modes are rejected on save (`schedule_mode_unknown`), never defaulted — a typo'd "addhoc"
+silently firing on its schedule is precisely the surprise the mode exists to prevent. "" and
+"scheduled" mean the same thing so every pre-revision recipe keeps meaning what it meant without a
+migration touching exports.
+
+Follow-up, same day: Cam clarified the events mode is "powered by an LLM ... it searches the web
+and finds/doesn't find something". True in-model web search was investigated and does not exist in
+the provider layer — SchemaFlux v1.1.0's Generate builder exposes exactly
+Steer/Model/Strict/Creative/Fast/Quick/Smart/Count/RequestID/Context/Configure/Style/
+CompleteFields/ExactFields/WithOptions/Run/RunResult, no tool or search hook (its `web_search`
+string lives in an internal tools registry the fluent generation path never reaches). So the
+real-web loop is watch + GROUNDED: the sources fetch is the search, which is also the better
+design — §9's link-integrity rule keeps every released item pointing at a real fetched URL,
+which an in-model search result would bypass. Two additions made the pairing airtight: a
+zero-candidate fetch quiet-skips BEFORE any model call (nothing to judge, nothing to spend), and
+the watch system note gained the only-genuinely-new instruction so a stale candidate list doesn't
+get re-reported as an event.
+
+## 2026-08-15 — Two-stage generation: format-per-surface, and why it must never gate publishing
+
+Cam's directive: "we generate the raw data, then we use the LLM to format the raw data into the
+various formats — Rendered, Raw fields, Feed XML, Embed, Slack card — so each is optimized." The
+observation behind it is real: four surfaces (content:encoded, the Slack card via description,
+the §6.1 embed widget, the item page) were all rendering the same two strings, and a body written
+for a feed reader is neither a good 280-char card nor a good one-line widget.
+
+Design decisions worth keeping:
+
+- **Formatter is an optional capability (`llm.Formatter`), not a fourth `Provider` method.** Every
+  existing fake and any minimal future provider keeps compiling; the engine's skip path IS the
+  degradation path. This mattered doubly with a second session actively editing neighbouring files.
+- **Degrade, never gate.** Stage 1's validated output is a complete, correct feed. Every stage-2
+  failure — no capability, failed call, variant flunking validation — ends in "that variant stays
+  empty, the renderer falls back to the raw field". A run must never skip or fail because
+  formatting did; anything else turns an enhancement into a new outage mode.
+- **Variants are re-validated with the raw fields' own rules**, including the §5.5 answer-leak
+  check on the text surfaces, and the relative-link check runs on the RAW variant before the
+  sanitizer — the sanitizer STRIPS a relative href rather than rejecting it, so checking after
+  would ship dead anchors instead of falling back to a body whose links work (caught by the first
+  test run).
+- **Fallback lives in `model.Item.Render*` accessors, not at render call sites** — a renderer
+  cannot prefer the wrong field or the wrong surface's variant by accident, and
+  rss/atom/jsonfeed keep their never-disagree property through the shared body helper.
+- **The stage-2 prompt is application-owned, not recipe-owned**: how surfaces render is a property
+  of this app, and a recipe able to override it could quietly break the Slack rules §5.5 protects.
+- **Editing clears variants** (store-level, in the same UPDATE) — stale variants would show the
+  pre-edit content on every surface while the raw fields claim otherwise.
+
+Same session, the model-resolution half: recipes' models became OVERRIDES on the Settings default
+(resolved live per run in cmd/animefeedflux's one recipe→pipeline mapping seam, priced at the
+resolved model). The editor already had a "" option; it was relabeled from "Default model" — which
+read as a placeholder — to "Global default (from Settings)", which is now literally what it does.
+
+## 2026-08-15 — Provider keys move into the database, encrypted; the environment demotes to a dev fallback
+
+The second §4 revision in one day, and the bigger one. The plan's rule was absolute: provider key
+material lives in the environment only — profiles stored the NAME of an env var, never a key, so a
+profile was "safe to store in SQLite, safe to send to a browser, safe in a backup". Cam overruled it
+while reviewing /settings/provider: "in prod the user has to configure their key via the UI and not
+env vars". The env-var path (SCHEMAFLUX_API_KEY, per-profile api_key_env) survives as a
+dev/bootstrap fallback only.
+
+What kept the revision honest rather than a regression to plaintext-keys-in-the-DB:
+
+- **Encrypted at rest with AFF_SECRET_KEY**, via the exact EncryptSecret/DecryptSecret pair that
+  already protects the TOTP secret — so the §4 property that actually matters (a stolen database
+  file yields no credential) is preserved; what changed is only WHERE the ciphertext lives.
+- **Write-only over the wire.** ProviderProfile.api_key / Settings_Provider.default_api_key are
+  accepted on UpdateSettings and forced empty on every read; the client sees booleans (stored /
+  from env / none). The ciphertext lives in its OWN settings row (`provider_api_keys`), never
+  inside the provider section's stored proto — redaction by construction, not by discipline, since
+  no read path that serves settings to a browser can carry the ciphertext along by accident.
+- **Stored wins over env.** Deliberate precedence: the UI-stored key is the newer, intentional
+  configuration; a process still booted with an old env key must not shadow it. This forced removing
+  cmd/animefeedflux's "base URL empty means nothing to override, use the boot-time fallback client"
+  shortcut — with stored keys, the default endpoint's credential can differ from boot, and
+  collapsing to the fallback would silently keep calling with the old key.
+- **Keys are garbage-collected with their profile** (rename/delete drops the ciphertext), so a
+  future profile reusing a name cannot silently inherit a predecessor's credential. The built-in
+  provider's key lives under the reserved empty name and is exempt from the sweep.
+
+Same session, two smaller reversals worth recording:
+
+- **The price table now displays $ per 1M tokens** ("we standardized on 1M") while the stored/wire
+  unit stays per-1K — the field is literally named `usd_per_1k_tokens_*` and the settings row
+  persists as that proto's JSON, so re-scaling stored values would corrupt every existing
+  deployment's rates by 1000×. The ×1000/÷1000 conversion lives at the UI boundary only, rounded to
+  9 decimals so float noise (0.00015×1000 = 0.15000000000000002) never reaches the input. The dev
+  DB itself carried the confusion this fixes: one row entered in per-1K units, one in per-1M.
+- **The free-text "active provider" backend field became a seven-option menu.** The server accepts
+  exactly seven values (validProviderBackends); a field whose every valid answer is enumerable was
+  a typing test whose failure mode was a 4am run error.
+
+And one layout bug worth its line: the price table's inputs rendered as two-character slivers
+because the table's scroll container sat as ONE COLUMN of .af-settings-card's auto-fit grid — only
+`.af-table-wrap` children span the card. The fix was a wrapper class plus `table-layout: fixed`
+with a min-width so narrow viewports scroll the container (the Table primitive's own D5-01 design)
+instead of crushing the columns again.
+
+## 2026-08-15 — The embed: an iframe document, not a script, and two things only a browser found
+
+Cam asked for an embed showing "simple formatted lists of the latest rss items." The obvious build
+is a script tag — `<script src=".../embed.js" data-feed="...">` injecting nodes into the host page —
+and it was rejected before any code was written. It would put an executable asset on the public
+plane and make this project a script vendor for pages it does not control: a sanitiser regression
+would become an XSS in *somebody else's* origin, the file's shape could never change again without
+breaking pages already carrying it, and it would need CORS on the JSON feed to be useful. An iframe
+document has none of that. It renders in its own origin, carries its own CSS, and leaves §2's claim
+about this plane — a fixed set of read-only documents with no writer — intact. Recorded here so the
+script version does not get proposed again as "the easy one."
+
+The trap that was designed around rather than tested around: the embed renders `SummaryText` only.
+Reaching for `BodyHTML` "to show a little more" would spoil every trivia answer on every page that
+embedded the feed, silently and everywhere at once — the same §5.5 guarantee `og:description`
+depends on. There is deliberately no option to render more, and both the renderer test and the route
+test assert it, because a rule enforced only by a comment is a rule until someone is in a hurry.
+
+**Two defects the unit tests could not see, both found by loading the page in a real browser.**
+
+1. `Content-Security-Policy: frame-ancestors *` does not mean "any site." CSP's `*` matches only
+   URLs with a network scheme, or whose scheme matches the document's own — so Chrome refused the
+   frame outright with "the scheme 'http:' must be added explicitly." A test asserting the header
+   string was present passed the whole time. The policy now names both schemes: `https: http:`.
+2. The list overflowed the iframe's fixed height and sliced the "Subscribe by RSS" link in half.
+   That is the iframe-height problem in its ugliest form, and no assertion about markup would ever
+   have caught it. The document now makes the item list the scroll container, with the heading and
+   the subscribe link pinned — so it looks intentional at whatever height the embedding author
+   picked, which is the only thing that can be true when the page cannot resize its own frame.
+
+Both are the same lesson in different clothes: this is the first surface this project renders into
+somebody else's page, and "the header is set" / "the markup is correct" are not the properties that
+matter there. The properties that matter are "does it display" and "does it look broken."
+
+**The timestamp rail was wrong, and a preview is what proved it.** The embed's first layout gave
+each item a fixed 5.5rem column for its date, on the argument that §5.5 makes `published_at` the
+item's real identity (unique, strictly increasing, the property that keeps Slack posting). That is
+true of the data and wrong about the reader: a feed publishes a *run* at a time, so consecutive
+items carry the same date by construction, and the rail spent a fifth of the width printing the
+same string beside every title. It only became obvious against real content rather than a fixture.
+Now the stamp is a caption above the title, the layout is one column, and the summary is clamped to
+three lines — model-authored summaries have no length bound, and one rambling one otherwise pushed
+every other item out of a fixed-height frame.
+
+The caption form also fixed a failure the rail could not handle. A column leaves a visible hole when
+its content is missing; a caption is simply absent. That mattered immediately, because of the next
+entry.
+
+**"1 Jan 0001, 00:00 UTC" — the zero time rendering as content.** `generate.Sample` deliberately
+skips `stampItems`: a dry run persists nothing and the timestamp is assigned at promote. So every
+sampled candidate carries the zero `time.Time`, and the sampler's previews rendered it. The embed
+showed it as a date; the *feed XML view had been emitting a year-0001 `pubDate` the whole time*, in
+a document `internal/feedvalidate`'s own date rules would fail as an error — nobody had looked,
+because the XML view is a wall of text and a wrong year in it does not announce itself. The new
+visual preview announced it in the first screenshot Cam looked at.
+
+Fixed in the one place both previews now share (`candidateChannel`, extracted for exactly this kind
+of reason): stamp the item with the time promoting would assign, and only when it is missing. The
+renderer separately refuses to print a zero date at all, because a preview is not the only path that
+could ever hand it one, and printing a plausible-looking wrong date is the worst available failure —
+it looks like content, so the widget reads as broken rather than as a widget with one fact missing.
+
+**The sampler's fifth view, and why it is not a text dump.** The candidate views are four `<pre>`
+blocks over strings the server computes. Adding "Embed" as a fifth string — the document's HTML
+source — would have been the consistent move and a useless one: the embed is a *visual* surface,
+and asking an operator to judge an appearance by reading markup is asking the wrong question. It is
+the one view rendered as a live `<iframe srcdoc="..." sandbox="">`. Empty `sandbox` is the most
+restrictive value there is (no scripts, no forms, no navigation, opaque origin) and costs nothing
+here, because the embed has never contained a script; verified in a browser that the styling still
+renders under it, in both colour schemes.
+
+The candidate is unpublished and has no `/embed` URL, so the document travels in the response
+(`embed_preview_html`) rather than being fetched. It is rendered by the *same* `render.Embed` the
+public route calls — the same argument `renderCandidateXML` already makes for `render.RSS`, but
+sharper: the embed's one hard rule is `SummaryText` only, and a preview built from a second
+admin-only renderer could show a spoiler-free card while the real page leaked, or the reverse. That
+preview would be worse than none, because it would be reassuring and wrong.
+
+Placement: fourth, not fifth. §12.3's ordering argument is that the Slack card is what an operator
+should look at last before promoting, because Slack is where these items are actually read — the
+embed does not displace that, so it sits beside the feed XML, the other "what does this become on a
+public surface" view.
+
+A third thing changed on the way: `frame-ancestors 'none'` is now sent on every *other* publish
+route. One route opting in to being framed while the rest were framable by silence would have left
+the permalink page usable as a phishing surface for no benefit.
+
 ## 2026-08-15 — /setup: the plan said "never a network path for account creation"; Cam overruled it, eyes open
 
 PLAN.md §4/§11 made `aff admin init` (local-only, stdin) the sole account-creation path, and the

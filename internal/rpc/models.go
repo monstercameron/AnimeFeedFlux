@@ -42,6 +42,7 @@ func (s *SystemServer) ListModels(ctx context.Context, _ *affv1.SystemServiceLis
 			s.log.WarnContext(ctx, "reading provider settings for the model list", "error", err.Error())
 		} else {
 			endpoint = ResolveProviderEndpoint(p, s.getenv)
+			s.applyStoredProviderKey(ctx, s.st.Reader(), &endpoint)
 		}
 	}
 

@@ -37,6 +37,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
+	"github.com/monstercameron/AnimeFeedFlux/internal/auth"
 	"github.com/monstercameron/AnimeFeedFlux/internal/llm"
 	"github.com/monstercameron/AnimeFeedFlux/internal/store"
 )
@@ -63,6 +64,17 @@ const (
 	sysSettingsKeyProvider   = "provider"
 	sysSettingsKeyGeneration = "generation"
 	sysSettingsKeyPublishing = "publishing"
+	// sysSettingsKeyProviderKeys holds the operator-stored provider API keys
+	// as a JSON map of profile name -> base64(AES-GCM ciphertext), encrypted
+	// with AFF_SECRET_KEY exactly like the TOTP secret (internal/auth's
+	// EncryptSecret). Its OWN settings row, never a field inside the
+	// provider section's stored proto, so no read path that serves the
+	// provider settings to a client can ever carry it along by accident —
+	// redaction by construction rather than by discipline. Storing keys at
+	// all is the 2026-08-15 revision of §4's environment-only rule (DEVLOG);
+	// api_key_env profiles keep working, and a stored key wins over the env
+	// var when both exist.
+	sysSettingsKeyProviderKeys = "provider_api_keys"
 )
 
 // SystemServer implements affv1.SystemServiceServer.
@@ -113,6 +125,13 @@ type SystemServer struct {
 	// verifier gates Backup. See CredentialVerifier.
 	verifier CredentialVerifier
 
+	// secretKey is AFF_SECRET_KEY, for encrypting stored provider API keys
+	// at rest (sysSettingsKeyProviderKeys). nil means no key was wired:
+	// storing a key is then refused loudly on save, and any previously
+	// stored ciphertext simply cannot be decrypted (resolution falls back to
+	// the profile's env var), rather than either path failing silently.
+	secretKey []byte
+
 	// modelsCache holds the last successful provider model list. Guarded by
 	// modelsMu because SystemServer is shared across concurrent RPCs.
 	// See models.go's cachedModels/staleModels for the two ways it is read.
@@ -137,6 +156,12 @@ func WithPublishingSink(apply func(*affv1.Settings_Publishing)) SystemServerOpti
 
 func WithModelLister(l llm.ModelLister) SystemServerOption {
 	return func(s *SystemServer) { s.modelLister = l }
+}
+
+// WithSecretKey wires AFF_SECRET_KEY for encrypting stored provider API
+// keys at rest — the same value NewAuthServer takes for the TOTP secret.
+func WithSecretKey(key []byte) SystemServerOption {
+	return func(s *SystemServer) { s.secretKey = key }
 }
 
 // CredentialVerifier re-proves the operator's password and TOTP.
@@ -254,7 +279,9 @@ func (s *SystemServer) sysLoadProvider(ctx context.Context, r store.Reader) (*af
 			return nil, fmt.Errorf("rpc: parsing stored provider settings: %w", err)
 		}
 	}
-	p.ApiKeyPresent = s.apiKeyPresent()
+	// ApiKeyPresent is completed below once the stored-key map is loaded —
+	// the built-in provider's key can come from the UI-stored ciphertext
+	// (the production path) or the env var (dev/bootstrap fallback).
 	// Effort defaults to the tier internal/llm already used implicitly by
 	// setting none at all, so an existing deployment's behaviour does not
 	// change the moment this field exists.
@@ -276,15 +303,89 @@ func (s *SystemServer) sysLoadProvider(ctx context.Context, r store.Reader) (*af
 	if p.GetEmbeddingModel() == "" {
 		p.EmbeddingModel = DefaultProviderEmbeddingModel
 	}
-	// KeyPresent is derived on every read and never stored: a profile row
-	// records which ENVIRONMENT VARIABLE holds its key (PLAN.md §4 keeps key
-	// material out of the database entirely), so whether that variable is
-	// actually set is a fact about this process, not about the row. Storing
-	// it would go stale the moment the env changed.
+	// KeyPresent/HasStoredKey are derived on every read and never stored:
+	// whether a profile's env var is set is a fact about this process, and
+	// whether a stored ciphertext exists is a fact about its own settings
+	// row (sysSettingsKeyProviderKeys) — both would go stale as persisted
+	// booleans. ApiKey is forced empty unconditionally: it is a write-only
+	// field and no read path may ever populate it.
+	stored, err := sysLoadProviderKeys(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	// The built-in provider's stored key lives under the reserved empty
+	// name. UI-stored is the production path; the env var is the
+	// dev/bootstrap fallback (operator directive 2026-08-15).
+	p.DefaultApiKey = ""
+	p.ClearDefaultKey = false
+	_, p.DefaultKeyStored = stored[""]
+	p.ApiKeyPresent = p.DefaultKeyStored || s.apiKeyPresent()
 	for _, prof := range p.GetProfiles() {
-		prof.KeyPresent = prof.GetApiKeyEnv() != "" && s.getenv(prof.GetApiKeyEnv()) != ""
+		prof.ApiKey = ""
+		prof.ClearStoredKey = false
+		_, prof.HasStoredKey = stored[prof.GetName()]
+		prof.KeyPresent = prof.HasStoredKey ||
+			(prof.GetApiKeyEnv() != "" && s.getenv(prof.GetApiKeyEnv()) != "")
 	}
 	return p, nil
+}
+
+// sysRowQuerier is the one method sysLoadProviderKeys actually needs,
+// satisfied by store.Reader AND by *sql.Tx — UpdateSettings must read the
+// key map inside its own transaction, and store.Reader's PingContext keeps
+// *sql.Tx from satisfying the full interface.
+type sysRowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// sysLoadProviderKeys reads the stored provider API keys row: profile name
+// -> base64 AES-GCM ciphertext. Missing row means no keys stored.
+func sysLoadProviderKeys(ctx context.Context, q sysRowQuerier) (map[string]string, error) {
+	keys := map[string]string{}
+	var raw string
+	err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, sysSettingsKeyProviderKeys).Scan(&raw)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return keys, nil
+	case err != nil:
+		return nil, fmt.Errorf("rpc: reading setting %q: %w", sysSettingsKeyProviderKeys, err)
+	}
+	if err := json.Unmarshal([]byte(raw), &keys); err != nil {
+		return nil, fmt.Errorf("rpc: parsing stored provider keys: %w", err)
+	}
+	return keys, nil
+}
+
+// storedProviderKey decrypts and returns the stored key for one profile —
+// the reserved empty name being the built-in provider's slot. ok is false
+// when no key is stored, when no secret key is wired, or when decryption
+// fails (e.g. AFF_SECRET_KEY changed since the key was stored) — callers
+// then fall back to the env var, and a decryption failure is logged since
+// silence there reads as "the key vanished".
+func (s *SystemServer) storedProviderKey(ctx context.Context, r sysRowQuerier, profile string) (string, bool) {
+	if len(s.secretKey) == 0 {
+		return "", false
+	}
+	stored, err := sysLoadProviderKeys(ctx, r)
+	if err != nil {
+		s.log.WarnContext(ctx, "reading stored provider keys", slog.Any("error", err))
+		return "", false
+	}
+	enc, ok := stored[profile]
+	if !ok {
+		return "", false
+	}
+	blob, err := base64.StdEncoding.DecodeString(enc)
+	if err == nil {
+		if key, derr := auth.DecryptSecret(blob, s.secretKey); derr == nil {
+			return key, true
+		} else {
+			err = derr
+		}
+	}
+	s.log.WarnContext(ctx, "decrypting the stored provider key; falling back to the profile's env var",
+		slog.String("profile", profile), slog.Any("error", err))
+	return "", false
 }
 
 // defaultProviderEffort is the SchemaFlux Speed tier used when none is
@@ -302,6 +403,12 @@ func (s *SystemServer) sysLoadProvider(ctx context.Context, r store.Reader) (*af
 // thing being traded away, and a deployment happy with what it was getting
 // should set the tier explicitly rather than rely on this.
 const defaultProviderEffort = "quick"
+
+// DefaultProviderEffort re-exports defaultProviderEffort for the one caller
+// outside this package that must agree with it: cmd/animefeedflux's per-run
+// provider-defaults resolution (a recipe with no pinned model runs on the
+// settings' default model AND the settings' effort tier).
+const DefaultProviderEffort = defaultProviderEffort
 
 // Cold-start model choices, shown on /settings/provider until an operator
 // picks otherwise.
@@ -605,6 +712,89 @@ func (s *SystemServer) UpdateSettings(ctx context.Context, req *affv1.SystemServ
 		if perr != nil {
 			return nil, status.Error(codes.InvalidArgument, perr.Error())
 		}
+
+		// Stored API keys: apply the write-only per-profile fields in this
+		// same transaction, so "the profile saved but its key didn't" is not
+		// a state that can exist. The plaintext from the request is used
+		// exactly once, here, to produce ciphertext — it is never persisted,
+		// logged, or echoed (sysValidateProfiles already rebuilds each
+		// profile without the key fields, and sysLoadProvider forces ApiKey
+		// empty on every read).
+		storedKeys, kerr := sysLoadProviderKeys(ctx, tx)
+		if kerr != nil {
+			return nil, status.Errorf(codes.Internal, "rpc: %v", kerr)
+		}
+		keysChanged := false
+		validNames := map[string]bool{}
+		for _, vp := range profiles {
+			validNames[vp.GetName()] = true
+		}
+		for _, rp := range p.GetProfiles() {
+			name := strings.TrimSpace(rp.GetName())
+			if name == "" {
+				continue
+			}
+			newKey := strings.TrimSpace(rp.GetApiKey())
+			switch {
+			case newKey != "":
+				if len(s.secretKey) == 0 {
+					return nil, status.Error(codes.FailedPrecondition,
+						"storing an API key requires AFF_SECRET_KEY on the server; use the profile's key environment variable instead")
+				}
+				blob, eerr := auth.EncryptSecret(newKey, s.secretKey)
+				if eerr != nil {
+					return nil, status.Errorf(codes.Internal, "rpc: encrypting the provider key: %v", eerr)
+				}
+				storedKeys[name] = base64.StdEncoding.EncodeToString(blob)
+				keysChanged = true
+			case rp.GetClearStoredKey():
+				if _, ok := storedKeys[name]; ok {
+					delete(storedKeys, name)
+					keysChanged = true
+				}
+			}
+		}
+		// The built-in provider's key, stored under the reserved empty name.
+		switch {
+		case strings.TrimSpace(p.GetDefaultApiKey()) != "":
+			if len(s.secretKey) == 0 {
+				return nil, status.Error(codes.FailedPrecondition,
+					"storing an API key requires AFF_SECRET_KEY on the server; use the profile's key environment variable instead")
+			}
+			blob, eerr := auth.EncryptSecret(strings.TrimSpace(p.GetDefaultApiKey()), s.secretKey)
+			if eerr != nil {
+				return nil, status.Errorf(codes.Internal, "rpc: encrypting the provider key: %v", eerr)
+			}
+			storedKeys[""] = base64.StdEncoding.EncodeToString(blob)
+			keysChanged = true
+		case p.GetClearDefaultKey():
+			if _, ok := storedKeys[""]; ok {
+				delete(storedKeys, "")
+				keysChanged = true
+			}
+		}
+
+		// A key whose profile is gone (deleted, or renamed — the rename's
+		// new name arrives keyless) is dropped rather than kept as an
+		// orphan a future profile of the same name would silently inherit.
+		// The empty name is the built-in provider's slot, never a profile,
+		// so it is exempt from this sweep.
+		for name := range storedKeys {
+			if name != "" && !validNames[name] {
+				delete(storedKeys, name)
+				keysChanged = true
+			}
+		}
+		if keysChanged {
+			rawKeys, merr := json.Marshal(storedKeys)
+			if merr != nil {
+				return nil, status.Errorf(codes.Internal, "rpc: encoding stored provider keys: %v", merr)
+			}
+			if err := sysUpsertSetting(ctx, tx, sysSettingsKeyProviderKeys, string(rawKeys)); err != nil {
+				return nil, status.Errorf(codes.Internal, "rpc: %v", err)
+			}
+		}
+
 		toStore := &affv1.Settings_Provider{
 			ActiveProvider: backend,
 			DefaultModel:   p.GetDefaultModel(),
@@ -819,9 +1009,20 @@ func (s *SystemServer) Backup(ctx context.Context, req *affv1.SystemServiceBacku
 		return nil, status.Error(codes.FailedPrecondition,
 			"rpc: backup is unavailable because no credential verifier is wired")
 	}
+	// Recorded on both outcomes. Backup was the ONE credential-gated action in
+	// the system that wrote no auth_events row at all — ChangePassword,
+	// RegenerateRecoveryCodes and ReenrollTOTP all record theirs — so a
+	// caller could hammer the password/TOTP check here indefinitely and leave
+	// nothing for ListAuditEvents to show. A gate whose failures are invisible
+	// is a gate nobody can tell is being tested, and this one guards a
+	// download of the entire database: the admin password hash, the encrypted
+	// TOTP secret, every recovery-code hash.
+	ip := clientIP(ctx)
 	if err := s.verifier.VerifyCurrentCredentials(ctx, req.GetCurrentPassword(), req.GetTotpCode(), time.Now()); err != nil {
+		_ = s.st.RecordAuthEvent(ctx, "backup", ip, false, "current credential check failed")
 		return nil, status.Error(codes.PermissionDenied, "rpc: backup requires the current password and TOTP code")
 	}
+	_ = s.st.RecordAuthEvent(ctx, "backup", ip, true, "")
 
 	filename := fmt.Sprintf("animefeedflux-%s.db", time.Now().UTC().Format("20060102-150405"))
 

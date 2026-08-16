@@ -19,6 +19,7 @@ package generatepage
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"time"
 
 	"github.com/monstercameron/GoWebComponents/v5/fetch"
@@ -320,6 +321,22 @@ func Render() ui.Node {
 	perFieldKeepMine := ui.UseState(map[string]bool(nil))
 	creatingNew := ui.UseState(false)
 
+	// Auto-load the first feed when the page opens with nothing selected
+	// (2026-08-15). Without this, /generate arrived as an empty workbench —
+	// no prompts, no schedule, no controls — until the operator happened to
+	// click a rail row, and "the controls aren't on the page" was the honest
+	// description of what they saw. Keyed on the feed list's length so it
+	// fires when the list first arrives; it never overrides an explicit
+	// selection or a new-feed draft, and an EMPTY deployment still shows the
+	// choose-or-create state, which is then genuinely all there is.
+	feedsLoaded := feedsRes.Get().Value
+	ui.UseEffectOf(func() func() {
+		if selectedSlug.Get() == "" && !creatingNew.Get() && len(feedsLoaded) > 0 {
+			selectedSlug.Set(feedsLoaded[0].GetSlug())
+		}
+		return nil
+	}, strconv.Itoa(len(feedsLoaded)))
+
 	// --- Sampler state ---------------------------------------------------
 	sampleSize := ui.UseState(int32(1))
 	tempOverride := ui.UseState(0.0)
@@ -425,8 +442,6 @@ func Render() ui.Node {
 		StaleThresholdMinutes: settingsRes.Get().Value.GetSettings().GetGeneration().GetStalenessThresholdMinutes(),
 		Resource:              feedsRes,
 		Stats:                 statsRes,
-		Items:                 itemsRes,
-		Runs:                  runsRes,
 		Selected:              selectedSlug.Get(),
 		Err:                   railErr.Get(),
 		OnSelect: func(slug string) {
@@ -751,7 +766,20 @@ func Render() ui.Node {
 						candidates.Set(append([]*affv1.SampleCandidate(nil), acc...))
 					}
 					if msg.GetDone() {
-						if msg.GetErrorKind() != affv1.ErrorKind_ERROR_KIND_UNSPECIFIED {
+						// A terminal message can carry a real, actionable
+						// ErrorMessage while leaving ErrorKind at its zero
+						// value UNSPECIFIED (confirmed live: a grounded feed
+						// whose source-fetch step is not implemented server-
+						// side returns exactly this shape). Gating only on
+						// ErrorKind silently dropped that message — the
+						// stream reported a real failure and the operator
+						// saw the same "No candidates yet" placeholder as an
+						// untried feed, indistinguishable from Preview doing
+						// nothing at all. A message is itself evidence of a
+						// failure worth showing, regardless of whether the
+						// server also classified it into the ErrorKind
+						// taxonomy.
+						if msg.GetErrorKind() != affv1.ErrorKind_ERROR_KIND_UNSPECIFIED || msg.GetErrorMessage() != "" {
 							sampleErr.Set(errSample{kind: msg.GetErrorKind(), message: msg.GetErrorMessage()})
 						}
 						break
@@ -922,6 +950,7 @@ func Render() ui.Node {
 			OnChange: func(v string) {
 				onFieldChange(func(f *affv1.Feed) { ensureSpec(f).SystemPromptTemplate = v })
 			},
+			ErrNode: fieldErrNode(fieldErrs.Get(), "system_prompt_template"),
 		}),
 		renderPromptField(promptFieldProps{
 			ID: "gen-user-prompt", LabelKey: "generate.editor.userPrompt",
@@ -930,7 +959,8 @@ func Render() ui.Node {
 			OnChange: func(v string) {
 				onFieldChange(func(f *affv1.Feed) { ensureSpec(f).UserPromptTemplate = v })
 			},
-			Chips: true,
+			Chips:   true,
+			ErrNode: fieldErrNode(fieldErrs.Get(), "user_prompt_template"),
 		}),
 	)
 
@@ -1009,26 +1039,28 @@ func Render() ui.Node {
 		),
 		Prompts: prompts,
 		Preview: ui.CreateElement(renderSampler, samplerProps),
-		// The feed list is its own disclosure, not a stowaway inside "Recipe
-		// settings". It is the CRUD surface — every feed with its status,
-		// stale flag, last build, 7-day spend, the enable toggle, Run Now and
-		// (now) delete — and burying it under a heading about slugs and cron
-		// expressions is why this app looked like it had no feed management
-		// at all. Open by default when no feed is selected, because then
-		// choosing one is the only thing to do.
+		// The feed list is a permanent sidebar now (render_workbench.go),
+		// not a disclosure stacked above the work area — a compact,
+		// independently-scrolling column of every feed, always visible,
+		// never collapsed and never needing to be: it earlier had to default
+		// open because closing it hid the enable toggle and Run Now the
+		// moment you started working, but a persistent sidebar has nothing
+		// to open or close in the first place.
 		Feeds: ui.CreateElement(renderRail, railProps),
-		// Open by default, always. Collapsing it once a feed was selected is
-		// what made the app look like it had no feed management: the list,
-		// the enable toggles and Run Now all vanished the moment you started
-		// working. The operator can still collapse it; it just does not
-		// collapse itself.
-		FeedsOpen: true,
-		FeedCount: len(feedsRes.Get().Value),
+		// The tape (docs/design-direction.md's signature element) for
+		// whichever feed is actually loaded — shown once, prominently, at
+		// the top of the main column, rather than once per row in a 20rem
+		// sidebar. "Spend the boldness [on the tape]" lands harder on the
+		// ONE feed being worked on than diluted across every row of a list
+		// most of which are not what the operator is looking at right now.
+		Tape: h.If(editorProps.Loaded != nil,
+			renderTape(itemsForFeed(itemsRes.Get().Value, editorProps.Loaded.GetId()), time.Now())),
 		// A brand-new draft has nothing to preview and several required
 		// fields in the recipe form, so that is where the operator needs to
 		// be looking.
 		RecipeOpen:  creatingNew.Get(),
 		FeedConfirm: deleteConfirm,
+		Schedule:    ui.CreateElement(renderScheduleSection, editorProps),
 		Recipe: h.Fragment(
 			ui.CreateElement(renderEditor, editorProps),
 			ui.CreateElement(renderURLPanel, urlPanelProps{

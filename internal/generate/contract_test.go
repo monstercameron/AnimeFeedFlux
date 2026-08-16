@@ -259,3 +259,81 @@ func TestCheckLink_RejectsEmptyLink(t *testing.T) {
 		t.Fatalf("error %v does not carry reason token %q", err, ReasonLinkRequiredGrounded)
 	}
 }
+
+// --- AnswerHTML sanitization ------------------------------------------------
+//
+// AnswerHTML used to be the one model-authored markup field that reached the
+// wire unsanitized: Validate sanitized BodyHTML and assigned AnswerHTML
+// through untouched, while render/permalink.go wrote it raw into the public
+// page and render/rss.go concatenated it into content:encoded. These tests
+// pin the fix so a future refactor of Validate cannot quietly reopen it.
+
+func TestValidate_SanitizesAnswerHTML(t *testing.T) {
+	c := validCandidate()
+	c.AnswerHTML = `<p>Sunrise<script>alert(1)</script></p>`
+
+	item, rejections, err := Validate(c, Options{Kind: model.KindGenerative})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(rejections) > 0 {
+		t.Fatalf("unexpected rejections: %v", rejectionReasons(rejections))
+	}
+	if strings.Contains(item.AnswerHTML, "script") {
+		t.Fatalf("answer_html reached the item with script markup intact: %q", item.AnswerHTML)
+	}
+	// The legitimate text around it survives — this is a sanitizer, not a
+	// rejection, so the item is still publishable.
+	if !strings.Contains(item.AnswerHTML, "Sunrise") {
+		t.Fatalf("sanitizing answer_html destroyed its real content: %q", item.AnswerHTML)
+	}
+}
+
+func TestValidate_StripsEventHandlerAttributesFromAnswerHTML(t *testing.T) {
+	c := validCandidate()
+	c.AnswerHTML = `<p onmouseover="steal()">Cowboy Bebop</p>`
+
+	item, rejections, err := Validate(c, Options{Kind: model.KindGenerative})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(rejections) > 0 {
+		t.Fatalf("unexpected rejections: %v", rejectionReasons(rejections))
+	}
+	if strings.Contains(strings.ToLower(item.AnswerHTML), "onmouseover") {
+		t.Fatalf("answer_html kept an event handler attribute: %q", item.AnswerHTML)
+	}
+}
+
+func TestValidate_RejectsRelativeLinkInAnswerHTML(t *testing.T) {
+	// Same §5.1 rule the body is held to: both land in content:encoded, and
+	// RSS has no base-URL mechanism, so a relative href is unresolvable in
+	// an answer for exactly the reason it is unresolvable in a body.
+	c := validCandidate()
+	c.AnswerHTML = `<p>See <a href="/spoilers">the answer</a>.</p>`
+
+	_, rejections, err := Validate(c, Options{Kind: model.KindGenerative})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !containsReason(rejections, ReasonBodyRelativeLink) {
+		t.Fatalf("expected %s for a relative href in answer_html, got %v",
+			ReasonBodyRelativeLink, rejectionReasons(rejections))
+	}
+}
+
+func TestValidate_AnswerLeakStillCheckedAgainstRawMarkup(t *testing.T) {
+	// The leak check deliberately runs on the RAW answer, not the sanitized
+	// one, so sanitization cannot mask a leak by deleting the evidence.
+	c := validCandidate()
+	c.SummaryText = "The studio is sunrise, obviously"
+	c.AnswerHTML = `<p>sunrise</p>`
+
+	_, rejections, err := Validate(c, Options{Kind: model.KindGenerative})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !containsReason(rejections, ReasonAnswerLeaked) {
+		t.Fatalf("expected %s, got %v", ReasonAnswerLeaked, rejectionReasons(rejections))
+	}
+}

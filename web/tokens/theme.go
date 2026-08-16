@@ -456,9 +456,36 @@ func varRef(name string) string { return "var(--" + name + ")" }
 func Emit() {
 	css.Root(LightTheme().RootRules()...)
 	css.Root(extraTokens(LightTheme())...)
+	// color-scheme is what the BROWSER paints native widget chrome with —
+	// the parts CSS cannot reach, above all a <select>'s dropdown popup and
+	// its <option> rows. The shell's <meta name="color-scheme"> only
+	// declares that both schemes exist; with the app's theme driven by
+	// data-theme (not prefers-color-scheme), the UA otherwise keeps using
+	// the OS scheme, which is why dark mode showed bright-white option
+	// lists on /generate (reported 2026-08-15). Tied to the same selector
+	// pair as the palettes so it can never disagree with them.
+	css.Root(css.Raw("color-scheme", "light"))
 
 	darkRules := append(DarkTheme().RootRules(), extraTokens(DarkTheme())...)
+	darkRules = append(darkRules, css.Raw("color-scheme", "dark"))
 	css.Global(`:root[data-theme="dark"]`, darkRules...)
+
+	// Dropdown option colors, decided once, here — the second half of the
+	// color-scheme fix above. Pages style their <select> elements freely
+	// (the /generate strip deliberately keeps them transparent over its own
+	// surface), and every <option> then inherits a THEMED text color over a
+	// TRANSPARENT background. The element itself renders fine; the popup
+	// does not: the browser paints the popup's base itself, so a
+	// transparent-background option mixes OUR foreground with the UA's
+	// background — which is exactly how dark mode produced light-gray text
+	// on a bright-white list (verified live with computed styles,
+	// 2026-08-15). Pinning BOTH sides of every option to the same token
+	// pair means the popup can never combine colors from two different
+	// theme systems, whatever the page did to the <select> around it.
+	css.Global("select option",
+		css.Raw("background-color", string(Color(RoleSurface))),
+		css.Raw("color", string(Color(RoleText))),
+	)
 
 	// Tabular numerals, decided once, here. The direction doc calls this
 	// non-negotiable for "every column of counts, costs, tokens and

@@ -376,28 +376,42 @@ func renderSecurity() ui.Node {
 				h.ClassStr("af-error"), h.Text(t("settings.security.sessions.revokeError")))),
 			screenWrapperRetry(sessionState, sessionsErr.Get(),
 				func() { loadSessions(sessions, sessionsLoading, sessionsErr) },
-				affui.VirtualTable(affui.VirtualTableProps{
-					T: t, ID: "settings-sessions-table", CaptionKey: "settings.security.sessions.caption",
-					// Weighted, because these five columns hold very
-					// different amounts of text and equal fifths served none
-					// of them: a full user-agent string got the same width as
-					// a "Yes"/"No" and was cut mid-word, while Current and
-					// Last seen sat mostly empty. Device gets the room it
-					// needs; the rest get what their content actually is.
-					Columns: []affui.TableColumn{
-						{ID: "device", LabelKey: "settings.security.sessions.col.device", Weight: 4},
-						{ID: "ip", LabelKey: "settings.security.sessions.col.ip", Mono: true, Weight: 2},
-						{ID: "lastSeen", LabelKey: "settings.security.sessions.col.lastSeen", Weight: 2},
-						{ID: "current", LabelKey: "settings.security.sessions.col.current", Weight: 1.2},
-						{ID: "actions", LabelKey: "settings.security.sessions.col.actions", Weight: 1.6},
-					},
-					Rows: sessionRows, RowKeys: sessionRowKeys,
-					// The revoke button is taller than a line of text, so the row
-					// height is stated rather than defaulted — VirtualList sizes
-					// its spacers from this number, and a row that renders taller
-					// than it claims makes the scrollbar drift.
-					RowHeight: 44,
-				})),
+				// af-table-wrap: .af-settings-card's CSS grid gives a direct
+				// child one `minmax(20rem, 1fr)` track by default, and
+				// StatePanel's populated branch returns a bare Fragment, so
+				// without this wrapper VirtualTable's root lands as that
+				// direct child and is squeezed to ~20rem — every column
+				// (including the IP address this table exists to show)
+				// truncated to a few characters at any viewport width. This
+				// class already had the full-width override in styles.go
+				// (`.af-settings-card > .af-table-wrap { grid-column: 1/-1 }`)
+				// but nothing ever carried the class, so the rule matched
+				// nothing. Table's own call sites don't need this because
+				// Table's markup is a real <table>, matched by the sibling
+				// `.af-settings-card > table` selector directly.
+				h.Div(h.ClassStr("af-table-wrap"),
+					affui.VirtualTable(affui.VirtualTableProps{
+						T: t, ID: "settings-sessions-table", CaptionKey: "settings.security.sessions.caption",
+						// Weighted, because these five columns hold very
+						// different amounts of text and equal fifths served none
+						// of them: a full user-agent string got the same width as
+						// a "Yes"/"No" and was cut mid-word, while Current and
+						// Last seen sat mostly empty. Device gets the room it
+						// needs; the rest get what their content actually is.
+						Columns: []affui.TableColumn{
+							{ID: "device", LabelKey: "settings.security.sessions.col.device", Weight: 4},
+							{ID: "ip", LabelKey: "settings.security.sessions.col.ip", Mono: true, Weight: 2},
+							{ID: "lastSeen", LabelKey: "settings.security.sessions.col.lastSeen", Weight: 2},
+							{ID: "current", LabelKey: "settings.security.sessions.col.current", Weight: 1.2},
+							{ID: "actions", LabelKey: "settings.security.sessions.col.actions", Weight: 1.6},
+						},
+						Rows: sessionRows, RowKeys: sessionRowKeys,
+						// The revoke button is taller than a line of text, so the row
+						// height is stated rather than defaulted — VirtualList sizes
+						// its spacers from this number, and a row that renders taller
+						// than it claims makes the scrollbar drift.
+						RowHeight: 44,
+					}))),
 			// Say what was left out. A list that truncates silently is how
 			// someone concludes a session is gone when it is only off-list.
 			h.Show(hiddenRevoked > 0, h.P(h.ClassStr("af-field-help"),

@@ -176,6 +176,20 @@ else
 fi
 install -d -m 0755 /var/www/certbot
 
+# Shared http-context config (rate-limit zones) must land in conf.d, not
+# sites-available: it is included from inside nginx.conf's `http` block, which
+# is the only context limit_req_zone is legal in. Installed BEFORE the vhosts
+# below, because a vhost's `limit_req zone=feeds` fails config validation if
+# the zone it names does not exist yet.
+if [ -f "$DEPLOY_DIR/nginx/aff-limits.conf" ]; then
+    if [ -f /etc/nginx/conf.d/aff-limits.conf ]; then
+        skip "aff-limits.conf already installed at /etc/nginx/conf.d/aff-limits.conf"
+    else
+        install -m 0644 "$DEPLOY_DIR/nginx/aff-limits.conf" /etc/nginx/conf.d/aff-limits.conf
+        done_ "installed /etc/nginx/conf.d/aff-limits.conf"
+    fi
+fi
+
 install_vhost() {
     src="$1"
     name="$(basename "$src")"

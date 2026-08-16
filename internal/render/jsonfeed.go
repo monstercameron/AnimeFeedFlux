@@ -104,7 +104,7 @@ func JSONFeed(c model.Channel) ([]byte, error) {
 			ContentHTML:   sanitizeXMLText(itemBodyWithAnswer(it)),
 			URL:           it.Link,
 			Title:         sanitizeXMLText(it.Title),
-			Summary:       sanitizeXMLText(it.SummaryText),
+			Summary:       sanitizeXMLText(it.RenderCardText()),
 			DatePublished: RFC3339(it.PublishedAt),
 			Tags:          it.Tags,
 		})

@@ -149,9 +149,10 @@ func (x *LinkVerdict) GetOk() bool {
 	return false
 }
 
-// SampleCandidate is one generated-but-unpublished item, shown three ways
-// per PLAN.md §12.3: rendered, raw fields, and the exact feed XML fragment
-// that would be emitted.
+// SampleCandidate is one generated-but-unpublished item, shown five ways per
+// PLAN.md §12.3: rendered, raw fields, the exact feed XML fragment that would
+// be emitted, the embed document it would appear in (§6.1), and the Slack
+// card — the last being the one §12.3 calls "the one that matters".
 type SampleCandidate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Server-assigned handle used by PromoteSample (ItemService) and
@@ -170,7 +171,14 @@ type SampleCandidate struct {
 	// Approximates what actually gets read: title link + plain-text summary,
 	// so a trivia answer leaking into summary_text is visible immediately
 	// (PLAN.md §12.3, §5.5).
-	SlackPreviewText string          `protobuf:"bytes,21,opt,name=slack_preview_text,json=slackPreviewText,proto3" json:"slack_preview_text,omitempty"`
+	SlackPreviewText string `protobuf:"bytes,21,opt,name=slack_preview_text,json=slackPreviewText,proto3" json:"slack_preview_text,omitempty"`
+	// The complete embed document this candidate would appear in (§6.1),
+	// rendered through the same render.Embed the /embed/{slug} route uses.
+	// A whole document rather than a fragment because that is what the
+	// renderer produces and what the client displays — the client shows it in
+	// a sandboxed iframe, so a fragment would need the client to reassemble a
+	// document and get the styling right a second way.
+	EmbedPreviewHtml string          `protobuf:"bytes,22,opt,name=embed_preview_html,json=embedPreviewHtml,proto3" json:"embed_preview_html,omitempty"`
 	Novelty          *NoveltyVerdict `protobuf:"bytes,30,opt,name=novelty,proto3" json:"novelty,omitempty"`
 	// Only populated for grounded feeds.
 	LinkVerdicts []*LinkVerdict `protobuf:"bytes,31,rep,name=link_verdicts,json=linkVerdicts,proto3" json:"link_verdicts,omitempty"`
@@ -273,6 +281,13 @@ func (x *SampleCandidate) GetRenderedXml() string {
 func (x *SampleCandidate) GetSlackPreviewText() string {
 	if x != nil {
 		return x.SlackPreviewText
+	}
+	return ""
+}
+
+func (x *SampleCandidate) GetEmbedPreviewHtml() string {
+	if x != nil {
+		return x.EmbedPreviewHtml
 	}
 	return ""
 }
@@ -979,7 +994,7 @@ const file_aff_v1_sample_proto_rawDesc = "" +
 	"\x12nearest_item_title\x18\x04 \x01(\tR\x10nearestItemTitle\"/\n" +
 	"\vLinkVerdict\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x0e\n" +
-	"\x02ok\x18\x02 \x01(\bR\x02ok\"\x87\x04\n" +
+	"\x02ok\x18\x02 \x01(\bR\x02ok\"\xb5\x04\n" +
 	"\x0fSampleCandidate\x12!\n" +
 	"\fcandidate_id\x18\x01 \x01(\tR\vcandidateId\x12\x14\n" +
 	"\x05title\x18\n" +
@@ -992,7 +1007,8 @@ const file_aff_v1_sample_proto_rawDesc = "" +
 	"\vsource_name\x18\x0f \x01(\tR\n" +
 	"sourceName\x12!\n" +
 	"\frendered_xml\x18\x14 \x01(\tR\vrenderedXml\x12,\n" +
-	"\x12slack_preview_text\x18\x15 \x01(\tR\x10slackPreviewText\x120\n" +
+	"\x12slack_preview_text\x18\x15 \x01(\tR\x10slackPreviewText\x12,\n" +
+	"\x12embed_preview_html\x18\x16 \x01(\tR\x10embedPreviewHtml\x120\n" +
 	"\anovelty\x18\x1e \x01(\v2\x16.aff.v1.NoveltyVerdictR\anovelty\x128\n" +
 	"\rlink_verdicts\x18\x1f \x03(\v2\x13.aff.v1.LinkVerdictR\flinkVerdicts\x12\x1b\n" +
 	"\ttokens_in\x18( \x01(\x05R\btokensIn\x12\x1d\n" +

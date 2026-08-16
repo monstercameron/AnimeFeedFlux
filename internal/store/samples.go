@@ -380,14 +380,18 @@ func (s *Store) promoteOnce(ctx context.Context, sampleID int64, item model.Item
 
 	item.PublishedAt = stamp
 	now := formatTime(time.Now())
+	formatsJSON, ferr := encodeFormats(item.Formats)
+	if ferr != nil {
+		return 0, ferr
+	}
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO items (feed_id, item_key, content_hash, title, summary_text, body_html,
-		                    answer_html, link, source_name, published_at, origin,
+		                    answer_html, link, source_name, formats_json, published_at, origin,
 		                    created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.FeedID, item.ItemKey, item.ContentHash, item.Title, item.SummaryText, item.BodyHTML,
 		nullString(item.AnswerHTML), nullString(item.Link), nullString(item.SourceName),
-		formatTime(stamp), string(item.Origin), now, now)
+		formatsJSON, formatTime(stamp), string(item.Origin), now, now)
 	if err != nil {
 		return 0, fmt.Errorf("inserting item: %w", err)
 	}

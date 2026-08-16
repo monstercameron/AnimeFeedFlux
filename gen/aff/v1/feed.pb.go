@@ -370,6 +370,17 @@ func (x *SourceSpec) GetKind() string {
 // a later group.
 type FeedSpec struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// ScheduleMode is HOW the feed's schedule is interpreted (§7 revision
+	// 2026-08-15). "" or "scheduled": the cron/recurrence below fires runs —
+	// the default and the only pre-revision behaviour. "adhoc": the scheduler
+	// never fires this feed; Run Now is its only trigger, and staleness
+	// monitoring exempts it. "watch": the schedule is a CHECK cadence, not a
+	// publish cadence — the run fires on schedule but the model may answer
+	// "nothing noteworthy" and the run quietly skips (reason
+	// nothing_noteworthy), with no repair retry, no novelty re-roll, and no
+	// staleness alarm for the quiet stretches that are this mode's whole
+	// point.
+	ScheduleMode string `protobuf:"bytes,41,opt,name=schedule_mode,json=scheduleMode,proto3" json:"schedule_mode,omitempty"`
 	// Standard cron expression, evaluated in `timezone` — never UTC-normalized
 	// client-side, or "7am" silently drifts across DST (PLAN.md §7).
 	//
@@ -439,6 +450,13 @@ func (x *FeedSpec) ProtoReflect() protoreflect.Message {
 // Deprecated: Use FeedSpec.ProtoReflect.Descriptor instead.
 func (*FeedSpec) Descriptor() ([]byte, []int) {
 	return file_aff_v1_feed_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *FeedSpec) GetScheduleMode() string {
+	if x != nil {
+		return x.ScheduleMode
+	}
+	return ""
 }
 
 func (x *FeedSpec) GetCron() string {
@@ -2045,8 +2063,9 @@ const file_aff_v1_feed_proto_rawDesc = "" +
 	"\n" +
 	"SourceSpec\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x12\n" +
-	"\x04kind\x18\x02 \x01(\tR\x04kind\"\x8c\x04\n" +
-	"\bFeedSpec\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\"\xb1\x04\n" +
+	"\bFeedSpec\x12#\n" +
+	"\rschedule_mode\x18) \x01(\tR\fscheduleMode\x12\x12\n" +
 	"\x04cron\x18\x01 \x01(\tR\x04cron\x12\x1a\n" +
 	"\btimezone\x18\x02 \x01(\tR\btimezone\x122\n" +
 	"\n" +

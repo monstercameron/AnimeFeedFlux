@@ -221,8 +221,19 @@ func emitSettingsStyles() {
 	// unrelated halves.
 	css.Global(".af-settings-card > h2, .af-settings-card > h3, .af-settings-card > h4, "+
 		".af-settings-card > p, .af-settings-card > table, .af-settings-card > .af-settings-card-header, "+
-		".af-settings-card > .af-table-wrap, .af-settings-card > .af-profiles, "+
+		".af-settings-card > .af-profiles, "+
 		".af-settings-card > .af-cost-chart, .af-settings-card > .af-settings-actions",
+		css.Raw("grid-column", "1 / -1"),
+	)
+	// .af-table-wrap gets its own rule, not folded into the combined selector
+	// above: scripts/check-styles.sh's check (b) only reads the FIRST token of
+	// a multi-selector string (documented in its own header — a source-level
+	// diff, not a browser one), so a class buried mid-string there reads as
+	// "used but no rule" the moment something actually uses it, even though
+	// the rule is real. Wraps VirtualTable (web/ui/virtualtable.go), whose
+	// root StatePanel returns bare with no wrapper element of its own — see
+	// render_security.go's active-sessions table, the one caller today.
+	css.Global(".af-settings-card > .af-table-wrap",
 		css.Raw("grid-column", "1 / -1"),
 	)
 	css.Global(".af-settings-section > .af-settings-card:first-child",
@@ -358,6 +369,140 @@ func emitSettingsStyles() {
 		css.PaddingX(tokens.Space(2)),
 	)
 	css.Global(".af-profiles__remove:hover", css.TextColor(tokens.Color(tokens.RoleDanger)))
+
+	// --- Provider cards ----------------------------------------------------
+	//
+	// One card per configured provider (2026-08-15 redesign). The grid
+	// auto-fills so two cards sit side by side on a desktop and stack on a
+	// phone with no breakpoint of their own.
+	css.Global(".af-providers",
+		css.Display.Grid,
+		css.Raw("grid-template-columns", "repeat(auto-fill, minmax(20rem, 1fr))"),
+		css.Gap(tokens.Space(3)),
+	)
+	// Its own rule, not folded into the combined card-children selector:
+	// scripts/check-styles.sh reads only the first token of a multi-selector
+	// string (see .af-table-wrap's identical note above).
+	css.Global(".af-settings-card > .af-providers",
+		css.Raw("grid-column", "1 / -1"),
+	)
+	css.Global(".af-provider-card",
+		css.Display.Flex,
+		css.FlexDir.Col,
+		css.Gap(tokens.Space(3)),
+		css.Padding(tokens.Space(4)),
+		css.Rounded(tokens.Radius(tokens.RadiusMd)),
+		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
+		css.Bg(tokens.Color(tokens.RoleSurface)),
+		css.Raw("min-width", "0"),
+	)
+	// The active card is the one visual emphasis on this screen: accent
+	// border plus a matching inset rail on the reading edge, so it reads at
+	// a glance in a grid of otherwise identical cards.
+	css.Global(".af-provider-card--active",
+		css.Border(css.Px(1), tokens.Color(tokens.RoleAccent)),
+		css.Raw("box-shadow", "inset 3px 0 0 0 "+string(tokens.Color(tokens.RoleAccent))),
+	)
+	css.Global(".af-provider-card--add",
+		css.Raw("border-style", "dashed"),
+		css.Items.Start,
+		css.Justify.Center,
+		css.Bg(css.Color("transparent")),
+	)
+	css.Global(".af-provider-card__header",
+		css.Display.Flex,
+		css.Raw("align-items", "flex-end"),
+		css.Justify.Between,
+		css.Gap(tokens.Space(3)),
+	)
+	css.Global(".af-provider-card__header h4",
+		css.Raw("margin", "0"),
+		css.FontSize(tokens.FontSize(tokens.TextBase)),
+	)
+	css.Global(".af-provider-card__name",
+		css.Raw("flex", "1 1 auto"),
+		css.Raw("min-width", "0"),
+	)
+	css.Global(".af-provider-card__field",
+		css.Display.Flex,
+		css.FlexDir.Col,
+		css.Gap(tokens.Space(1)),
+	)
+	// Card inputs fill the card, overriding the stacked-form 30rem cap —
+	// the card itself is the measure here.
+	css.Global(".af-provider-card input",
+		css.W(css.Length("100%")),
+		css.MaxWidth(css.Length("100%")),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+	)
+	css.Global(".af-provider-card__key-row",
+		css.Display.Flex,
+		css.Gap(tokens.Space(2)),
+		css.Items.Center,
+	)
+	css.Global(".af-provider-card__key-row input",
+		css.Raw("flex", "1 1 auto"),
+		css.Raw("min-width", "0"),
+	)
+	css.Global(".af-provider-card__key-state",
+		css.FontSize(tokens.FontSize(tokens.TextXs)),
+		css.Raw("margin", "0"),
+	)
+	css.Global(".af-provider-card__active",
+		css.FontSize(tokens.FontSize(tokens.TextXs)),
+		css.FontWeight.Medium,
+		css.TextColor(tokens.Color(tokens.RoleAccentFg)),
+		css.Bg(tokens.Color(tokens.RoleAccent)),
+		css.Rounded(tokens.Radius(tokens.RadiusFull)),
+		css.PaddingX(tokens.Space(3)),
+		css.PaddingY(tokens.Space(1)),
+		css.Raw("white-space", "nowrap"),
+	)
+	css.Global(".af-provider-card__footer",
+		css.Display.Flex,
+		css.Justify.End,
+	)
+	css.Global(".af-provider-card__remove",
+		css.Raw("border", "0"),
+		css.Bg(css.Color("transparent")),
+		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+		css.Cursor.Pointer,
+		css.PaddingX(tokens.Space(2)),
+		css.PaddingY(tokens.Space(1)),
+	)
+	css.Global(".af-provider-card__remove:hover", css.TextColor(tokens.Color(tokens.RoleDanger)))
+
+	// --- Price table sizing ------------------------------------------------
+	//
+	// The table's inputs sized to their content, which for a fresh row is a
+	// two-character sliver ("gp" was all that showed of a model id), and the
+	// table itself hugged the left of a full-width card. Fixed layout +
+	// full-width inputs make the three columns share the card and every
+	// cell's value legible.
+	css.Global("#settings-price-table",
+		css.W(css.Length("100%")),
+		css.Raw("table-layout", "fixed"),
+		// Below this the fixed layout would crush the model column to a
+		// two-character sliver; instead the table keeps its shape and the
+		// primitive's own overflow container scrolls (its D5-01 design).
+		css.Raw("min-width", "34rem"),
+	)
+	css.Global("#settings-price-table input",
+		css.W(css.Length("100%")),
+		css.MaxWidth(css.Length("100%")),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+	)
+	// The model cell is a select now (linked to the provider's model list);
+	// same fill-the-cell sizing as the inputs beside it.
+	css.Global("#settings-price-table select",
+		css.W(css.Length("100%")),
+		css.MaxWidth(css.Length("100%")),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+	)
+	css.Global("#settings-price-table input[type=\"number\"]",
+		css.Raw("text-align", "right"),
+	)
 
 	// --- Spend chart -------------------------------------------------------
 	//

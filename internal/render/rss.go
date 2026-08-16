@@ -115,7 +115,10 @@ func writeItem(b *bytes.Buffer, c model.Channel, it model.Item) {
 	// trivia answer — Slack renders exactly this field verbatim with no
 	// markup support, so leaking either here spoils the channel preview
 	// (§5.5). BodyHTML/AnswerHTML only ever reach content:encoded below.
-	writeElem(b, "      ", "description", it.SummaryText)
+	// RenderCardText prefers stage 2's card-optimized variant (§9,
+	// two-stage generation) and falls back to SummaryText; both carry the
+	// same no-answer guarantee.
+	writeElem(b, "      ", "description", it.RenderCardText())
 
 	b.WriteString("      <content:encoded>")
 	b.WriteString(CDATA(itemBodyWithAnswer(it)))
@@ -146,8 +149,13 @@ func writeItem(b *bytes.Buffer, c model.Channel, it model.Item) {
 // description/summary/og:description by construction: there is no code path
 // that copies this field's contents back into a plain-text field.
 func itemBodyWithAnswer(it model.Item) string {
+	// RenderFeedHTML prefers stage 2's feed-reader-optimized variant and
+	// falls back to BodyHTML — applied HERE, in the one shared helper, so
+	// the three formats keep their never-disagree property with variants
+	// exactly as they had it with raw fields.
+	body := it.RenderFeedHTML()
 	if !it.HasAnswer() {
-		return it.BodyHTML
+		return body
 	}
-	return it.BodyHTML + `<hr class="spoiler-break"/><p><strong>Answer:</strong> ` + it.AnswerHTML + `</p>`
+	return body + `<hr class="spoiler-break"/><p><strong>Answer:</strong> ` + it.AnswerHTML + `</p>`
 }

@@ -18,6 +18,194 @@ The number stays in the `0.0.x-dev` range through the build phases, and the firs
 
 ## [Unreleased]
 
+### Added — 2026-08-15, feeds choose how they run: scheduled, ad hoc, or watching for events
+
+- **Every feed now has a "Runs" mode** beside its schedule. *On a schedule* is today's behaviour and
+  stays the default. *Only when I run it* makes a feed manual: nothing fires automatically, Run Now
+  is the only trigger, and the feed is never flagged stale. *On a schedule, post only when something
+  happens* turns the schedule into a check: the model looks for something worth posting each firing,
+  and a quiet check skips silently (recorded as "nothing noteworthy") instead of forcing content —
+  no retry pressure, and quiet stretches never raise staleness alerts.
+- **Watching the live web:** pair the watch mode with a grounded feed and its sources become the
+  check — every scheduled firing fetches them fresh, the model releases an item only for a genuine,
+  new development, and a check that fetches nothing skips before spending a single model call.
+- The schedule builder hides for ad-hoc feeds, and a saved-but-unused schedule no longer blocks
+  saving them; switching back revalidates it. Recipe TOML round-trips the new field.
+- **The scheduler is now always visible.** It moved out of the collapsed "Recipe settings" drawer —
+  where it was two interactions deep and effectively undiscoverable — into its own Schedule section
+  of the feed workbench, shown whenever a feed is loaded. The drawer keeps the set-once fields
+  (slug, budgets, window, sources) and its label now says so.
+
+### Fixed — 2026-08-15, dropdowns: dark-mode option lists and the select-swap mis-selection
+
+- **Dark mode no longer shows bright-white dropdown option lists.** The browser paints a select's
+  popup itself and was still using the OS color scheme; the app now declares `color-scheme` on the
+  same theme switch that drives the palettes, so native widget chrome follows the in-app theme
+  everywhere.
+- The settings page's model menus — including every price-table row — got the same guard the
+  /generate model picker already had against the browser mis-selecting an option while a menu swaps
+  in from its loading state.
+
+### Changed — 2026-08-15, generation is two-stage and feeds inherit the global model
+
+- **Each feed's model now defaults to the global model chosen in Settings.** A recipe that pins a
+  model keeps it (per-feed values are overrides); one that doesn't runs on the Settings default —
+  picked up live, so changing the global model applies from the next run without touching any feed.
+  The feed editor's model menu says so: "Global default (from Settings)".
+- **Generation now runs in two stages.** Stage 1 produces the raw item fields exactly as before.
+  Stage 2 asks the model to reformat those fields once per output surface — the feed XML body for
+  reader apps, the Slack card text, the embed-widget line, and the item's own page — so each is
+  optimized for how it renders instead of all four sharing one string. Every variant is re-validated
+  (sanitizer, absolute links, plain-text and no-spoiler rules) and any that fails simply isn't used:
+  a surface without a variant renders from the raw fields, exactly as every existing item does.
+  Editing an item clears its variants. Runs spend one extra model call per published item, counted
+  into the run's cost estimate.
+
+### Changed — 2026-08-15, providers become cards, and API keys are configured in the UI
+
+- **/settings/provider is redesigned around provider cards**: one card per provider — the built-in
+  OpenAI default first, then every endpoint you add — with the active one marked and switching a
+  one-click "Use this provider" on the card itself. The separate endpoint dropdown is gone.
+- **API keys are now configured on this page and stored encrypted on the server** (with the same
+  secret key that protects the two-factor secret). A key is write-only: paste it, save, and the page
+  reports only "stored" — it is never shown again, only replaced or removed. Environment-variable
+  keys (`SCHEMAFLUX_API_KEY`, a profile's named variable) still work as a dev/bootstrap fallback,
+  and a stored key takes precedence over them.
+- **The backend field is a menu now** (OpenAI, Anthropic, OpenRouter, Cerebras, DeepSeek, Qwen,
+  Z.ai) instead of a typed string the server might reject.
+- **The price table shows $ per 1M tokens** — the unit providers actually publish — instead of per
+  1K; stored rates are unchanged, only the display converts. Rows can now be removed, not just
+  added, **each rate's model is picked from the provider's own model list** rather than typed (with
+  the old text input still there as a fallback whenever the list can't be fetched), and the table
+  no longer renders its model column as a two-character sliver.
+
+### Fixed — 2026-08-15, security review of the whole tree
+
+- **Trivia answers were published without being sanitised.** Every writer into an item sanitised
+  `body_html` and none of them sanitised `answer_html`, while the permalink page and the RSS
+  `content:encoded` element write both into the document completely unescaped. Model-authored
+  markup in an answer — a `<script>` tag, an `onerror` attribute — therefore reached
+  `anime.earlcameron.com` and every subscriber's reader verbatim. Both fields now go through the
+  sanitiser on every path, and an answer containing a relative link is rejected under the same
+  rule bodies already followed.
+- **The item RPCs did no sanitising at all.** Creating, editing, promoting a sampled candidate or
+  publishing a correction wrote the submitted markup straight to the database; only the generation
+  pipeline sanitised. All four now go through one shared gate.
+- **Login rate limiting did not work behind nginx.** Every connection arrives through the proxy, so
+  the per-IP backoff saw one address for all callers and collapsed into a single global counter —
+  meaning one attacker's failed attempts throttled the real operator, and `auth_events.ip` recorded
+  the proxy for every login ever attempted. The real client address is now carried through from the
+  upgrade request.
+- **Re-proving your password was not rate limited.** Changing the password, regenerating recovery
+  codes, re-enrolling TOTP and downloading a backup all ask for the current password and TOTP code
+  again, and none of them counted a wrong answer. Anyone holding a stolen session could guess at
+  full speed. They are now subject to the same backoff as signing in, and a backup attempt —
+  successful or not — is recorded in the audit log, which it previously was not.
+- **A provider profile could read any environment variable.** `api_key_env` names a variable and
+  `base_url` names a host, both operator-supplied, so a profile could send `AFF_SECRET_KEY` or
+  `AFF_PASSWORD_PEPPER` — the two secrets specifically kept out of the database — to an arbitrary
+  endpoint. Only third-party-provider-shaped names are read now, and this application's own
+  variables never are.
+- **The public rate limit was never in force.** `limit_req_zone` sat in the wrong nginx block, which
+  nginx rejects outright, so the config would have failed to load on first deploy. The zone moves to
+  `deploy/nginx/aff-limits.conf`, installed into `conf.d/` by the bootstrap script.
+- **The example environment file's placeholder secrets booted cleanly.** `AFF_SECRET_KEY` is long
+  enough to clear the length floor while still being a value published in this repository, so
+  installing the example verbatim encrypted the TOTP secret under a known key. Placeholder values
+  are now refused at startup.
+
+### Added — 2026-08-15, feeds can be embedded in someone else's page (PLAN.md §6.1)
+
+- **A new public route, `GET /embed/{slug}`,** serves a small self-contained HTML page listing a
+  feed's newest items — a title, a summary and a UTC timestamp per item, plus a subscribe link —
+  designed to be pulled into any website with an `<iframe>`. The feed index at `/` now carries a
+  copyable snippet and an "Embed" link for every feed.
+- Two optional parameters: `count` (5, 10 or 20; default 10) and `theme` (`light`, `dark` or `auto`;
+  default `auto`, which follows the reader's own colour scheme). Any other value is a `404` rather
+  than being rounded to the nearest accepted one.
+- The page loads nothing from anywhere — no script, no font, no image — and shows each item's plain
+  summary only. Trivia answers cannot appear on it.
+- **The sampler gained a fifth candidate view, "Embed",** next to Rendered / Raw fields / Feed XML /
+  Slack card. Unlike the others it is not text: it shows the actual embed page the candidate would
+  appear in, live, in a sandboxed frame — so "what will this look like on someone's site" is
+  answered before promoting rather than after publishing.
+- **Fixed: a sampled candidate previewed with a year-0001 date.** `generate.Sample` never assigns a
+  `published_at` (it is stamped at promote time), so both the Feed XML view and the new embed preview
+  rendered the zero time — visibly as "1 Jan 0001, 00:00 UTC" in the embed, and as a `pubDate` every
+  date rule in the feed validator treats as an error in the XML. Previews now use the timestamp
+  promoting would assign. Separately, the embed itself never renders a missing date at all.
+- **Behaviour change to every other route:** responses now carry
+  `Content-Security-Policy: frame-ancestors 'none'`. Feed documents, permalinks and the index can no
+  longer be displayed inside a frame on another site; `/embed/{slug}` is the one route that can.
+
+### Added — 2026-08-15, first-run setup moves into the browser (TODOS.md D1-13)
+
+- **A new one-time `/setup` page creates the admin account from the browser** — the web counterpart
+  of `aff admin init`, which remains available. Enter a password (same 15–128-character NIST policy),
+  and the page shows the authenticator QR URI and the ten recovery codes exactly once, gated behind an
+  "I've saved these" confirmation before it lets you leave for sign-in. The page works only while no
+  admin account exists; on an already-set-up system every attempt gets one generic "already set up"
+  response. Note the deliberate trade-off: on a fresh or freshly-reset deployment, whoever reaches
+  `/setup` first claims the instance — set up promptly after deploying or resetting.
+
+### Fixed — 2026-08-15, a real Preview failure was rendering as silence (TODOS.md D2-35)
+
+- A grounded feed's Preview button did nothing visible: no error, no candidate, just a quiet return to
+  "No candidates yet." The server was actually replying with a precise explanation (grounded-feed
+  source fetching isn't implemented in this build yet) but left its `ErrorKind` field at its zero
+  value, and the client only checked that field to decide whether to show an error — so a real,
+  legible failure message was silently discarded. Fixed to surface the message whenever it's
+  non-empty, not only when the server also classified it into the error taxonomy.
+- Also removed a leftover duplicate: opening "Recipe settings" on any feed showed the same System/User
+  Prompt text a second time, in its own boxed form, left over from before prompts moved to the top of
+  the page. Removed the duplicate; the recipe drawer now only holds the fields it's titled for
+  (slug, schedule, budgets, sources).
+
+### Changed — 2026-08-15, /generate's feed list becomes a real sidebar, not another section (TODOS.md D2-34)
+
+- Three earlier passes at "/generate feels wrong" (D2-31, D2-32, D2-33) all kept the same
+  single-column skeleton — sticky strip, then a "Feeds" section, then the work area, then a recipe
+  disclosure — and only restyled what was inside it. Flagged directly: "you kept giving me the same
+  fundamental layout." Fixed with a genuinely different structure: a persistent, compact,
+  independently-scrolling sidebar (every feed, always visible, no cap or pager) beside a main column
+  holding everything about whichever one feed is loaded.
+- This also properly closes D2-33's "two scrolls with dependencies" bug rather than avoiding it:
+  sibling columns with independent scroll regions, verified live with a 20-feed stress test —
+  scrolling the sidebar does not move the page, and scrolling the page does not move the sidebar.
+- Two real CSS bugs caught along the way: `align-self: flex-start` (needed for the desktop sticky
+  sidebar) silently disabled the narrow-viewport column stretch and overflowed the page 136px past a
+  390px viewport; and a nested-flexbox ellipsis trap where `min-width: 0` was missing at an inner flex
+  level, so a long feed title refused to shrink and overflowed its row.
+
+### Added — 2026-08-11, schedules are built, not written in cron
+
+- **The cron text field is gone from the feed editor**, replaced by a builder: *every N
+  days/weeks/months/years*, weekday chips for weekly, "day of the month" or "the second Tuesday" for
+  monthly, a time picker, and a "starting on" date. Cron survives behind a "use a cron expression
+  instead" checkbox for the shapes the builder deliberately does not cover.
+- **This was not a cosmetic change.** Cron cannot express most human schedules at all: `*/2` in the
+  day-of-week field means every second weekday *number*, not every second week, so **"every other
+  Thursday" had no cron expression** — nor did "every 3 weeks", "every 6 months" (except by luck) or
+  "the second Tuesday". The old field was a box in which the correct answer could not be written, and
+  an approximation ran on the wrong days without complaining.
+- **The editor now shows the next five actual firing times**, recomputed as you change the controls
+  and before anything is saved. That is what makes "every other Thursday" checkable rather than
+  something to trust — it answers *which* Thursdays. `TODOS.md` D2-09 asked for this and recorded it
+  as impossible because no RPC returns fire times; no RPC is needed, since the scheduling engine is
+  ordinary Go that compiles to wasm.
+- Schedules keep the DST guarantees the cron engine already had: local wall-clock time across
+  transitions, a run in the spring-forward gap fires at the first valid instant, and a run in the
+  repeated fall-back hour fires once.
+
+### Fixed — 2026-08-11, the browser was rendering every timestamp in UTC
+
+- `time.LoadLocation` reads a filesystem, and a browser has none — so every `LoadLocation` in `web/`
+  failed and silently fell back to UTC while the label beside it still named the feed's timezone. A
+  feed scheduled "7am America/New_York" displayed its times five hours off, with nothing to indicate
+  a failure. The timezone database is now compiled into the bundle (~450KB). It does not reproduce
+  under `go test`: node has a filesystem, so only a real browser breaks.
+
+
 ### Fixed — 2026-08-11, an expired session no longer strands you on a dead page
 
 - **The session-expiry pathway was never reachable.** `EvSessionExpired` had a state transition, an

@@ -558,3 +558,99 @@ func TestJSONFeed_DatePublishedRFC3339(t *testing.T) {
 		t.Fatalf("expected §5.3 date-published-rfc3339 finding, got %+v", findings)
 	}
 }
+
+// ---- Embed (§6.1) ----
+
+// validEmbed is the shape internal/render/embed.go emits: a complete
+// document, noindex, one inline <style>, and nothing fetched.
+const validEmbed = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<title>Trivia Daily</title>
+<style>
+body{margin:0;background:var(--bg)}
+</style>
+</head>
+<body>
+<section class="aff">
+<ol class="aff-items">
+<li class="aff-item"><time class="aff-when" datetime="2026-08-09T12:00:00Z">9 Aug 2026<br>12:00 UTC</time>
+<div class="aff-text"><span class="aff-title"><a href="https://example.com/a" target="_blank" rel="noopener noreferrer">An item</a></span></div>
+</li>
+</ol>
+</section>
+</body>
+</html>
+`
+
+func TestEmbedCleanDocumentPasses(t *testing.T) {
+	if f := Embed([]byte(validEmbed)); len(f) != 0 {
+		t.Fatalf("clean embed produced findings: %+v", f)
+	}
+}
+
+func TestEmbedRejectsWhatMakesItUnsafeToFrame(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  string
+		rule string
+	}{
+		{
+			"script element",
+			strings.Replace(validEmbed, "<style>", "<script src=\"https://cdn.example.com/x.js\"></script>\n<style>", 1),
+			"embed-self-contained",
+		},
+		{
+			"external stylesheet",
+			strings.Replace(validEmbed, "<style>", "<link rel=\"stylesheet\" href=\"https://cdn.example.com/x.css\">\n<style>", 1),
+			"embed-self-contained",
+		},
+		{
+			"remote image",
+			strings.Replace(validEmbed, "<section", "<img src=\"https://tracker.example.com/px.gif\">\n<section", 1),
+			"embed-self-contained",
+		},
+		{
+			"css import",
+			strings.Replace(validEmbed, "body{", "@import url(\"https://cdn.example.com/x.css\");\nbody{", 1),
+			"embed-self-contained",
+		},
+		{
+			"inline handler",
+			strings.Replace(validEmbed, `<span class="aff-title">`, `<span class="aff-title" onmouseover="steal()">`, 1),
+			"embed-no-inline-handlers",
+		},
+		{
+			"missing noindex",
+			strings.Replace(validEmbed, "<meta name=\"robots\" content=\"noindex\">\n", "", 1),
+			"embed-noindex",
+		},
+		{
+			"fragment, not a document",
+			strings.Replace(validEmbed, "<!doctype html>\n", "", 1),
+			"embed-complete-document",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := Embed([]byte(tc.doc))
+			if len(findings) == 0 {
+				t.Fatalf("%s produced no findings", tc.name)
+			}
+			var found bool
+			for _, f := range findings {
+				if strings.Contains(f.Rule, tc.rule) {
+					found = true
+				}
+				if f.Level != Error {
+					t.Errorf("finding %q is a %s; every embed rule is an error", f.Rule, f.Level)
+				}
+			}
+			if !found {
+				t.Errorf("want a %s finding, got %+v", tc.rule, findings)
+			}
+		})
+	}
+}

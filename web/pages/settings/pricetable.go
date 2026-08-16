@@ -3,6 +3,7 @@
 package settings
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -19,6 +20,20 @@ import (
 // string ("$1,234.5000") would not.
 func floatToStr(v float64) string {
 	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// perMillionStr renders a stored per-1K rate as the per-1M value the table
+// displays. The app standardized on $ per 1M tokens (operator directive
+// 2026-08-15) — the published unit every provider quotes — but the WIRE and
+// STORED unit remains per-1K (PriceEntry.usd_per_1k_tokens_*: the field
+// name is the unit, and the settings row persists as that proto's JSON, so
+// changing the stored unit would silently re-scale every existing
+// deployment's rates by 1000×). The conversion lives entirely at this
+// display boundary, paired with updatePriceCell's ÷1000 on the way in.
+// Rounded to 9 decimals so ×1000 float noise (0.00015 → 0.15000000000000002)
+// never reaches the input.
+func perMillionStr(vPer1K float64) string {
+	return strconv.FormatFloat(math.Round(vPer1K*1000*1e9)/1e9, 'f', -1, 64)
 }
 
 // updatePriceIn/updatePriceOut apply one edited cell of the price table
@@ -48,6 +63,20 @@ func priceProblemText(t func(string, ...any) string, p PriceTableProblem) string
 	default:
 		return t("settings.provider.priceTable.err.negative", row)
 	}
+}
+
+// removePriceRow deletes one rate. Same replace-not-mutate discipline as
+// updatePriceCell. Until this existed a rate could be added but never
+// removed — a retired model's row could only be repurposed by renaming it.
+func removePriceRow(priceTable ui.State[[]*affv1.PriceEntry], index int) {
+	current := priceTable.Get()
+	if index < 0 || index >= len(current) {
+		return
+	}
+	next := make([]*affv1.PriceEntry, 0, len(current)-1)
+	next = append(next, current[:index]...)
+	next = append(next, current[index+1:]...)
+	priceTable.Set(next)
 }
 
 // updatePriceModel renames the model a rate applies to.
@@ -112,6 +141,8 @@ func updatePriceCell(priceTable ui.State[[]*affv1.PriceEntry], index int, raw st
 	if err != nil {
 		return
 	}
+	// The input is $ per 1M tokens (see perMillionStr); stored is per 1K.
+	v /= 1000
 	current := priceTable.Get()
 	if index < 0 || index >= len(current) {
 		return

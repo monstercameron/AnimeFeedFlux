@@ -1,0 +1,12 @@
+-- 0007_item_formats.sql — per-surface presentation variants (PLAN.md §9,
+-- revised 2026-08-15: generation is two-stage — stage 1 produces the raw
+-- fields, stage 2 asks the model to FORMAT those fields once per output
+-- surface, so the feed XML, the Slack card, the embed widget and the item
+-- page each get content optimized for how that surface actually renders).
+--
+-- One JSON column, not four: the variants are written together by one
+-- formatting call and read together by the renderers, they are all
+-- optional (empty string / absent key means "fall back to the raw field"),
+-- and a surface added later is a key, not a migration. '' (not NULL) is
+-- the no-formats default so scanning needs no NullString dance.
+ALTER TABLE items ADD COLUMN formats_json TEXT NOT NULL DEFAULT '';

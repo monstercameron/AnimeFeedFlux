@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -574,6 +575,15 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Session.Token is "" too — sessionTokenFromContext (internal/rpc/
 	// interceptor.go) then correctly reports no token present.
 	session.Token = rawToken
+	// Set on the same unconditional terms and for the same reason as Token
+	// above: this handler is the only place in the request lifecycle holding
+	// the *http.Request, so it is the only place that can see the forwarding
+	// headers at all. By the time a call reaches an RPC handler the HTTP
+	// request is gone and peer.FromContext reports nginx. Anonymous upgrades
+	// get it too — a failed login attempt is exactly the case where knowing
+	// the origin matters most, and an anonymous socket is the only kind a
+	// pre-login attempt can arrive on.
+	session.ClientIP = clientIPFromRequest(r)
 
 	ctx := WithSession(r.Context(), session)
 	r = r.WithContext(ctx)
@@ -620,6 +630,46 @@ func (s *server) sessionCookieHeader(r *http.Request, raw string, sess Session) 
 	// own doc comment.
 	cookieOut.Secure = s.isTLS(r)
 	return http.Header{"Set-Cookie": []string{cookieOut.String()}}
+}
+
+// clientIPFromRequest resolves the real client address for r, for Session.ClientIP.
+//
+// X-Real-IP ONLY, deliberately not X-Forwarded-For. The two are not
+// interchangeable here: X-Forwarded-For is a client-appendable LIST, and
+// nginx's $proxy_add_x_forwarded_for appends $remote_addr to whatever the
+// client already sent — so an attacker who sends `X-Forwarded-For: 1.2.3.4`
+// gets `1.2.3.4, <their real ip>` forwarded, and any parser that reads the
+// FIRST entry (the conventional one) reads a value they chose. That would
+// hand an attacker control of their own backoff bucket, which is strictly
+// worse than the single shared bucket this is fixing — they could rotate the
+// header per request and never be rate-limited at all. nginx sets X-Real-IP
+// from $remote_addr with no append, so it is exactly one hop of information
+// and cannot be influenced by the client.
+//
+// Trusting a forwarded header at all is only sound because nothing reaches
+// this listener except through nginx: compose binds the admin port to
+// 127.0.0.1 (deploy/compose.yaml), so there is no path from the internet to
+// this handler that skips the proxy and could therefore forge the header. If
+// that ever stops being true, this must become a trusted-proxy check rather
+// than an unconditional read.
+//
+// The value is validated as an IP literal before use. An unparseable header
+// is discarded rather than passed through, so nothing attacker-shaped can
+// reach a log field or a map key — a name is not an address, and a map keyed
+// on arbitrary header text is an unbounded-cardinality problem the backoff
+// sweep should not have to think about.
+func clientIPFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(r.Header.Get("X-Real-IP"))
+	if raw == "" {
+		return ""
+	}
+	if net.ParseIP(raw) == nil {
+		return ""
+	}
+	return raw
 }
 
 // hasCookie reports whether r carries a non-empty cookie named name, without

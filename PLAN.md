@@ -403,11 +403,16 @@ ever required, that is the point to revisit — not before.
 - **Login hardening:** per-IP and per-account exponential backoff, one generic failure message,
   uniform timing on unknown-user vs bad-password (always run the KDF), everything logged to
   `auth_events`.
-- **Secrets:** `SCHEMAFLUX_API_KEY` and `AFF_SECRET_KEY` from the environment, supplied by a host
-  `env_file` at mode 0600 — never in the DB, never in a recipe, never in an image layer, never
-  logged. A redaction
-  filter on the log writer scrubs anything matching known key shapes, as a backstop rather than a
-  primary control.
+- **Secrets:** `AFF_SECRET_KEY` from the environment, supplied by a host `env_file` at mode 0600 —
+  never in the DB, never in a recipe, never in an image layer, never logged. A redaction filter on
+  the log writer scrubs anything matching known key shapes, as a backstop rather than a primary
+  control. **Provider API keys are the one revision to the environment-only rule (2026-08-15,
+  Cam's directive; see DEVLOG):** in production they are configured from `/settings/provider` and
+  stored in SQLite **encrypted with `AFF_SECRET_KEY`** — the same scheme that protects the TOTP
+  secret, so a stolen database file still yields no credential — write-only over the wire (the
+  plaintext is never echoed, logged, or persisted; only replaced or removed). `SCHEMAFLUX_API_KEY`
+  and a profile's `api_key_env` remain supported as **dev/bootstrap fallbacks only**, and a stored
+  key always wins over them.
 - **Encoding is part of validation.** Model output must be valid UTF-8 and free of
   XML-illegal control characters before it is stored. Fuzzing found that neither was
   checked: a NUL or a C0 control in a title produced a feed no parser accepts (XML 1.0
@@ -619,6 +624,7 @@ GET/HEAD  /feeds/{slug}.xml       RSS 2.0
 GET/HEAD  /feeds/{slug}.atom      Atom 1.0
 GET/HEAD  /feeds/{slug}.json      JSON Feed 1.1
 GET/HEAD  /items/{item_key}       permalink page (OG tags, answer reveal for trivia)
+GET/HEAD  /embed/{slug}           embeddable item list (HTML, framable — §6.1)
 GET       /healthz                liveness + per-feed staleness
 GET       /robots.txt             allow the index and permalinks, disallow nothing important
 GET       /favicon.ico
@@ -638,6 +644,48 @@ Hardening, because this is the only thing exposed to the internet:
   ETag, and Last-Modified. A cache hit never touches SQLite. Cache is invalidated on write by the
   control plane, and rebuilt lazily.
 - No stack traces, no version banner, no directory listing, no server header beyond a static one.
+- Every response carries `Content-Security-Policy: frame-ancestors 'none'` — except `/embed/{slug}`,
+  which replaces it (§6.1). One route opts in to being framed; a plane where the others were framable
+  by silence is a phishing surface for the permalink.
+
+### 6.1 The embed (`/embed/{slug}`)
+
+A self-contained HTML document listing a feed's newest items, for a site that wants the feed
+*visible* rather than subscribable. It exists because RSS is invisible to anyone who does not
+already use a reader, and this is the only surface that puts generated items in front of that
+person.
+
+It is **an iframe document, never a script.** The rejected alternative was an `embed.js` that
+injects nodes into the host page: that puts an executable asset on the public plane, makes a
+sanitiser regression an XSS in somebody else's origin, and freezes the markup's shape forever
+because pages already carry the file. An iframe document renders in its own origin, needs no CORS,
+and leaves §2's claim about this plane — a fixed set of read-only documents, no writer — intact.
+
+- **`SummaryText` only.** Never `BodyHTML`, never `AnswerHTML`. §5.5's guarantee is what makes the
+  page spoiler-safe, exactly as it does for `og:description` on the permalink. There is deliberately
+  no option to render more.
+- **Two parameters, closed sets:** `count` ∈ {5, 10, 20} (default 10), `theme` ∈ {light, dark, auto}
+  (default auto). Anything else is a `404`, not a normalization — one URL per document, and a bounded
+  cache. This matters more here than anywhere else on the plane: an embed is fetched once per *page
+  view* on the embedding site, not once per poll, so a free-form query string would let any visitor
+  mint unbounded cache entries and evict the feed documents.
+- Cached under `{slug}:embed:{count}:{theme}`, so `Cache.Invalidate(slug)` drops every variant along
+  with the feed documents. `Last-Modified` comes from the newest item, never from `now()`.
+- `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors https:
+  http:; base-uri 'none'; form-action 'none'`. `frame-ancestors https: http:` rather than `*`,
+  because `*` matches only network schemes or the document's own — a browser refused the frame
+  before that was corrected.
+- `noindex`: the document duplicates content whose canonical home is the permalink and the feed.
+- The iframe's height is fixed by whoever embedded it, so the item list scrolls inside the document
+  and the heading and subscribe link stay put. The plane ships no resize script, and the copyable
+  snippet on `/` states the height as an editable number rather than pretending otherwise.
+- One column: timestamp as a caption above the title, then title, then a summary clamped to three
+  lines. Not a fixed timestamp column — a feed publishes a run at a time, so consecutive items carry
+  the same date by construction and a rail spends width repeating it. The clamp is because summaries
+  are model-authored and unbounded; one long one must not push every other item out of the frame.
+- **An item with no `published_at` renders with no timestamp at all**, never as the zero time. A
+  missing date is always an upstream bug, but "1 Jan 0001, 00:00 UTC" is indistinguishable from real
+  content, so the page reads as broken rather than as a page with one fact missing.
 
 ## 7. Recipes
 
@@ -645,8 +693,30 @@ With an admin UI editing prompts, **SQLite is the source of truth** for recipes.
 import/export (`aff recipe export|import`) exists for versioning and disaster recovery, not as the
 live path.
 
+**Schedules have a MODE (revised 2026-08-15, Cam's directive — "fixed, ad hoc, or on special
+events"):** `schedule_mode` is `scheduled` (default, and what every pre-revision recipe means —
+the cron/recurrence fires runs), `adhoc` (nothing fires automatically; Run Now is the feed's only
+trigger, the schedule fields are ignored AND exempt from validation while ignored, and staleness
+monitoring never flags the feed), or `watch` (the schedule is a CHECK cadence, not a publish
+quota: the run fires, the model is explicitly told an empty answer is correct and expected, an
+empty batch is a quiet `skipped/nothing_noteworthy` run — no §9.3 repair call, no novelty re-roll,
+both of which would badger the model into inventing an event — and quiet stretches never flag the
+feed stale). An unknown mode is rejected on save, never defaulted: a typo silently running on its
+schedule is the surprise the mode exists to prevent.
+
+**Watch + grounded is the real-web event loop** (Cam's brief: "check daily and if the LLM finds
+something, post it"): the feed's SOURCES are its web search — every scheduled check fetches them
+live (§9 step 1), the model judges the candidates against the brief with an explicit
+only-genuinely-new instruction, and finding/not-finding something is what releases or withholds
+the item. A check whose fetch surfaces zero candidates quiet-skips before any model call — the
+outside world offered nothing to judge, so nothing is spent. (True open web search inside the
+model call is not available: SchemaFlux v1.1.0's Generate builder exposes no tool/search hook —
+verified against its public surface 2026-08-15 — so grounded sources are the web mechanism, which
+also keeps §9's link-integrity guarantees intact.) Watch + generative remains allowed for checks
+answerable from the model itself (dates, seasons, recurring events).
+
 A recipe carries: slug, title, description, language, kind (`generative` | `grounded` |
-`aggregate`, the last having members instead of a generator — §14.2), schedule,
+`aggregate`, the last having members instead of a generator — §14.2), **schedule mode** and schedule,
 items per run, **feed window**, model params, system and user prompt templates, novelty settings,
 per-day token and run budgets, and — for grounded feeds — one or more source URLs.
 
@@ -820,6 +890,28 @@ triggers a background re-embed.
 
 Every generator returns the same shape, enforced by JSON-schema structured output on the model call
 and then **re-validated in Go** — never trust the model to honor its own schema.
+
+**Generation is two-stage (revised 2026-08-15, Cam's directive).** Stage 1 is everything this
+section already describes: produce and validate the RAW item fields below. Stage 2 then asks the
+model — one additional structured call per publishing item, after novelty and the per-run cap so no
+call is spent on an item about to be cut — to FORMAT those raw fields once per output surface, so
+each surface gets content optimized for how it actually renders instead of all four sharing one
+string: `feed_html` (content:encoded / atom content, for feed readers), `card_text` (description /
+og:description — the Slack card, plain text, ≤280 chars, never the trivia answer), `embed_text`
+(the §6.1 widget's one-liner, ≤180 chars, same answer rule), `page_html` (the item permalink's
+reading page). Variants are stored on the item (`items.formats_json`), re-validated in Go with the
+same per-surface rules the raw fields obey (sanitizer, absolute links, plain-text, answer-leak),
+and every renderer reads them through `model.Item`'s `Render*` accessors, which fall back to the
+raw field. **Formatting is an enhancement, never a gate**: a provider without the capability, a
+failed call, or a variant that flunks validation all degrade to raw-field rendering — stage 1's
+output is a complete, correct feed on its own, and a run never fails or skips because stage 2 did.
+Editing an item clears its variants (stale variants would misrepresent the edit); the stage-2
+prompt is application-owned, not part of the recipe. Stage-2 tokens are counted into the run's
+estimate at the same rates.
+
+**The model is resolved per run (same revision):** a recipe's pinned model is an OVERRIDE; a recipe
+that pins none runs on `/settings/provider`'s default model and effort tier, read live at run time
+so a settings change applies from the next run, and the cost estimate prices the RESOLVED model.
 
 ```
 Item {
@@ -1146,6 +1238,14 @@ panes — rail, editor, sampler.
   - streams output as it arrives (`SampleStream`) rather than staring at a spinner, with cancel;
   - shows each candidate three ways — **rendered** (as a reader displays it), **raw fields** (the
     validated JSON), and **feed XML** (the exact `<item>` that would be emitted);
+  - an **embed preview** — the §6.1 document this candidate would appear in, rendered by the same
+    `render.Embed` the public route uses and displayed as a live sandboxed `<iframe>` rather than as
+    HTML source, because the embed is a visual surface and its markup tells an operator nothing they
+    can judge. It is the one view that is not text. A sample has not been published and has no
+    `/embed` URL to point at, so the document is carried in the response (`embed_preview_html`) and
+    framed via `srcdoc`. Building a second, admin-only version of that page was rejected: the embed's
+    one hard rule is that it renders `SummaryText` only, and a preview that could disagree with the
+    real renderer about that would be reassuring and wrong;
   - a **Slack preview** approximating the Slack card — title link plus the plain-text summary, so
     the thing that actually gets read is the thing being reviewed, and a trivia answer leaking into
     the summary is visible immediately;
@@ -1207,13 +1307,15 @@ and the admin view never disagree.
   codes with remaining count, active sessions with device/IP/last-seen and individual or global
   revoke.
 - **Provider** — four groups, in the order an operator needs them:
-  - **Connection.** Which endpoint is in use, and the operator-configured list of alternatives.
-    Any OpenAI-compatible endpoint is allowed (a local model server, a gateway, a reseller), each
-    recorded as a *profile*: a name, a base URL, and **the NAME of the environment variable holding
-    its key — never the key**. §4 keeps key material in the environment only, so a profile is safe
-    to store in SQLite, safe to send to a browser, and safe in a backup, which none of those would
-    be if it held a secret. The server reports whether each named variable is actually set, so a
-    misconfiguration is visible without the value ever leaving the process.
+  - **Providers (redesigned 2026-08-15).** One card per provider — the built-in OpenAI default
+    first, never removable, then each operator-configured *profile* (name + base URL; any
+    OpenAI-compatible endpoint) — with the active one marked and switching a one-click
+    "Use this provider" on the card. Each card takes an **API key, write-only**: stored encrypted
+    with `AFF_SECRET_KEY` per §19's revised secrets rule, reported back only as booleans
+    (stored / from env var / none), replaceable and removable but never displayable. A profile may
+    still name a key ENVIRONMENT VARIABLE instead; that and `SCHEMAFLUX_API_KEY` for the built-in
+    are dev/bootstrap fallbacks, and a stored key wins. A **wire protocol** menu (the seven
+    SchemaFlux backends) replaces the old free-text backend field.
   - **Model and effort.** The default model for new feeds and the embedding model, both chosen from
     the provider's own list rather than typed — a mistyped model id is a per-feed outage waiting to
     happen, since §8 classifies "model not found" as a recipe-scoped Fatal that disables that feed.
@@ -1221,8 +1323,15 @@ and the admin view never disagree.
     such knob its public API exposes (§8.1) — named for the tiers themselves rather than an invented
     scale this codebase would then have to translate.
   - **Rates.** The editable price table, since published prices change and a stale table silently
-    makes every cost number wrong. Rows are addable; an empty table is why a run can report
-    `$0.0000` while genuinely spending money, so the panel says what the table is for.
+    makes every cost number wrong. Rows are addable and removable, and **each rate's model is
+    chosen from the provider's own model list** (same source and same free-text fallback as the
+    model fields above — a mistyped id here prices nothing, and every run of that model then
+    reports `$0.0000`); an empty table is why a run can report `$0.0000` while genuinely spending
+    money, so the panel says what the table is for.
+    **Displayed and edited in $ per 1M tokens** (the unit every provider publishes and the app's
+    standard, 2026-08-15); the stored/wire field remains per-1K (`usd_per_1k_tokens_*` — the field
+    name is the unit, and re-scaling stored values would corrupt existing deployments), converted
+    only at the UI boundary.
   - **Spend.** Daily cost over a selectable window (7/30/90 days), as a column chart with the window
     total stated at full size above it. Columns, not a line: daily spend is a set of discrete totals,
     and a line implies a value existed between Tuesday and Wednesday. Days with no runs are drawn as

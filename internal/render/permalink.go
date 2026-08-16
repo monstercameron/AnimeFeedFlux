@@ -20,6 +20,13 @@ import (
 // short sequence of explicit writes rather than a set of template
 // pipelines a reader has to trace to know which fields are `html/template`
 // safe.
+//
+// The cost of that choice is that this file has NO safety net: writing an
+// unsanitized field here publishes it verbatim, and nothing downstream will
+// catch it. AnswerHTML was exactly that bug — every writer into model.Item
+// sanitized BodyHTML and none of them sanitized AnswerHTML, while both are
+// written raw below. Before adding a field to this page, confirm which of the
+// two categories above it is in and that every writer agrees.
 func Permalink(c model.Channel, it model.Item) ([]byte, error) {
 	var b bytes.Buffer
 
@@ -35,7 +42,7 @@ func Permalink(c model.Channel, it model.Item) ([]byte, error) {
 	// guarantees SummaryText never contains AnswerHTML (§5.5), so the
 	// spoiler-safety of this page falls out of using the right field
 	// everywhere rather than out of any trivia-specific branch below.
-	summary := EscapeText(it.SummaryText)
+	summary := EscapeText(it.RenderCardText())
 	title := EscapeText(it.Title)
 	published := RFC3339(it.PublishedAt)
 
@@ -75,12 +82,22 @@ func Permalink(c model.Channel, it model.Item) ([]byte, error) {
 	b.WriteString(published)
 	b.WriteString("</time>\n")
 
-	// Raw, deliberately: BodyHTML has already been through the generation
-	// pipeline's sanitiser (PLAN.md §9) by the time it reaches a renderer,
-	// the same trust boundary content:encoded in rss.go relies on. Escaping
-	// it here would double-encode legitimate markup and defeat the point of
-	// shipping HTML at all.
-	b.WriteString(it.BodyHTML)
+	// Raw, deliberately: BodyHTML has already been sanitized by the time it
+	// reaches a renderer, the same trust boundary content:encoded in rss.go
+	// relies on. Escaping it here would double-encode legitimate markup and
+	// defeat the point of shipping HTML at all.
+	//
+	// "Already sanitized" is a claim about TWO ingress paths, not one, and it
+	// was only ever true of the first. internal/generate/contract.go sanitizes
+	// what the generation pipeline produces (PLAN.md §9); internal/rpc/item.go
+	// is an independent door into the same table (Create, Update,
+	// PromoteSample, PublishCorrection) and did no sanitizing at all. Both do
+	// now. If a third writer to model.Item ever appears, it owes this line the
+	// same guarantee — this renderer cannot check it and will not try.
+	// RenderPageHTML prefers stage 2's reading-page variant, which went
+	// through the same sanitizer (formats.go's validateFormats) as both
+	// ingress paths above, so the trust boundary is unchanged.
+	b.WriteString(it.RenderPageHTML())
 	b.WriteString("\n")
 
 	if it.HasAnswer() {

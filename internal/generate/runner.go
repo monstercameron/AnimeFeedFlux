@@ -173,6 +173,14 @@ type Spec struct {
 	// Trigger records who caused this run ("cron" | "manual"), per §10's
 	// runs.trigger column. Sample does not use it.
 	Trigger string
+
+	// WatchMode (feedspec.ScheduleModeWatch, §7 revision 2026-08-15): the
+	// schedule is a CHECK cadence. The system prompt gains an explicit
+	// permission to return an empty batch, an empty batch is a quiet
+	// StatusSkipped ("nothing_noteworthy") rather than a malformed output —
+	// so no §9.3 repair call and no novelty re-roll, both of which would
+	// badger the model into inventing content the mode exists to avoid.
+	WatchMode bool
 }
 
 const (
@@ -405,6 +413,16 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 		return commit(StatusFailed, "context_acquire_failed", err, nil, nil)
 	}
 
+	// A grounded watch feed whose live fetch surfaced ZERO candidates has
+	// its answer before any model call: the outside world offered nothing
+	// to judge, so there is nothing to release and nothing to spend. (A
+	// grounded SCHEDULED feed keeps its existing behaviour — an empty
+	// candidate set there is unusual enough to let the pipeline report it
+	// the way it always has, not to silently skip.)
+	if spec.WatchMode && feed.Kind == model.KindGrounded && len(opts.CandidateURLs) == 0 {
+		return commit(StatusSkipped, "nothing_noteworthy", nil, nil, nil)
+	}
+
 	promptText, err := Render(spec.UserPromptTemplate, data)
 	if err != nil {
 		return commit(StatusFailed, "prompt_render_failed", err, nil, nil)
@@ -423,8 +441,9 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 
 	var novelItems []model.Item
 	var novelVecs []novelty.Vector
+	watchQuiet := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		ar, aerr := runAttempt(ctx, deps, spec, opts, spec.SystemPrompt, promptText, requestID)
+		ar, aerr := runAttempt(ctx, deps, spec, opts, effectiveSystem(spec), promptText, requestID)
 		tokensIn += ar.tokensIn
 		tokensOut += ar.tokensOut
 		for k, v := range ar.rejectedReasons {
@@ -435,6 +454,12 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 				return commit(StatusFailed, "malformed_output", aerr, nil, nil)
 			}
 			return commit(StatusFailed, errorKindFromProvider(aerr), aerr, nil, nil)
+		}
+		if ar.watchEmpty {
+			// "Nothing noteworthy" is an ANSWER — re-rolling for novelty
+			// would ask the model to change it.
+			watchQuiet = true
+			break
 		}
 
 		batch := ar.valid
@@ -457,6 +482,12 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 		if feed.Kind == model.KindGenerative {
 			errKind = "novelty_exhausted"
 		}
+		if watchQuiet {
+			// The watch-mode quiet day: checked, found nothing, correctly
+			// posted nothing. Its own reason token so history reads as the
+			// mode working, never as a generation problem to chase.
+			errKind = "nothing_noteworthy"
+		}
 		// Not an error: §9 step 5 is explicit that a skipped run is not a
 		// failed one.
 		return commit(StatusSkipped, errKind, nil, nil, nil)
@@ -475,6 +506,16 @@ func Run(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (RunResult,
 	}
 
 	items := stampItems(deps, feed, novelItems, newest, deps.now())
+
+	// Stage 2 (§9, 2026-08-15): per-surface formatting of the items that
+	// are definitely publishing. After novelty and the per-run cap so no
+	// call is spent on an item that was about to be cut, and before commit
+	// so the variants land in the same transaction as the items they
+	// describe. Purely additive — see formats.go's header for the
+	// degradation contract.
+	items, fmtIn, fmtOut := formatItems(ctx, deps, feed, spec, items, requestID)
+	tokensIn += fmtIn
+	tokensOut += fmtOut
 
 	return commit(StatusCompleted, "", nil, items, zipEmbeddings(items, novelVecs))
 }
@@ -504,6 +545,13 @@ func Sample(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (SampleR
 		return SampleResult{}, err
 	}
 
+	// Same grounded-watch short-circuit as Run: zero live candidates means
+	// there is nothing to judge and nothing to spend — the sampler shows
+	// the same quiet outcome a real check would produce.
+	if spec.WatchMode && feed.Kind == model.KindGrounded && len(opts.CandidateURLs) == 0 {
+		return SampleResult{}, nil
+	}
+
 	promptText, err := Render(spec.UserPromptTemplate, data)
 	if err != nil {
 		return SampleResult{}, err
@@ -512,7 +560,7 @@ func Sample(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (SampleR
 	requestID := fmt.Sprintf("%s-sample-%d", feed.Slug, now.UnixNano())
 
 	rejectTotals := map[string]int{}
-	ar, aerr := runAttempt(ctx, deps, spec, opts, spec.SystemPrompt, promptText, requestID)
+	ar, aerr := runAttempt(ctx, deps, spec, opts, effectiveSystem(spec), promptText, requestID)
 	for k, v := range ar.rejectedReasons {
 		rejectTotals[k] += v
 	}
@@ -537,12 +585,18 @@ func Sample(ctx context.Context, deps Deps, feed model.Feed, spec Spec) (SampleR
 		items = items[:spec.ItemsPerRun]
 	}
 
+	// Stage 2 runs for samples too — the sampler exists to show exactly what
+	// WOULD publish (§12.3's five views), and without the variants it would
+	// preview a different item than a real run produces. Still no persistence
+	// anywhere on this path.
+	items, fmtIn, fmtOut := formatItems(ctx, deps, feed, spec, items, requestID)
+
 	return SampleResult{
 		Items:         items,
 		RejectReasons: rejectTotals,
-		TokensIn:      ar.tokensIn,
-		TokensOut:     ar.tokensOut,
-		EstCostUSD:    cost,
+		TokensIn:      ar.tokensIn + fmtIn,
+		TokensOut:     ar.tokensOut + fmtOut,
+		EstCostUSD:    cost + estimateCostUSD(fmtIn, fmtOut, spec),
 	}, nil
 }
 
@@ -625,6 +679,35 @@ type attemptResult struct {
 	rejectedReasons map[string]int
 	tokensIn        int
 	tokensOut       int
+
+	// watchEmpty: a watch-mode call returned a genuinely EMPTY batch — the
+	// model's "nothing noteworthy" answer, distinct from "returned items
+	// that all failed validation" (which stays malformed even in watch
+	// mode, repair and all).
+	watchEmpty bool
+}
+
+// watchSystemNote is appended to the recipe's system prompt in watch mode.
+// Application-owned, like formatSystemPrompt and for the same reason: the
+// empty-batch escape is part of the MODE's contract with the pipeline, not
+// something a recipe should have to remember to grant (or be able to
+// revoke while the pipeline still treats empty as legitimate).
+const watchSystemNote = "You are checking for noteworthy events, not filling a quota. " +
+	"If nothing genuinely meets the brief right now, return an empty \"items\" array — " +
+	"an empty answer is correct and expected most of the time. Never invent or pad. " +
+	"When candidate articles are provided, they are a LIVE check of the outside world: release an " +
+	"item only for a candidate that is a genuine, new development meeting the brief — never " +
+	"re-report an old story, a minor update, or something merely related."
+
+// effectiveSystem is the system prompt a run actually sends.
+func effectiveSystem(spec Spec) string {
+	if !spec.WatchMode {
+		return spec.SystemPrompt
+	}
+	if spec.SystemPrompt == "" {
+		return watchSystemNote
+	}
+	return spec.SystemPrompt + "\n\n" + watchSystemNote
 }
 
 // runAttempt implements §9 steps 2-4 and 6 for a single generation attempt:
@@ -639,6 +722,11 @@ func runAttempt(ctx context.Context, deps Deps, spec Spec, opts Options, system,
 	reasons := map[string]int{}
 	systemTokens := estimateTokens(system)
 
+	// lastRawCount is how many items the most recent call RETURNED, before
+	// validation — watch mode needs it to tell "the model said nothing"
+	// (legitimate) apart from "everything it said failed validation"
+	// (malformed, repairable).
+	lastRawCount := 0
 	call := func(promptText string) ([]model.Item, int, int, error) {
 		req := llm.Request{
 			Prompt:    promptText,
@@ -663,6 +751,7 @@ func runAttempt(ctx context.Context, deps Deps, spec Spec, opts Options, system,
 			return nil, tokensIn, 0, err
 		}
 		tokensOut := estimateTokens(res.Raw)
+		lastRawCount = len(res.Items)
 
 		// validate span (TODOS A4-32): one per attempt (base call and, if it
 		// happens, the repair call each get their own), recording how many
@@ -728,6 +817,13 @@ func runAttempt(ctx context.Context, deps Deps, spec Spec, opts Options, system,
 	}
 	if len(valid) > 0 {
 		return attemptResult{valid: valid, rejectedReasons: reasons, tokensIn: tokensIn, tokensOut: tokensOut}, nil
+	}
+	if spec.WatchMode && lastRawCount == 0 {
+		// The watch-mode "nothing noteworthy" answer: an EMPTY batch, which
+		// the system prompt explicitly permitted. Not malformed — a §9.3
+		// repair call here would feed "you returned nothing" back as an
+		// error and badger the model into inventing an event.
+		return attemptResult{watchEmpty: true, rejectedReasons: reasons, tokensIn: tokensIn, tokensOut: tokensOut}, nil
 	}
 
 	// Malformed: zero usable items out of the whole batch. §9.3's one

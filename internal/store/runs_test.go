@@ -217,7 +217,7 @@ func TestReclaimStaleRunsMarksRunWithItemsCompletedUnconfirmed(t *testing.T) {
 	if _, err := s.writer.ExecContext(ctx, insertRunItemSQL,
 		item.FeedID, item.ItemKey, item.ContentHash, item.Title, item.SummaryText, item.BodyHTML,
 		nullString(item.AnswerHTML), nullString(item.Link), nullString(item.SourceName),
-		formatTime(item.PublishedAt), string(item.Origin), runID,
+		"", formatTime(item.PublishedAt), string(item.Origin), runID,
 		formatTime(time.Now()), formatTime(time.Now())); err != nil {
 		t.Fatalf("seeding orphaned item: %v", err)
 	}

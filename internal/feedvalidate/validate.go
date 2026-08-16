@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -619,3 +620,75 @@ func Permalink(doc []byte) []Finding {
 
 	return findings
 }
+
+// ---- Embed document (§6.1 GET /embed/{slug}) ----
+
+// embedExternalRefPatterns are the ways an HTML document can reach off-host.
+// The embed must use none of them (§6.1): it is rendered inside a page this
+// project does not control, under a
+// `default-src 'none'; style-src 'unsafe-inline'` policy, so a reference that
+// slipped in would either be blocked by the header (a broken widget) or, if
+// the header were ever relaxed, become a request made from a stranger's page
+// on our behalf.
+var embedExternalRefPatterns = []struct {
+	needle string
+	what   string
+}{
+	{"<script", "a <script> element"},
+	{"<link ", "a <link> element (stylesheet, preload, or icon)"},
+	{"<img", "an <img> element"},
+	{"@import", "a CSS @import"},
+	{"url(", "a CSS url() reference"},
+}
+
+// Embed validates an embed document (PLAN.md §6.1). The properties checked
+// here are the ones that make it safe to put on somebody else's page, and
+// they are structural — a validator has no oracle for whether the styling
+// looks right, but it can prove the document asks for nothing and runs
+// nothing.
+//
+// This is validated rather than skipped for the reason the permalink case
+// gives above: skipping the one surface that renders into a third party's
+// document would leave `make validate` blind to exactly the artefact whose
+// failure mode is somebody else's incident.
+func Embed(doc []byte) []Finding {
+	var findings []Finding
+	s := string(doc)
+	lower := strings.ToLower(s)
+
+	if !strings.HasPrefix(lower, "<!doctype html>") {
+		findings = append(findings, Finding{Error, "§6.1 embed-complete-document",
+			"embed document does not begin with <!doctype html>; it is framed as a whole document, not injected as a fragment"})
+	}
+
+	// noindex: the embed duplicates content whose canonical home is the
+	// permalink and the feed, and one indexed copy per embedding site is a
+	// feed competing with itself in search results.
+	if !strings.Contains(lower, `<meta name="robots" content="noindex">`) {
+		findings = append(findings, Finding{Error, "§6.1 embed-noindex",
+			"embed document is missing its robots noindex tag"})
+	}
+
+	for _, p := range embedExternalRefPatterns {
+		if strings.Contains(lower, p.needle) {
+			findings = append(findings, Finding{Error, "§6.1 embed-self-contained",
+				"embed document contains " + p.what + "; it must fetch nothing"})
+		}
+	}
+
+	// Inline event handlers. The embed renders escaped text only, so an
+	// on*= attribute means either a renderer bug or an escaping failure —
+	// and the CSP that would neutralise it is a header, not a property of
+	// the bytes, so the bytes are checked too.
+	if inlineHandlerPattern.MatchString(s) {
+		findings = append(findings, Finding{Error, "§6.1 embed-no-inline-handlers",
+			"embed document carries an inline event handler attribute"})
+	}
+
+	return findings
+}
+
+// inlineHandlerPattern matches an on*= attribute in a tag, e.g. onerror= or
+// onclick=. Deliberately loose about the quoting: anything matching this in a
+// document that should contain none is worth failing on.
+var inlineHandlerPattern = regexp.MustCompile(`(?i)<[a-z][^>]*\son[a-z]+\s*=`)

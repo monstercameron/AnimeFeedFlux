@@ -27,15 +27,35 @@ func TestGenerateSpecFrom_UnknownModelPricesAtZero(t *testing.T) {
 
 	priced := generateSpecFrom(feedspec.Spec{
 		Model: feedspec.ModelParams{Model: "priced-model"},
-	}, "cron", prices)
+	}, "cron", prices, providerDefaults{})
 	if priced.PriceInputPerMToken != 3 || priced.PriceOutputPerMToken != 15 {
 		t.Fatalf("a priced model lost its rates: in=%v out=%v",
 			priced.PriceInputPerMToken, priced.PriceOutputPerMToken)
 	}
 
+	// A recipe with NO pinned model inherits the settings default — and its
+	// price lookup uses the RESOLVED model, not the blank recipe value
+	// (2026-08-15: per-feed models are overrides on the global default).
+	inherited := generateSpecFrom(feedspec.Spec{},
+		"cron", prices, providerDefaults{Model: "priced-model", Effort: "quick"})
+	if inherited.Model != "priced-model" || inherited.Effort != "quick" {
+		t.Fatalf("defaults not inherited: model=%q effort=%q", inherited.Model, inherited.Effort)
+	}
+	if inherited.PriceInputPerMToken != 3 || inherited.PriceOutputPerMToken != 15 {
+		t.Fatalf("inherited model not priced at its own rate: in=%v out=%v",
+			inherited.PriceInputPerMToken, inherited.PriceOutputPerMToken)
+	}
+	// A pinned model stays pinned — the default never overrides an override.
+	pinned := generateSpecFrom(feedspec.Spec{
+		Model: feedspec.ModelParams{Model: "priced-model"},
+	}, "cron", prices, providerDefaults{Model: "some-other-default"})
+	if pinned.Model != "priced-model" {
+		t.Fatalf("a pinned model was overridden by the default: %q", pinned.Model)
+	}
+
 	unpriced := generateSpecFrom(feedspec.Spec{
 		Model: feedspec.ModelParams{Model: "model-nobody-entered"},
-	}, "cron", prices)
+	}, "cron", prices, providerDefaults{})
 	if unpriced.PriceInputPerMToken != 0 || unpriced.PriceOutputPerMToken != 0 {
 		t.Fatalf("unexpected rates for an unpriced model: in=%v out=%v — if this now "+
 			"refuses or defaults instead, update the gate comment in wire.go to match",

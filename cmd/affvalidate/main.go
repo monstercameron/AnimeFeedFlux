@@ -109,6 +109,13 @@ func validateByExtension(path string, doc []byte) ([]feedvalidate.Finding, error
 			// unfurl-tag contract rather than skipped: skipping it left
 			// `make validate` blind to the entire unfurl surface.
 			return feedvalidate.Permalink(doc), nil
+		case strings.HasPrefix(base, "embed_"):
+			// The embed document (§6.1) — the one artefact this project
+			// renders into a page it does not control. Validated for the
+			// properties that make that safe (self-contained, no script, no
+			// inline handlers, noindex) rather than skipped, on the same
+			// argument the permalink case makes above.
+			return feedvalidate.Embed(doc), nil
 		case strings.HasPrefix(base, "index_"):
 			// The feed index HTML page, not a feed and not a per-item
 			// permalink — §5.5's OG/unfurl contract is a per-item

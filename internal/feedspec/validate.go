@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/monstercameron/AnimeFeedFlux/internal/generate"
+	"github.com/monstercameron/AnimeFeedFlux/internal/llm"
 	"github.com/monstercameron/AnimeFeedFlux/internal/model"
 	"github.com/monstercameron/AnimeFeedFlux/internal/schedule"
 )
@@ -26,6 +27,11 @@ const (
 	ReasonSlugReserved = "slug_reserved"
 
 	ReasonCronInvalid = "cron_invalid"
+	// ReasonScheduleModeUnknown: schedule_mode carried something other than
+	// "", "scheduled", "adhoc" or "watch". Rejected rather than defaulted:
+	// a typo'd "addhoc" silently running on its schedule is the exact
+	// surprise the mode exists to prevent.
+	ReasonScheduleModeUnknown = "schedule_mode_unknown"
 	// ReasonRecurrenceInvalid covers every way a structured schedule can be
 	// unschedulable — an interval below 1, a weekly rule with no weekdays, a
 	// set position of 5. One reason rather than a dozen because the editor
@@ -58,6 +64,20 @@ const (
 	ReasonNoveltyMaxRetriesRange  = "novelty_max_retries_out_of_range"
 	ReasonNoveltyExcludeLastRange = "novelty_exclude_last_out_of_range"
 	ReasonNoveltyThresholdRange   = "novelty_threshold_out_of_range"
+
+	// ReasonModelNotChat: a pinned model id that internal/llm.ClassifyModel
+	// positively identifies as an embedding model, not a text-generation one.
+	// This is the field the UI's own model-picker doc comment calls out as
+	// the one where a bad value costs the most (§8: "model not found" is a
+	// recipe-scoped Fatal that disables the feed, and looks exactly like a
+	// deprecation until a run fails at 4am) — so it is validated server-side
+	// rather than trusted from whatever the client sent, regardless of how a
+	// bad id got there (a stale UI default, a hand-edited import, `recipe
+	// import`, a typo). Deliberately narrow: ClassifyModel's "chat" bucket is
+	// a generous heuristic and a real, unrecognised future chat model must
+	// still validate, so this only rejects the case ClassifyModel is
+	// confident about, not everything it fails to positively classify as chat.
+	ReasonModelNotChat = "model_not_chat"
 )
 
 // slugPattern is PLAN.md §14.1's namespace rule.
@@ -137,8 +157,22 @@ func Validate(s Spec) []Problem {
 	problems = append(problems, validateKind(s)...)
 	problems = append(problems, validateBudgets(s.Budgets)...)
 	problems = append(problems, validateRanges(s)...)
+	problems = append(problems, validateModel(s.Model)...)
 
 	return problems
+}
+
+// validateModel rejects a pinned model id that is unambiguously not a
+// text-generation model. Empty is fine — it means "use the deployment
+// default" (§12.5) — so this only fires on an explicit, wrong choice.
+func validateModel(m ModelParams) []Problem {
+	if m.Model == "" {
+		return nil
+	}
+	if _, embedding := llm.ClassifyModel(m.Model); embedding {
+		return []Problem{{Field: "model", Reason: ReasonModelNotChat}}
+	}
+	return nil
 }
 
 func validateSlug(slug string) []Problem {
@@ -160,6 +194,18 @@ func validateSlug(slug string) []Problem {
 // feeds whose recurrence is nonsense as long as an old cron string happened
 // to be well-formed. Spec.Firing owns the precedence; this mirrors it.
 func validateSchedule(s Spec) []Problem {
+	switch s.ScheduleMode {
+	case "", ScheduleModeScheduled, ScheduleModeWatch:
+		// Fires on the schedule — it must be valid.
+	case ScheduleModeAdhoc:
+		// Manual-only: nothing ever evaluates the schedule fields, so a
+		// stale cron string or half-built recurrence must not block saving
+		// the feed. (They stay stored: switching back to scheduled revives
+		// them, and THEN they get validated again.)
+		return nil
+	default:
+		return []Problem{{Field: "schedule_mode", Reason: ReasonScheduleModeUnknown}}
+	}
 	if s.Recurrence != nil {
 		return validateRecurrence(*s.Recurrence, s.Timezone)
 	}

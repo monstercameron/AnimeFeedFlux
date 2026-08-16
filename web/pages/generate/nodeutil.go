@@ -58,6 +58,8 @@ func viewTabID(v CandidateView) string {
 		return "view-raw-fields"
 	case ViewFeedXML:
 		return "view-feed-xml"
+	case ViewEmbed:
+		return "view-embed"
 	case ViewSlackCard:
 		return "view-slack-card"
 	default:
@@ -73,6 +75,8 @@ func viewFromTabID(id string) CandidateView {
 		return ViewRawFields
 	case "view-feed-xml":
 		return ViewFeedXML
+	case "view-embed":
+		return ViewEmbed
 	case "view-slack-card":
 		return ViewSlackCard
 	default:

@@ -373,6 +373,13 @@ func feedInterval(specJSON, timezone string, now time.Time) time.Duration {
 	if err != nil || spec.Cron == "" {
 		return 0
 	}
+	// Ad-hoc feeds have no cadence to fall behind, and a watch feed's quiet
+	// stretches — no successful publish for weeks — are the mode WORKING
+	// (§7 revision 2026-08-15). Interval 0 is the established "nothing to
+	// compare against" value Check already skips.
+	if spec.IsAdhoc() || spec.IsWatch() {
+		return 0
+	}
 	tz := spec.Timezone
 	if tz == "" {
 		tz = timezone

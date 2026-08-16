@@ -288,14 +288,15 @@ type candidateDetailProps struct {
 }
 
 // renderCandidateDetail's hook count is fixed regardless of Candidate's
-// content: the view tab strip is wui.Tabs over the constant 4-element
-// CandidateViews (never filtered — one UseCompositeNavigation hook plus 4
+// content: the view tab strip is wui.Tabs over the constant 5-element
+// CandidateViews (never filtered — one UseCompositeNavigation hook plus 5
 // always-present per-tab OnClick hooks, every render); the link-verdicts
 // block carries no On* handlers at all (h.If just toggles DOM presence of
 // plain text/class nodes); and Promote/Discard are two more, always
 // present and never Disabled (so web/ui.Button never skips their hook —
-// see render_editor.go's package doc comment's third hazard). Total: 7,
-// every render, regardless of which candidate or view is selected.
+// see render_editor.go's package doc comment's third hazard). Total: 8,
+// every render, regardless of which candidate or view is selected — the
+// embed view's iframe adds no hook of its own, deliberately.
 func renderCandidateDetail(p candidateDetailProps) ui.Node {
 	t := p.T
 	wt := wui.T(t.T)
@@ -326,7 +327,7 @@ func renderCandidateDetail(p candidateDetailProps) ui.Node {
 			h.ID("generate-sampler-view-panel"),
 			h.Role("tabpanel"),
 			h.Aria("labelledby", activeViewID),
-			h.Pre(h.ClassStr("af-candidate__content"), h.Text(CandidateViewContent(p.View, c))),
+			candidateViewNode(t, p.View, c),
 		),
 
 		h.Div(h.ClassStr("af-candidate__novelty"), h.Text(NoveltySummary(t, deps.Formatters, c.GetNovelty()))),
@@ -354,5 +355,39 @@ func renderCandidateDetail(p candidateDetailProps) ui.Node {
 			wui.Button(wui.ButtonProps{T: wt, ID: "generate-sampler-promote", LabelKey: "generate.sampler.promote", Variant: wui.ButtonPrimary, OnClick: func() { p.OnPromote(c.GetCandidateId()) }}),
 			wui.Button(wui.ButtonProps{T: wt, ID: "generate-sampler-discard", LabelKey: "generate.sampler.discard", Variant: wui.ButtonSecondary, OnClick: func() { p.OnDiscard() }}),
 		),
+	)
+}
+
+// candidateViewNode renders the selected view's panel contents.
+//
+// Four of the five views are text and share one <pre>. The embed (§6.1) is
+// not text: it is a styled visual surface that ends up on somebody else's
+// page, and showing an operator its HTML source would ask them to judge an
+// appearance by reading markup. It gets a real iframe carrying the exact
+// document the public route would serve, via srcdoc — no request, no
+// published item required, which matters because a sample candidate has not
+// been published and has no /embed URL to point at yet.
+//
+// sandbox is empty on purpose, which is the most restrictive value there is:
+// no scripts, no forms, no top-level navigation, and a unique opaque origin
+// so the framed document cannot reach into the admin page around it. The
+// embed contains no script to begin with — this is the belt to that
+// braces, and it costs nothing, because the one thing the preview needs is
+// for CSS to render.
+//
+// No hooks here, in either branch. This is called from inside
+// renderCandidateDetail, whose doc comment fixes its hook count regardless
+// of content; a view-dependent hook would break exactly that invariant.
+func candidateViewNode(t Translator, v CandidateView, c *affv1.SampleCandidate) ui.Node {
+	if v != ViewEmbed {
+		return h.Pre(h.ClassStr("af-candidate__content"), h.Text(CandidateViewContent(v, c)))
+	}
+	return h.Iframe(
+		h.ClassStr("af-candidate__embed"),
+		h.ID("generate-sampler-embed-preview"),
+		h.Attr("srcdoc", CandidateViewContent(ViewEmbed, c)),
+		h.Attr("sandbox", ""),
+		h.Attr("loading", "lazy"),
+		h.Title(t.T("generate.sampler.view.embedFrameTitle")),
 	)
 }

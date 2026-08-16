@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 
@@ -91,10 +92,14 @@ func (p *resolvingProvider) current(ctx context.Context) llm.Provider {
 		}
 		return p.fallback
 	}
-	if endpoint.BaseURL == "" && (endpoint.Backend == "" || endpoint.Backend == "openai") {
-		// Nothing to override: this IS the boot-time configuration.
-		return p.fallback
-	}
+	// No "BaseURL empty means nothing to override" shortcut anymore: the
+	// resolved KEY can now differ from the boot-time one (a key stored from
+	// /settings/provider wins over the env var, including for the built-in
+	// default endpoint), so the endpoint is honoured whenever it carries a
+	// key at all. An endpoint identical to boot builds one cached duplicate
+	// client on first call, which is harmless; an endpoint with a fresher
+	// key must NOT collapse to the fallback, which would silently keep
+	// calling with the old credential.
 
 	key := endpointKey{baseURL: endpoint.BaseURL, apiKey: endpoint.APIKey, backend: endpoint.Backend}
 	p.mu.Lock()
@@ -120,6 +125,21 @@ func (p *resolvingProvider) current(ctx context.Context) llm.Provider {
 // Generate implements llm.Provider.
 func (p *resolvingProvider) Generate(ctx context.Context, req llm.Request) (llm.Result, error) {
 	return p.current(ctx).Generate(ctx, req)
+}
+
+// Format implements llm.Formatter by delegating to whichever endpoint is in
+// force, exactly like Generate. The resolved provider is always a
+// SchemaFluxProvider today, but the capability check keeps this honest if a
+// non-formatting Provider ever lands behind the resolver: internal/generate
+// treats the error like any Format failure and renders from raw fields.
+func (p *resolvingProvider) Format(ctx context.Context, req llm.FormatRequest) (llm.FormatResult, error) {
+	if f, ok := p.current(ctx).(llm.Formatter); ok {
+		return f.Format(ctx, req)
+	}
+	return llm.FormatResult{}, &llm.Error{
+		Kind: llm.Fatal, Scope: llm.ScopeRecipe,
+		Err: errors.New("wire: the resolved provider does not support formatting"),
+	}
 }
 
 // Embed implements llm.Provider. SchemaFlux exposes no public embedding API,
@@ -186,7 +206,11 @@ func (e *resolvingEmbedder) current(ctx context.Context) novelty.Embedder {
 			slog.Any("error", err))
 		return e.fallback
 	}
-	if endpoint.BaseURL == "" || endpoint.APIKey == "" {
+	// Only a missing key falls back — an empty BaseURL is a valid resolved
+	// endpoint (the provider's own default address) now that the built-in
+	// endpoint can carry a UI-stored key differing from the boot-time env
+	// one. See resolvingProvider.current's identical note.
+	if endpoint.APIKey == "" {
 		return e.fallback
 	}
 	key := endpointKey{baseURL: endpoint.BaseURL, apiKey: endpoint.APIKey}

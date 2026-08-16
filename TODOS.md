@@ -1144,6 +1144,151 @@ light at 1500px, 1200px and 900px, and read as pixels rather than as code.
       `DrainAsyncInbox` re-books itself via `scheduler.SetTimeout` while `wipRoot != nil` — if that
       re-booked drain is ever lost, nothing re-arms it.
 
+### Live browser walkthrough 2026-08-14 (J1/J2/J9)
+
+Drove `/login` -> `/generate` -> New feed in a real browser (Playwright, `NODE_PATH` borrowed from
+CashFlux per `e2eweb/README.md`'s convention; login now renders — the `e2eweb` "SKIP, login mid-
+rewrite" note is stale). Screenshots in `.devrun/shots/`. Stopped short of Preview/Run now — those
+reach the real OpenAI key wired into this dev server. Four findings filed same day as `A7-22`..
+`A7-25` (this section originally misnumbered them `A7-08`..`A7-11`, colliding with tickets already
+using those ids both earlier and later in this same series — corrected here, no content lost).
+
+- [x] `A7-22` **FIXED 2026-08-14, but the actual defect was smaller than first reported — read
+      before assuming this is Fatal.** Original report: a brand-new feed's Model picker strip
+      (`#gen-strip-model`) shows a non-chat embedding model (`text-embedding-3-large`) selected
+      immediately after "New feed", instead of the "Default model" placeholder. First read as a
+      PLAN.md §8 Fatal risk (bad model reaches a scheduled run). **Verified wrong** by checking
+      server truth two ways that bypass the same buggy `<select>`: `aff feed list -json`'s
+      `spec.model` field, and a fresh independent login session's own read. Both showed `model: ""`
+      on every feed saved while the picker visually showed the embedding model — the corruption
+      never reaches `draft.Get()` or the database; it is a **display-only** race in how the
+      `<select>` resolves its initial selection the moment `p.Unavailable` flips false and it swaps
+      in for the `<input>` fallback (127 options across two `<optgroup>`s; reproduces on both the
+      strip's and the recipe form's independent `Model` field, not always in the same run — genuinely
+      racy). Root cause traced into `GoWebComponents/v5@v5.0.1`'s reconciler/DOM layer, not this
+      repo's code — `modelpicker.go` correctly declares `SelectedIf(id == p.Value)` and nothing else
+      in `web/pages/generate` writes `Spec.Model` outside a real `change` event (confirmed by
+      instrumenting `change`/`input` listeners on both `#gen-strip-model` and
+      `#generate-editor-model`: neither fired during the entire reproduction). Not filed upstream
+      separately — same disposition as `A7-25` below, since GWC is the user's own other project.
+      **What was actually fixed**, since a display bug this close to "the model that generates every
+      item" is still worth a hard backstop regardless of root cause: `internal/feedspec.Validate` now
+      rejects a pinned `Model` that `internal/llm.ClassifyModel` positively identifies as an embedding
+      model (`ReasonModelNotChat`, wired through `Create`/`Update`/`ValidateSpec`'s existing field-error
+      path, field `"model"`). Deliberately narrow — only the case ClassifyModel is confident about,
+      so a real unrecognised future chat model still validates; empty (deployment default) still
+      passes. Tests: `TestValidate_EmptyModelPasses`, `_EmbeddingModelRejected`, `_ChatModelPasses`,
+      `_UnclassifiedModelPasses` (`internal/feedspec/spec_test.go`). Verified live: rebuilt and
+      restarted the dev server, then, with three throwaway feeds saved while the display bug was
+      showing (`.devrun/aff.db` ids 5-7, deleted after via `aff feed delete`), confirmed with
+      `aff feed list -json` that `spec.model` persisted as `""` in every case — this validation rule
+      is a backstop against a bad model id reaching a saved recipe by *any* path (a hand-edited
+      import, a future regression here, this display bug if it ever starts writing what it shows),
+      not a fix for a corruption this specific bug was ever proven to cause. The visible glitch
+      itself is still open — this ticket closes the risk, not the flicker.
+- [x] `A7-29` **FIXED 2026-08-15: the visible glitch `A7-22` left open — model picker showing the
+      wrong option selected on mount — closed for real, not just backstopped.** Cam hit it live
+      after `A7-22`/`A4-48` shipped ("the model selector bug") and called out that leaving the
+      display broken while only guarding the data wasn't good enough. Re-investigated with
+      `console.log` instrumentation inside the effect itself (temporary, removed before this
+      landed): a one-shot post-mount correction — read the DOM's value once, force it if wrong —
+      is NOT sufficient, because the wrong auto-selection was observed happening on a LATER DOM
+      mutation than that correction's own read. The reconciler appends the `<select>`'s two
+      `<optgroup>`s (100+ `<option>`s) across more than one commit as the `<input>`-to-`<select>`
+      swap happens, and the browser's native "nothing marked selected yet" resolution mis-fires on
+      one of the later appends — after a single corrective effect has already run and found
+      everything fine. Confirmed directly: the effect's own debug log showed
+      `domValue= propValue=` (both correctly empty) on every reproduction, while the value read
+      1500ms later was still wrong.
+      **Fix**: `web/pages/generate/modelpicker.go`'s `renderModelPicker` now attaches a
+      `MutationObserver` (via `syscall/js`) to the `<select>` once it exists, watching
+      `childList`+`subtree`, and re-asserts `p.Value` on every subsequent child mutation — not just
+      once at mount. This converges to correct regardless of how many discrete appends the
+      input→select swap takes. Disconnects and re-attaches on `ui.UseEffectOf`'s normal cleanup
+      cycle when the effect's dependency key (readiness + `p.Value`) changes, so a real user
+      selection is not fought. `.Value` writes don't dispatch `childList` mutations themselves, so
+      no feedback loop.
+      **Verified live, 10 consecutive fresh sessions** (`aff.exe` server rebuilt via
+      `.devrun/restart.sh` between the fix and the check): `#gen-strip-model`'s value on a brand-new
+      feed was `""` (correct) in all 10, versus reproducing wrong on 5 of 6 runs immediately before
+      this fix. Also verified the full `daily-anime-trivia` flow end to end afterward: the strip
+      correctly showed the feed's real saved model (`gpt-4o-mini`, not an embedding model) on
+      selecting an existing feed, and a real sample against it now displays a correctly nonzero,
+      correctly computed cost (see `A4-49`) — the display bug and the pricing gap were two
+      independent things that both had to be fixed for that one screen to read right.
+      `go build`, `go vet`, `gofmt -l`, native `go test ./...`, and
+      `GOOS=js GOARCH=wasm go test ./web/...` all clean.
+- [ ] `A7-23` **"Feeds (N)" header disagreed with the list rendered directly beneath it, once.**
+      On the very first paint of `/generate` right after login, the collapsible section read
+      `Feeds (0) — status, schedule, spend, delete` while all three seed feeds were already fully
+      rendered as cards below it (`.devrun/shots/03-post-login.png`). Both the count
+      (`FeedCount: len(feedsRes.Get().Value)`, `render.go:1026`) and the card list
+      (`Feeds: ui.CreateElement(renderRail, railProps)`, same `feedsRes`) read the identical
+      resource in the same render pass, so this should not be reproducible by inspection alone.
+      Seen exactly once across roughly a dozen subsequent page loads in this session (every later
+      screenshot — after creating feeds 4, 5, 6 — showed a correct, matching count). Left open,
+      unfixed: not reproduced a second time, so there is nothing to verify a fix against yet. Next
+      step is a tighter repro (hammer login→/generate reloads) before touching the resource hook.
+- [ ] `A7-24` **Not a functional bug — downgraded from the original report.** Two "New feed"
+      buttons exist (`generate-rail-new` in the Feeds panel, and the strip's own via
+      `render_workbench.go:515`), but both call the exact same `railProps.OnNew` handler
+      (`render.go:436`), which correctly resets `draft`/`selectedSlug`/`creatingNew`/`fieldErrs`
+      every time — confirmed by reading the call sites, not just the behavior. Purely a UI
+      consistency question (two entry points to one action, no stated reason for both), not left
+      unfixed by mistake — deleting either button is a design call for a human, not something to do
+      unasked.
+- [ ] `A7-25` **GWC's `Announcer.Region()` renders the literal text "-0" into both live regions on
+      every mount — root cause found, not upstreamed.** Confirmed on `/login`'s first paint (before
+      any interaction): the polite and assertive regions each contain
+      `<span aria-hidden="true">-0</span>`. Visually hidden (clipped, 1px), but a screen reader
+      landing on either region on page load would hear "negative zero" for no reason. Traced to
+      `GoWebComponents/v5@v5.0.1`'s `ui/accessibility_shared.go:426`,
+      `announcementRegionNode`: `fmt.Sprintf("-%d", parseState.sequence)` with `sequence` at its Go
+      zero value (`0`) until the first real `Announce()` call — a one-line fix upstream (skip the
+      span, or format as `""`, when `sequence == 0`). Not this repo's bug (`web/shell`/
+      `web/pages/auth` never construct that string) and not patched here — GWC is vendored via
+      `go.mod` (`v5.0.1`, no local fork/replace), so fixing it in-repo means either forking GWC or
+      adding a `replace` directive, both scope decisions for whoever owns that project to make, not
+      something to slip in silently while fixing this repo's own bugs. Same disposition as `A7-07`.
+
+### Second browser walkthrough 2026-08-14 (further into J2, plus History/Settings/dark/narrow)
+
+Re-walked login -> new feed -> Validate -> Save -> History -> Settings, this time in a real browser
+across desktop, dark mode, and a 375px viewport (`.devrun/shots2/`). Test feed created and deleted
+via `aff feed delete` afterward, same as the first pass.
+
+- [x] `A7-26` **FIXED 2026-08-14: `/settings` → Security's Active Sessions table was illegible —
+      every column truncated to 2-4 characters, including the IP address the table exists to show.**
+      At 1280px the table measured ~320px wide (`.devrun/shots2/06-settings.png`): headers read
+      `C..`/`Ac...`, cells read `127...`/`0 se...`/`N.`. Root cause: `.af-settings-card` is a CSS
+      grid (`repeat(auto-fit, minmax(20rem, 1fr))`); a rule already existed to pull whole-card
+      content (headings, tables, etc.) out of that grid via `grid-column: 1/-1`, scoped to
+      `.af-settings-card > .af-table-wrap` among others — but nothing in the markup ever carried the
+      `af-table-wrap` class. `render_security.go` passes `affui.VirtualTable(...)` straight into
+      `screenWrapperRetry`, whose populated branch (`web/ui/state.go`'s `StatePanel`) returns a bare
+      `Fragment` with no wrapper element, so `VirtualTable`'s own root landed as a direct grid child
+      and was squeezed into one `minmax(20rem, 1fr)` track. Fixed by wrapping the `VirtualTable` call
+      in `h.Div(h.ClassStr("af-table-wrap"), ...)` — the class the CSS rule already expected.
+      Also split `.af-table-wrap` into its own `css.Global` call in `styles.go`: it was folded into a
+      large comma-joined selector string, and `scripts/check-styles.sh`'s check (b) only reads the
+      FIRST token of a multi-selector string (documented in its own header), so the moment the class
+      was actually used it read as "no matching rule" even though one existed — now a standalone
+      rule, `check-styles.sh` passes clean. Verified live: table width went from ~320px to 1026px
+      (`document.getElementById('settings-sessions-table').getBoundingClientRect().width`, matching
+      its card container), `document.documentElement.scrollWidth` no longer exceeds `clientWidth`,
+      and `.devrun/shots2/11-sessions-fixed.png` shows every column (Device, IP address, Last seen,
+      Current, Actions) fully legible with room to spare. `go build`, `go vet`, `gofmt -l`, and the
+      full `go test ./...` all stayed clean.
+- [ ] `A7-27` **A just-saved feed's card briefly renders broken during the Save transition.**
+      One screenshot caught it (`.devrun/shots2/04-after-save.png`): right after clicking Save, the
+      new 4th feed card's action row (`Enabled / Run now / ⋯`) rendered with no title/slug above it,
+      and the recipe-settings summary line (schedule/budget text) floated above the whole Feeds
+      panel instead of inside its own collapsible. A reload ~1.5s later showed both correct
+      (`.devrun/shots2/10-fresh-reload-after-save.png`) — self-healing, not a persistent bug, but a
+      real flash of broken UI a user watching the Save button would see. Not investigated further
+      this pass; worth a closer repro (slow down the network/CPU throttle in the browser to widen the
+      window) before attempting a fix, since a one-off screenshot isn't enough to point at a cause.
+
 ### Review sweep 2026-08-10 (A5 series)
 
 Seventeen parallel reviewers audited every page against `PLAN.md` and this file. Items marked
@@ -1502,6 +1647,102 @@ feed to sample it" copy is gone. It reviewed the bundle that was live at the tim
       repointing a feed for `A4-30`'s live run. Either implement TOML (which is what §7 promises and
       what a human hand-edits comfortably) or rename the command and fix §7 — but the current state
       means the documented disaster-recovery path does not work with the format it names.
+- [x] `A4-47` **A second live generation run, at Cam's explicit request** (same RULE-1 lift as
+      `A4-30`), through the real admin UI this time (not `aff sample`) — `daily-anime-trivia`,
+      Sample/Preview, real spend throughout. Two real findings, then a confirmed-working fix:
+      1. **Effort tier "Smart" is incompatible with reasoning-tier models.** Picking `gpt-5.5-pro`
+         (a top-tier model, chosen for "make sure quality is high tier") with Effort=Smart failed
+         before any generation ran: `openai API error (status 400 ... param reasoning.effort):
+         Unsupported value: 'minimal' is not supported with the 'gpt-5.5-pro' model. Supported
+         values are: 'medium', 'high', and 'xhigh'.` SchemaFlux's `.Smart()` sends a fixed
+         `reasoning.effort` value with no per-model capability check — this repo has no control over
+         that (`internal/llm.go`'s own comment: "unknown values fall through to the library
+         default"). Not filed as its own ticket — same disposition as the GWC upstream items
+         (`A7-25` etc.): a vendored dependency's gap, worth knowing before picking a model+effort
+         combo, not something to patch here. Cam's call: use `gpt-5.6-luna` instead — real generation
+         call, no error, $0.0005134/1287 tokens.
+      2. **The seed prompt reliably failed post-generation validation with a real model.** Even with
+         `gpt-5.6-luna` working, the FIRST real candidate — and its automatic repair attempt — both
+         failed: `generation rejected every item twice reasons="map[summary_contains_html:1
+         tags_not_lowercase:1]"` ($0.0005134 + $0.000596 spent on the two attempts, nothing written —
+         confirmed via `aff item list`, item count unchanged, matching J3's "sampling writes nothing"
+         sanity assertion). `internal/generate/contract.go` requires `summary_text` to contain zero
+         HTML tags (HTML belongs only in `answer_html`/`body_html`) and every tag lowercase — the
+         stored `SystemPrompt` said neither. **Fixed**: appended "The summary must be plain text
+         only — no HTML tags, markup, or formatting of any kind; save HTML for answer_html. If you
+         include tags, every tag must be all lowercase." to `daily-anime-trivia`'s system prompt via
+         the real UI (Save, an ordinary DB write, no cost). **Verified**: re-sampled with the fixed
+         prompt — succeeded on the FIRST attempt, zero repairs, `$0.0006002`, 1391 tokens. Candidate:
+         title "Death Note Trivia: The Notebook's Shinigami", question "In Death Note, what is the
+         name of the shinigami who drops the notebook into the human world?" (factually correct,
+         spoiler-safe, single unambiguous answer), novelty verdict NOVEL. Confirmed nothing was
+         written by any of the three sample calls (`aff item list`, no "Death Note" item exists).
+      Total real spend across the whole exercise: ~$0.0017. Whether `A4-40`'s "question lands in the
+      wrong field" finding is still live was not re-verified here — this run's rendered card showed
+      the question correctly in the visible summary position, suggesting it may already be fixed,
+      but that ticket stays open until someone actually checks the raw `summary_text`/`body_html`
+      split rather than the rendered view.
+- [x] `A4-48` **FIXED, found verifying `A4-47`'s cost tracking end to end at Cam's explicit request
+      ("make sure cost tracking is working"): overriding the model on a Sample call priced the
+      request against the SAVED recipe's model, not the model actually called.** Live repro: the
+      strip picker's model override to `gpt-5.6-luna` correctly ran the generation against that
+      model, but the candidate showed `Candidate cost: $0.0000` even after a real price-table row
+      for `gpt-5.6-luna` existed (`aff system settings get` confirmed the row was saved) — the very
+      same call that just cost `$0.0006002` per SchemaFlux's own log. `aff system stats` confirmed
+      it wasn't a display-only bug: `today_spend_usd: 0` despite three real generation calls.
+      **Root cause**: `internal/rpc/sample.go`'s `smpFeedLookup.GetFeedForSample` resolves
+      `PriceInputPerMToken`/`PriceOutputPerMToken` from the FEED'S SAVED model
+      (`daily-anime-trivia`'s stored recipe pins `gpt-4o-mini`, itself unpriced) via
+      `generateSpecFrom`'s `prices.Lookup(fs.Model.Model)` — correctly, for the "sample the saved
+      recipe" case. But `smpApplyDraft` (called after, to overlay an unsaved editor draft — the
+      strip's per-call model/effort/prompt override, PLAN.md §12.3) only wrote `spec.Model = v`, never
+      re-deriving the price fields for the NEW model. The candidate was correctly generated against
+      `gpt-5.6-luna` and correctly cost real money, while every cost figure the operator could see
+      (candidate cost, feed spend, `today_spend_usd`, the daily budget ceiling) was silently priced
+      as if `gpt-4o-mini` had been called — worse than `A4-41`'s "empty table reads zero", because a
+      populated table made it look trustworthy while still being wrong for the one thing an operator
+      would actually check after adding a rate.
+      **Fixed**: added `smpPriceLookup` (an interface over `*budget.Table`'s `Lookup`, matching this
+      file's existing narrow-interface discipline) and a `Prices` field on `SampleServerConfig`,
+      wired to the same `*budget.Table` instance scheduled runs already use
+      (`cmd/animefeedflux/wire.go`'s `prices`, previously only passed to `feedLookup`). `smpApplyDraft`
+      now re-derives both price fields from the OVERRIDDEN model whenever the draft actually changes
+      `spec.Model` — an unpriced override zeroes the rate (matching how an unpriced saved model
+      already behaves) rather than silently inheriting the saved model's rate. `Prices` is optional
+      (nil is valid, same pattern as every other dependency in this file) and a nil lookup leaves the
+      price untouched — the exact pre-fix behavior — so this cannot regress a caller that has no
+      price table wired at all.
+      Tests: `TestApplyDraftRepricesAnOverriddenModel`'s four subtests (priced override re-derives
+      both rates; unpriced override zeroes rather than inherits; no model override leaves price
+      untouched; nil lookup leaves price untouched) in `internal/rpc/sample_draft_test.go` — the
+      existing `smpApplyDraft` call sites were updated for the new signature, not skipped. Full
+      `go test ./...` and `go build ./...` clean.
+      **Verified live**, real provider call: re-sampled `daily-anime-trivia` overridden to
+      `gpt-5.6-luna` (now priced at $0.30/$1.20 per 1K tokens in/out) — `Candidate cost: $0.3429
+      (tokens in=767 out=94)`, and `767/1000*0.30 + 94/1000*1.20 = 0.3429` exactly. `aff system stats`
+      confirmed the fix reaches the aggregate too: `today_spend_usd: 0.3429`,
+      `today_remaining_budget_usd: 4.6571` (against the $5 global ceiling) — both were `0`/`5` before
+      this fix, for the identical call shape. `aff item list` reconfirmed 50 items, unchanged —
+      sampling still writes nothing, per J3.
+- [x] `A4-49` **Not a bug — a still-missing price row Cam hit immediately after `A4-48` shipped,
+      reported as "the preview costs doesn't get populated."** A real sample against
+      `daily-anime-trivia` left at its OWN saved default model read `Candidate cost: $0.0000
+      (tokens in=767 out=112)` — server log confirmed the call actually ran against
+      `gpt-4o-mini-2024-07-18` (`"No pricing information available; cost reported as unpriced"`,
+      `cost_usd=0`), not the `gpt-5.6-luna` `A4-48` had just priced. This is exactly `A4-41`'s
+      documented, still-open gap (a model with no price-table row prices at zero) working as
+      designed — `A4-48` fixed the OVERRIDE-repricing bug, not "every model is priced," and only one
+      row (`gpt-5.6-luna`) existed at the time. Filed as `[x]` rather than `[ ]` because the
+      immediate, concrete instance is resolved: added a `gpt-4o-mini` row via the real Settings UI
+      using its real published OpenAI rate ($0.15/1M in, $0.60/1M out = $0.00015/$0.0006 per 1K,
+      not a guess — this is a real model, unlike `gpt-5.6-luna`/`A4-47`'s fictional dev-provider
+      ones). `A4-41` itself stays open: the underlying product gap (an unpriced model silently reads
+      as free, indistinguishable from "actually costs nothing") is a UX decision — whether an
+      unpriced model should show "unpriced" instead of "$0.0000" — that this ticket did not touch.
+      **Verified live**: re-sampled `daily-anime-trivia` at its own default model (no override) —
+      `Candidate cost: $0.0002 (tokens in=767 out=112)`, and
+      `767/1000*0.00015 + 112/1000*0.0006 = 0.000182 ≈ 0.0002` — correct. `aff item list`
+      reconfirmed 50 items, unchanged.
 - [ ] `A4-31` Span `llm.generate` comes from SchemaFlux — wire the provider, do not re-instrument. §15.0a
       — **UNTICKED 2026-08-10, was ticked in error.** The wiring is real: `cmd/animefeedflux/wire.go`
       calls `schemafluxotel.Install(obs.GetTracerProvider())`. The spans are not. Grepping the vendored
@@ -1696,6 +1937,54 @@ feed to sample it" copy is gone. It reviewed the bundle that was live at the tim
       `obs.NewLogger(obs.Options{...})` builds in `main.go` and threads through `runAll` — into the one
       publish-plane call site, so the event now reaches the canonical structured/stdout pipeline, not
       a side channel.)
+
+### Embeddable item list 2026-08-15 (A9-EM series, §6.1)
+
+Cam asked for "an embed so that the user can show simple formatted lists of the latest rss items."
+Built as an iframe document rather than a script widget — the reasoning is in `PLAN.md` §6.1 and
+`internal/render/embed.go`'s doc comment, and the rejected alternative is in `DEVLOG.md`.
+
+- [x] `A9-EM01` `GET/HEAD /embed/{slug}` renders the newest items as a standalone HTML document,
+      registered in **both** `NewServer` and `NewServerAndInvalidator`. §6.1
+      (Check: `TestEmbedServesHTML`, `TestEmbedHEADMirrorsGET`, `TestEmbedUnknownSlug404`,
+      `TestEmbedPathShape` — the same exact-match rule `handleItem` applies.)
+- [x] `A9-EM02` `SummaryText` only — never `BodyHTML`, never `AnswerHTML`. §5.5, §6.1
+      (Check: `TestEmbedNeverLeaksTheAnswer`, `TestEmbedRendersNoItemHTML`,
+      `TestEmbedNeverLeaksAnswerOverHTTP`, plus the `embed_trivia` golden.)
+- [x] `A9-EM03` `count`/`theme` are closed sets; anything else `404`s rather than being normalized,
+      so the cache stays bounded at nine documents per feed. §6.1
+      (Check: `TestEmbedParamsAreAClosedSet`, `TestEmbedVariantsAreSeparateEntries`.)
+- [x] `A9-EM04` Cached under `{slug}:embed:{count}:{theme}`; `Invalidate(slug)` drops every variant.
+      `Last-Modified` from the newest item, not `now()`. §6.1
+      (Check: `TestEmbedInvalidatedWithTheFeed`, `TestEmbedCacheHitTouchesNoBackend`,
+      `TestEmbedConditionalGET`, `TestEmbedLastModifiedIsContentNotNow`.)
+- [x] `A9-EM05` Embed CSP permits framing (`frame-ancestors https: http:`) and shuts everything else
+      off; every other route carries `frame-ancestors 'none'`. §6, §6.1
+      (Check: `TestEmbedIsFramableAndOtherRoutesAreNot`, `TestEmbedCSPIdenticalOnCacheHit`. Verified
+      in a real browser, which is what caught `*` not matching a non-network scheme.)
+- [x] `A9-EM06` The item list scrolls inside the fixed-height frame; heading and subscribe link stay
+      put. §6.1 (Check: browser screenshots at 900px and 360px, light and dark — before the fix the
+      subscribe link was sliced in half at the snippet's default height.)
+- [x] `A9-EM07` `/` carries an Embed link and a copyable iframe snippet per feed. §14.1
+      (Check: `TestIndex_TwoFeeds` pins the exact bytes; `TestEmbedSnippetShape`.)
+- [x] `A9-EM10` Layout pass against real content: one column with the timestamp as a caption (the
+      fixed date rail repeated the same string on every row of a run), summary clamped to three
+      lines, and **no timestamp at all when `published_at` is missing** rather than the zero time.
+      §6.1 (Check: `TestEmbedOmitsAZeroTimestamp`, `TestEmbedStampsDistinguishSameDayItems`, the
+      three embed goldens, and screenshots at 900px/360px in both schemes.)
+- [x] `A9-EM11` Sampler previews stamp a candidate with the time promote would assign. Fixes the
+      embed preview's "1 Jan 0001" **and** a pre-existing year-0001 `pubDate` in the Feed XML view
+      that `internal/feedvalidate`'s own date rules would reject. §12.3
+      (Check: `TestSample_PreviewsStampTheCandidate` in `internal/rpc`.)
+- [ ] `A9-EM08` Tighten the default CSP beyond `frame-ancestors 'none'` (a real `default-src` for the
+      index and permalink pages). Deliberately not done alongside the embed: the permalink renders
+      sanitised model-authored HTML that may legitimately carry inline markup, so this needs its own
+      change with its own failure modes thought through, not a one-line widening of a header written
+      for a different page. §6
+- [ ] `A9-EM09` Decide whether the embed deserves its own `Cache-Control` (longer than a feed's
+      `max-age=900`). It currently shares the operator's single publishing setting. An embed is
+      fetched once per page view rather than once per poll, so the traffic shape genuinely differs —
+      but a second setting is a real UI/§12.5 addition, not a constant to slip in. §6.1, §12.5
 
 ## AF — Fuzz, soak, and load (cross-cutting; land as the pieces they target land)
 
@@ -2586,6 +2875,39 @@ one owner, not because a second language is planned.
 - [x] `D1-10` Document the `aff admin reset` break-glass **on the page**. §12.2
 - [x] `D1-11` `ELEVATED` cannot navigate to `/generate`, `/history`, or `/settings`. D-FLOW
 - [ ] `D1-12` **Perform a full recovery drill against staging.** §19
+- [x] `D1-13` `/setup`: one-time first-run account creation in the browser — `AuthService.Setup`
+      (password in; provisioning URI + recovery codes out, shown once; no session minted), open
+      first-come by decision (§4, DEVLOG 2026-08-15), one generic refusal once the admin row
+      exists. Check: `internal/rpc/setup_test.go` (claim + login round-trip, recovery codes live,
+      generic refusal on both claimed shapes, weak-password rejection doesn't burn the window,
+      no-session reachability) and `web/pages/auth/setup_state_test.go` all green; `/setup`
+      registered in `web/shell`'s route table and registration test. Added 2026-08-15.
+
+## A10 — Two-stage generation & per-run model defaults (§9 revision 2026-08-15)
+
+- [x] `A10-01` **Stage-2 per-surface formatting**: after novelty + per-run cap, one structured call
+      per publishing item produces `feed_html` / `card_text` / `embed_text` / `page_html`
+      (`internal/generate/formats.go`), re-validated with the raw fields' own rules and stored in
+      `items.formats_json` (migration 0007). Renderers read via `model.Item.Render*` accessors with
+      raw-field fallback; a missing capability, failed call, or rejected variant degrades — never
+      gates. Sample runs stage 2 too, so the sampler previews what a real run publishes. Editing
+      clears variants. Check: `internal/generate/formats_test.go`,
+      `internal/store/item_formats_test.go`, full render suite green.
+- [x] `A10-02` **Per-run model resolution**: an empty recipe model runs on the settings default
+      model + effort, read live per run (`cmd/animefeedflux` `loadProviderDefaults` /
+      `generateSpecFrom`), priced at the resolved model; a pinned model stays pinned. The editor's
+      empty option now reads "Global default (from Settings)". Check:
+      `TestGenerateSpecFrom_UnknownModelPricesAtZero`'s inherited/pinned cases; option verified
+      live in the browser.
+
+- [x] `A10-03` **Schedule modes** (§7 revision 2026-08-15): `schedule_mode` = scheduled (default) /
+      adhoc (manual-only — scheduler skips it before Firing(), staleness exempt, schedule fields
+      unvalidated while ignored) / watch (schedule = check cadence: system prompt gains the
+      empty-answer escape, an empty batch is `skipped/nothing_noteworthy` with exactly one model
+      call — no repair, no novelty re-roll — and staleness is exempt). Editor gains a "Runs" mode
+      select that hides the builder for ad hoc; TOML round-trips the field; unknown modes rejected
+      (`schedule_mode_unknown`). Check: `internal/feedspec/schedule_mode_test.go`,
+      `internal/generate/watch_test.go`, `internal/ops` staleness suite green.
 
 ## D2 — Generate (`J2`, `J3`, `J4`, `J9`)
 
@@ -2611,6 +2933,16 @@ one owner, not because a second language is planned.
 - [x] `D2-20` Candidate view: **raw validated fields**. §12.3
 - [x] `D2-21` Candidate view: **exact feed XML**. §12.3
 - [x] `D2-22` Candidate view: **Slack card preview** — the thing that actually gets read. §12.3
+- [x] `D2-22a` Candidate view: **embed preview** — the §6.1 document, live in a sandboxed iframe
+      rather than as HTML source, sitting between Feed XML and the Slack card (Slack stays last:
+      §12.3's ordering argument is about what to check immediately before promoting, and the embed
+      did not displace it). Server renders it through `render.Embed` into
+      `SampleCandidate.embed_preview_html`. §6.1, §12.3
+      (Check: `TestSample_EmbedPreview_RendersTheRealEmbed` and
+      `TestSample_EmbedPreview_HidesTheAnswer` in `internal/rpc`;
+      `TestCandidateViewContentSwitchesFields`, `TestCandidateViewIDsRoundTripIncludingEmbed` and the
+      view-count assertions in `web/pages/generate`, run under `GOOS=js GOARCH=wasm` via node;
+      `sandbox=""` + `srcdoc` verified to render styled in a real browser, both colour schemes.)
 - [x] `D2-23` Novelty verdict with the nearest existing item shown. §12.3
 - [x] `D2-24` Grounded: candidate source set with failed links flagged and the URL shown. §12.3
 - [x] `D2-25` Cost per sample and remaining daily budget. §12.3
@@ -2640,11 +2972,232 @@ one owner, not because a second language is planned.
       (`internal/rpc/run.go:288,455`) has no production caller — only `internal/rpc/run_test.go:323` —
       and `cmd/animefeedflux/wire.go`'s `wireRunExecutor` builds `generate.Deps` with no reporter, so
       a live progress tick is never emitted at runtime even if a page did subscribe.)
+- [x] `D2-31` **Redesigned 2026-08-15, at Cam's explicit request ("I still don't like this page...
+      redesign from scratch with high ui/ux in mind using the front end design skill") — not a new
+      visual direction, but the first pass that actually executes the one already on file.**
+      `docs/design-direction.md` ("the animation timesheet": rules not cards, radius 3px uniformly,
+      the tape as the one signature element worth spending boldness on, redline as a single sparse
+      column divider) was written and largely followed in the ROW-level code
+      (`render_rail.go`/`emitRailStyles`) — but the workbench rebuild (`A4-44`) nested that same rail,
+      plus the recipe form and the sampler, inside its own newer sections without dropping their
+      OLD standalone-pane styling (`paneBase`: hairline border, `RadiusSm`, surface fill, padding,
+      independent scroll region). The result was a box inside a box inside a box everywhere — the
+      Feeds `<details>` containing a bordered `<aside>` containing bordered `<li>` rows; the recipe
+      `<details>` containing a second bordered panel; the preview column containing a third. Exactly
+      the "generic SaaS card deck" the direction doc's own palette section names as what this project
+      is deliberately not.
+      **Fixed, CSS/markup only — no state/RPC/hook logic touched**:
+      - `paneBase` → `paneLayout`: `.af-generate__rail`/`__editor`/`__sampler` keep their flex layout
+        but lost the border/radius/fill/padding/independent-scroll that made them read as nested
+        panels. They now flow as plain content inside whichever workbench section already contains
+        them.
+      - `.af-rail__row`: was a bordered, radius'd, per-row-filled card with a `gap` between rows
+        (floating cards in a list). Now a ruled row — no border-box, no radius, a bottom hairline
+        rule shared between adjacent rows (the timesheet's own device, per the doc's anchor), full
+        width, left-edge accent bar kept for selection (accent)/staleness (warning).
+      - The tape: `1.25rem` tall, squeezed between the title line and the meta line, to `2.25rem`,
+        its own line, a visible 2px baseline instead of a 1px hairline glimpsed at a cramped strip's
+        bottom edge, and 3px ticks (was 2px). "Spend the boldness here" was already the doc's own
+        instruction; the implementation hadn't spent much of it.
+      - Added the genuinely missing piece: docs/design-direction.md's redline is defined as "a
+        vertical column divider... the loudest thing on the page... exactly one boundary per view,"
+        but nothing on this page used it that way before — the prompt-editing and preview columns
+        just shared a plain grid `gap`. Now a real 2px redline rule sits between them
+        (`.af-gen__work-divider`), hidden below the narrow breakpoint where the columns stack.
+      - Removed a duplicate heading found while de-boxing the Feeds section: the `<details>`'s own
+        `<summary>` ("Feeds (N) — status, schedule, spend, delete") sat directly above a second,
+        redundant `<h2>Feeds</h2>` inside `render_rail.go`'s own header — invisible before because it
+        was buried inside a bordered box, obvious once that box was gone. Removed the h2, kept the
+        header's "New feed" button (the row's actual reason to exist).
+      Verified: `go build`, `go vet`, `gofmt -l`, native `go test ./...`, and
+      `GOOS=js GOARCH=wasm go test ./web/...` all clean. `scripts/check-styles.sh`'s FAIL list is
+      unchanged (still only pre-existing `history-*` entries, nothing from this pass). Screenshotted
+      live in light, dark, and 375px narrow (`.devrun/redesign/03-05`) — the redline divider correctly
+      hides below the narrow breakpoint where the two columns stack, and the tape scales cleanly at
+      every width tried.
+      **Not done in this pass** (would need actual state/logic changes, out of a CSS/markup-only
+      redesign): the strip toolbar's individually-bordered small controls (model/effort/size/temp)
+      still read as a row of small boxes rather than a unified instrument strip; whether the
+      variable-chips comment in `render_workbench.go` claiming to be "the signature" should be
+      reworded now that `docs/design-direction.md`'s tape is unambiguously the one the whole
+      direction is built around — two files each claiming "the signature" is a real, if minor,
+      inconsistency this pass did not resolve. **Both addressed in `D2-32` below, same day.**
+- [x] `D2-32` **Two follow-ups to `D2-31`, both from Cam pushing back on the result — "the feeds take
+      up so much space... what if you had 20 feeds?" and, separately, "the design is still horrible
+      ... use the front end design skill."**
+      1. **The list didn't scale.** `D2-31` made the tape bolder (good in isolation, at 3 feeds) but
+         every row still rendered at full detail forever, so the list's own height was O(feed count)
+         — unbounded. Verified concretely, not assumed: created 17 throwaway feeds via
+         `aff feed create` (real CLI, `stress-test-1..17`, seed-model so nothing billable), giving 20
+         total. Measured before fixing: the list's un-capped content would be 3281px tall. **Fixed**:
+         `.af-rail__list` gets a `max-height: 26rem` + internal `overflow-y: auto` — the roster
+         becomes a bounded, scrollable instrument panel instead of an ever-growing page, so the
+         prompt/preview work area sits at a fixed, predictable position regardless of feed count.
+         `FeedsOpen: true`'s own existing comment already explains why collapsing the whole
+         disclosure was rejected once before (it hid the enable toggle/Run Now the moment you started
+         working) — capping height keeps every control reachable without that page-length cost, and
+         doesn't re-litigate that earlier decision. Dialed the tape back from `D2-31`'s `2.25rem` to
+         `1.75rem` at the same time — the larger size cost more of the now-capped height than it
+         earned over 1.75rem. Verified live: with the same 20 feeds, `.af-rail__list`'s
+         `clientHeight` measured 416px (capped) against a 3281px `scrollHeight`, and the page's own
+         `document.documentElement.scrollHeight` stayed at 1483px — unaffected by feed count.
+         Stress-test feeds deleted after via `aff feed delete`; confirmed back to the real 3.
+      2. **The strip toolbar was still a wall of identically-bordered boxes** — feed picker, New,
+         Save, model, effort, size, temp, all the same small gray box in a row, no hierarchy, the
+         part of the page every operator sees first and most often. Restructured into three real
+         zones (`render_workbench.go`'s `renderStrip`, `styles.go`'s `emitWorkbenchStyles`):
+         - **Identity** — the feed picker now reads as a page TITLE (`TextLg`, semibold, no box, a
+           2px bottom rule instead of a bordered dropdown), not a form field competing at the same
+           size as a temperature input. New/Save/⋯ sit beside it as clearly secondary controls.
+         - **Params** — model/effort/candidate-count/temperature were four separate floating boxes;
+           now one joined instrument cluster (`.af-gen__strip-params`): a single border+fill around
+           all four, hairline dividers between cells instead of four borders and four gaps. They are
+           four dials on the SAME upcoming call, and now read as one control instead of four
+           unrelated ones.
+         - **Verb** — Preview + its cost estimate, unchanged, still the one filled/primary control.
+      Verified live in light, dark, and 375px narrow (`.devrun/redesign/06-10`); at 375px the params
+      cluster wraps to its own row and the temp field drops inside it — no overflow. `go build`,
+      `go vet`, `gofmt -l`, native `go test ./...`, and `GOOS=js GOARCH=wasm go test ./web/...` all
+      clean throughout both fixes.
+- [x] `D2-33` **`D2-32`'s own "fix" for 20 feeds was itself a real bug — flagged directly: "you can't
+      have 2 scrolls on top of each other with deps between them."** `.af-rail__list`'s capped
+      `max-height` + `overflow-y: auto` was an INNER scroll region nested inside the PAGE's own
+      scroll, directly under a `position: sticky` strip that depends on that same outer scroll. Two
+      scroll regions stacked on one axis, one depending on the other's position, is exactly the
+      "scroll trap" antipattern it sounds like: hover the wrong pixel and the wheel moves the wrong
+      region (or nothing). **Fixed properly**: removed the inner scrollbox entirely and paginated the
+      list instead (`railPageSize = 8`, `railClampPage`/`railPageSlice`/`renderRailPager` in
+      `render_rail.go`) — plain client-side paging over the already-fully-loaded feed list (no server
+      cursor needed, unlike History's runs/items), so there is exactly ONE scroll region on this page,
+      same as every other page in this app. Page state lives in `render.go`'s `railPage` (survives
+      the rail unmounting, same pattern as `Selected`/`KebabOpen`). The numbered gutter stays
+      continuous across pages — page 2 starts at row 9, not back at 1 — since `indexOf` is computed
+      over the full list before slicing.
+      **Also caught and fixed in the same pass**: the pager's own i18n key
+      (`generate.rail.pager.status`) shipped using History's NAMED-placeholder convention
+      (`{page}`/`{total}` with a `map[string]any` arg) copied without checking that `generate`'s own
+      translator (`web/main.go`'s `bundleTranslator`) is POSITIONAL (`{arg1}`/`{arg2}`, via
+      `positionalArguments`) — different from history's `bundleCatalog`. Caught live: the pager
+      rendered the literal text "Page {page} of {total}" instead of substituting. Fixed the key text
+      and the call site to match this package's actual convention.
+      Verified live with the same 17-throwaway-feed stress test as `D2-32` (20 feeds total,
+      `stress-test-1..17` via `aff feed create`, deleted after): `getComputedStyle('.af-rail__list')`
+      confirmed `overflow-y: visible` / `max-height: none` (no nested scrollbox), 8 rows per page,
+      pager read "Page 1 of 3" correctly substituted, clicking Next advanced to "Page 2 of 3" with the
+      first visible row correctly numbered 9. `go build`, `go vet`, `gofmt -l`, native
+      `go test ./...`, `GOOS=js GOARCH=wasm go test ./web/...`, and `affi18n lint` all clean.
+      Screenshots: `.devrun/redesign/11-12`.
+- [x] `D2-34` **`D2-31`/`D2-32`/`D2-33` all kept the SAME single-column skeleton (sticky strip → a
+      "Feeds" section → the work area → a recipe disclosure) and only restyled what was inside it —
+      flagged directly, sharply: "the layout looks the same... you kept giving me the same fundamental
+      layout." The pagination churn in `D2-33` was itself a symptom of that: a single stacked column
+      with a "Feeds" SECTION was fighting the fact that a feed roster and a feed's own work area are
+      two different things an operator looks at differently (scan the roster vs. focus on one feed),
+      and no amount of restyling that one section resolved it.
+      **Fixed with a genuinely different structure**: two columns, siblings, not stacked. A persistent,
+      compact, independently-scrolling sidebar (`.af-gen__sidebar`, `render_rail.go`) — every feed,
+      always visible, no cap, no pager, no disclosure to open — beside a main column
+      (`.af-gen__main`) holding everything about whichever ONE feed is loaded: the strip, its tape
+      (moved from a cramped per-row sliver to a full-width header for the loaded feed), its stakes
+      line, the prompt/preview work area, its recipe settings. `renderRail`/`renderRailRow` rewritten:
+      pagination code deleted (`railPageSize`/`railClampPage`/`railPageSlice`/`renderRailPager` gone),
+      rows compacted to two lines (status dot + numbered title + combined slug/last-build meta line
+      via new key `generate.rail.compactMeta`), Run Now moved into the row's kebab alongside
+      History/Delete. `renderWorkbench` (`render_workbench.go`) rebuilt around the two-column shell;
+      `renderFeedsDisclosure` deleted (the sidebar is permanent now, never collapsed).
+      This also closes `D2-33`'s "two scrolls with dependencies" bug FOR REAL rather than by avoidance:
+      sibling columns with independent scroll regions is the normal, unambiguous version of that
+      pattern (an inbox beside a reading pane) — the sidebar gets its own `height`/`overflow-y: auto`
+      (sticky-positioned so it stays viewport-pinned), the main column scrolls with the page same as
+      the strip's existing `position: sticky` always assumed.
+      **Two real bugs caught and fixed during CSS verification, not just styling gaps**: (1) the
+      sidebar's `align-self: flex-start` (needed on desktop so the sticky sidebar does not stretch to
+      the page's full height) also disabled cross-axis stretch in the narrow (<640px) column layout,
+      where the CROSS axis is width, not height — this left the sidebar sized to its own unshrunk
+      content instead of the viewport and pushed the whole page ~136px wider than the 390px viewport,
+      confirmed via a `getBoundingClientRect().right > viewport width` sweep over every element.
+      Fixed by restoring `align-self: stretch` inside the narrow override. (2) the classic nested-flex
+      ellipsis trap: `.af-rail__row-title`'s `text-overflow: ellipsis` needed `min-width: 0` at EVERY
+      flex level down from the row (row → row-body → title-line → title), not just the outer one,
+      or a long feed title refuses to shrink below its own min-content width and the whole row
+      overflows. (3) stale copy: `generate.workbench.feedsSummary` still read "status, schedule,
+      spend, delete" — a description of the old six-field detail-card row this pass removed; trimmed
+      to "Feeds ({arg1})" (added to i18n's `sameByDesign` list, matching the borrowed-term precedent
+      already set for "feed" itself in this package).
+      Verified live: 3-real-feed layout (light + dark, 1440px), 390px narrow (two columns collapse to
+      one, sidebar caps at 40vh and scrolls, verified zero elements exceed the viewport width via the
+      sweep above), and the same 17-throwaway-feed stress test as `D2-32`/`D2-33` (20 feeds total via
+      `aff feed create`/`feed delete`, `aff login` piped with a TOTP code generated from
+      `AFF_E2E_ADMIN_TOTP_SECRET`) — confirmed via `scrollHeight` (1056) > `clientHeight` (900) that
+      the sidebar genuinely needs and gets its own scroll, and confirmed the independence directly:
+      scrolling the sidebar to 156px left `window.scrollY` at 0, and scrolling the page to 100px left
+      the sidebar's `scrollTop` unchanged at 156 — two scroll regions that provably do not affect each
+      other. `go build`, `go vet`, `gofmt -l`, native `go test ./...`,
+      `GOOS=js GOARCH=wasm go build ./web/...`, `GOOS=js GOARCH=wasm go test ./web/...` (via
+      `scripts/coverage-wasm.sh`, all packages `ok`), and `affi18n lint` all clean.
+      Screenshots: `.devrun/twocol/01` (light), `02` (dark), `03` (narrow), `04` (feed selected),
+      `05`–`07` (20-feed stress test, unscrolled/sidebar-scrolled/page-scrolled).
+- [x] `D2-35` **E2E follow-up on `D2-34`, requested directly** ("picking on a feed looks buggy and
+      previews dont seem to work"). Instrumented live and found the feed-picking half worked correctly
+      in every scenario tried (select-value/prompt/model sync across all three feeds, double-click same
+      row, toggling a DIFFERENT row's switch, an unsaved dirty edit surviving a feed switch) — the
+      "buggy" read traces to a real but separate defect below, not to selection itself.
+      **Real bug found and fixed**: `SampleServiceSampleStreamRequest`'s terminal `Done` message can
+      carry a real, actionable `ErrorMessage` while leaving `ErrorKind` at its zero value
+      (`ERROR_KIND_UNSPECIFIED`) — confirmed live against `weekly-anime-news` (a GROUNDED seed feed):
+      the server replied `errorKind=0, errorMessage="rpc: sample failed: generate: fetching candidates:
+      wire: grounded-feed source fetching is not wired in this build (feed 2)"`, a real, precise
+      explanation of why nothing happened. `render.go`'s `OnSample` stream loop only called
+      `sampleErr.Set` when `ErrorKind != UNSPECIFIED`, so that message was silently discarded — Preview
+      returned to its resting state in under a second with candidates empty and no error shown,
+      indistinguishable from the button doing nothing at all. Root-caused with `println` debug
+      instrumentation added temporarily to the stream-receive loop (removed after); the dead giveaway
+      was the server log showing zero "Generate operation started" lines for that call despite the
+      client reporting `SampleStream` opened without error — the failure happened before any LLM call,
+      in the grounded-feed source-fetch step, which is genuinely unimplemented server-side for this
+      build. Fixed by surfacing the terminal message whenever EITHER `ErrorKind` is set OR
+      `ErrorMessage` is non-empty (`render.go`), and by not prefixing the taxonomy name when there is no
+      classified kind (`errors.go`'s `errSample.Error()` — "ERROR_KIND_UNSPECIFIED: ..." would have read
+      as a leaked internal enum name instead of the message it exists to show).
+      **Second finding, fixed in the same pass**: opening "Recipe settings" on any feed showed a full
+      "Prompts" fieldset with its own System/User Prompt textareas — a byte-for-byte duplicate of the
+      two most prominent fields already at the top of the page, left over from before the workbench
+      redesign moved prompts out of the old all-in-one editor form. Both copies stayed in sync (same
+      underlying draft field) so this was never a data bug, but seeing the same long text twice on one
+      page, in two different visual styles, is exactly the kind of thing that reads as "buggy" on a
+      quick look. Removed the duplicate fieldset from `render_editor.go` (`renderEditorForm`); the two
+      field-level validation errors it used to show (`system_prompt_template`/`user_prompt_template`)
+      are now wired onto the top-level workbench fields instead via a new `fieldErrNode` helper
+      (`render_workbench.go`) so error visibility was not lost in the removal. Orphaned i18n keys
+      (`generate.editor.prompts`, `generate.editor.promptVariablesHint`) and the now-dead
+      `.af-prompt-vars` CSS rule removed with it.
+      Verified live: all three feeds re-selected with the fix in place (state sync unchanged), the
+      grounded feed's Preview now shows the real error text instead of silence, a real generative
+      feed's Preview still produces a real candidate end to end, the recipe drawer no longer shows the
+      duplicate Prompts section (confirmed via DOM query: no `#generate-editor-system-prompt`/
+      `#generate-editor-user-prompt`/`<legend>Prompts</legend>` present), and no page/console errors
+      throughout. `go build`, `go vet`, `gofmt -l`, native `go test ./...` (including the added
+      `sameByDesign` cleanup in `web/i18n/locale_test.go`), `GOOS=js GOARCH=wasm go build ./web/...`,
+      `GOOS=js GOARCH=wasm go test ./web/...` (via `scripts/coverage-wasm.sh`, all packages `ok`), and
+      `affi18n lint` all clean.
 
 ## D3 — History (`J5`, `J6`)
 
 - [x] `D3-01` Two tabs over one page: Runs and Items. §12.4
 - [x] `D3-02` Runs: status, trigger, duration, items added/rejected, tokens, cost, error kind. §12.4
+      **2026-08-14: added a "Started" column** — the list had every other run
+      field but no absolute date/time, only the row's position in the
+      (already time-ordered) list to go on. Added via `runStamp` (UTC,
+      seconds), the same formatter `runDetailFacts` already used for the
+      expanded panel below each row — so a run's row and its own detail agree
+      on the timestamp format, matching how the detail panel's own doc
+      comment justifies second precision (agrees with log lines, catches a
+      sub-second run). Items' Published column got the same treatment
+      (`formatTimestamp`, previously date-only via `i18n.FormatDate` at
+      `DateStyleMedium`): J10's sanity assertions require every item's
+      `PublishedAt` to be unique and strictly decreasing, and `e2eweb`'s J10
+      harness already found a real violation of that once — a date-only
+      column cannot show a same-second collision, seconds can.
 - [ ] `D3-03` Runs: filter by feed, status, date range. §12.4 — UNTICKED 2026-08-10, was ticked in error: `web/pages/history/runs_ui.go` renders only one filter control, `history-runs-feed-filter` (a bare number input). No status filter and no date-range control are rendered, despite the logic-layer `RunFilter` struct supporting more.
 - [x] `D3-04` Runs: expand to the full log. §12.4
 - [ ] `D3-05` Runs: in-flight run streams live. §12.4 (**unticked by audit 2026-08-10.** No live stream exists on this surface: `.Watch(` appears nowhere under `web/pages/history` — only in the `web/wsconn/clients.go:239` wrapper, which nothing calls. The run-log expander is pull-based. Same missing caller as `D2-30`.)
@@ -2714,6 +3267,16 @@ one owner, not because a second language is planned.
 - [x] `D4-05` Provider: active provider and default model for new feeds. §12.5
 - [x] `D4-06` Provider: **key presence only** — never displayed, never sent to the client. §12.5
 - [x] `D4-07` Provider: editable price table used for cost estimates. §12.5
+- [x] `D4-16` Provider page redesign (2026-08-15, Cam's directives): provider CARDS with one-click
+      switching (built-in OpenAI first, never removable); **API keys configured in the UI and
+      stored encrypted with AFF_SECRET_KEY** — write-only fields, booleans back, stored key wins
+      over the env fallbacks (§19 secrets revision, DEVLOG); backend free-text → seven-option
+      menu; price table displayed in **$ per 1M tokens** (stored unit unchanged per-1K), rows
+      removable, model-column sliver and grid-column layout bugs fixed. Check:
+      `internal/rpc/provider_keys_test.go` green (round-trip, no-echo, ciphertext-only at rest,
+      stored-wins-over-env, clear, GC, no-AFF_SECRET_KEY refusal, default-provider slot);
+      full add→store→switch→remove flow driven live in a headless browser against the dev server;
+      light/dark × desktop/narrow screenshots reviewed.
 - [x] `D4-08` Generation: kill switch, global ceiling, default budgets, staleness threshold. §12.5
 - [x] `D4-09` Publishing: base URL, author, copyright, TTL, default `og:image`, validated on save. §12.5
 - [x] `D4-10` Data: TOML export/import, backup download, DB size, item counts, vacuum. §12.5

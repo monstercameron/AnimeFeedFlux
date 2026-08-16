@@ -88,6 +88,16 @@ type Spec struct {
 	// internal/schedule/recurrence.go.
 	Recurrence *Recurrence
 
+	// ScheduleMode is how Cron/Recurrence are interpreted (§7 revision
+	// 2026-08-15): "" or "scheduled" fires runs on the schedule (the only
+	// pre-revision behaviour, so every existing recipe keeps meaning what it
+	// meant); "adhoc" never fires automatically — Run Now is the feed's only
+	// trigger, the schedule fields are ignored, and staleness monitoring
+	// exempts it; "watch" fires on the schedule as a CHECK, and the model
+	// answering "nothing noteworthy" is a quiet, expected skip rather than a
+	// failure (generate.Spec.WatchMode carries this into the pipeline).
+	ScheduleMode string `toml:"schedule_mode,omitempty" json:"schedule_mode,omitempty"`
+
 	ItemsPerRun int
 	// FeedWindow is how many items appear in the rendered XML (§5.4, §7),
 	// distinct from the novelty window and from archive retention.
@@ -112,6 +122,27 @@ type Spec struct {
 	// when two members' items land on the same published_at (§14.2).
 	Members []string
 }
+
+// The schedule modes Spec.ScheduleMode accepts. "scheduled" and "" are the
+// same mode — "" is what every recipe written before the field existed
+// carries, and normalizing it away would dirty every export for nothing.
+const (
+	ScheduleModeScheduled = "scheduled"
+	ScheduleModeAdhoc     = "adhoc"
+	ScheduleModeWatch     = "watch"
+)
+
+// IsAdhoc reports whether this feed only ever runs manually.
+func (s Spec) IsAdhoc() bool { return s.ScheduleMode == ScheduleModeAdhoc }
+
+// IsWatch reports whether this feed's schedule is a check cadence — runs
+// fire on it, but "nothing noteworthy" is an expected quiet outcome.
+func (s Spec) IsWatch() bool { return s.ScheduleMode == ScheduleModeWatch }
+
+// IsScheduled reports whether the schedule actually fires runs (the
+// default). Watch feeds are ALSO fired by the scheduler — this is about
+// firing, so it is true for both; only adhoc opts out.
+func (s Spec) IsScheduled() bool { return !s.IsAdhoc() }
 
 // Defaults returns a starting-point Spec for a new recipe in the admin UI.
 //

@@ -214,6 +214,7 @@ func TestCandidateViewContentSwitchesFields(t *testing.T) {
 		Link:             "https://example.com/a",
 		RenderedXml:      "<item><title>Question of the day</title></item>",
 		SlackPreviewText: "Question of the day — A plain-text summary",
+		EmbedPreviewHtml: "<!doctype html><html><body>embed</body></html>",
 	}
 
 	rendered := CandidateViewContent(ViewRendered, c)
@@ -231,6 +232,11 @@ func TestCandidateViewContentSwitchesFields(t *testing.T) {
 		t.Fatalf("feed XML view got %q, want exact %q", xml, c.RenderedXml)
 	}
 
+	embed := CandidateViewContent(ViewEmbed, c)
+	if embed != c.EmbedPreviewHtml {
+		t.Fatalf("embed view got %q, want the server-rendered document verbatim %q", embed, c.EmbedPreviewHtml)
+	}
+
 	slack := CandidateViewContent(ViewSlackCard, c)
 	if slack != c.SlackPreviewText {
 		t.Fatalf("slack view got %q, want exact %q", slack, c.SlackPreviewText)
@@ -242,8 +248,8 @@ func TestCandidateViewContentSwitchesFields(t *testing.T) {
 }
 
 func TestCandidateViewsOrderEndsOnSlack(t *testing.T) {
-	if len(CandidateViews) != 4 {
-		t.Fatalf("expected 4 views")
+	if len(CandidateViews) != 5 {
+		t.Fatalf("expected 5 views")
 	}
 	if CandidateViews[len(CandidateViews)-1] != ViewSlackCard {
 		t.Fatalf("PLAN.md §12.3 calls the Slack preview 'the one that matters' — it must be last, not buried first")

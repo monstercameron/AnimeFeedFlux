@@ -202,6 +202,10 @@ func TestTranslatedTextIsNotIdenticalToEnglish(t *testing.T) {
 		"generate.common.labelValue": true,
 		"generate.common.errorText":  true,
 		"generate.rail.slugPath":     true,
+		"generate.rail.compactMeta":  true,
+		// "Feed" is already kept as-is elsewhere in Spanish (generate.rail.newFeed,
+		// generate.workbench.newFeed/chooseFeed) — a borrowed term, not left untranslated.
+		"generate.workbench.feedsSummary": true,
 		// The schedule readback's glue: a comma-space list separator, and a
 		// "{time} ({zone})" template with no words in it. Both are punctuation
 		// and placeholders, and Spanish uses the same ones.
@@ -218,13 +222,22 @@ func TestTranslatedTextIsNotIdenticalToEnglish(t *testing.T) {
 		// A backend identifier, not a word: "openai" is what the operator
 		// literally types, in every language.
 		"settings.provider.activeProvider.placeholder": true,
+		// Provider brand names: identical in every language by definition.
+		// (backend.openai carries a translated "(default)" suffix, so it is
+		// not in this list.)
+		"settings.provider.backend.anthropic":       true,
+		"settings.provider.backend.openrouter":      true,
+		"settings.provider.backend.cerebras":        true,
+		"settings.provider.backend.deepseek":        true,
+		"settings.provider.backend.qwen":            true,
+		"settings.provider.backend.zai":             true,
+		"settings.provider.profile.namePlaceholder": true,
 		// Format and protocol names, and borrowed terms.
 		"generate.urls.rss":                  true,
 		"generate.urls.atom":                 true,
 		"generate.urls.json":                 true,
 		"generate.editor.sourceUrl":          true,
 		"generate.editor.slug":               true,
-		"generate.editor.prompts":            true,
 		"generate.editor.temperature":        true,
 		"generate.rail.error":                true,
 		"generate.rail.title":                true,

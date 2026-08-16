@@ -192,6 +192,7 @@ func NewServer(deps Deps) http.Handler {
 	mux.HandleFunc("/favicon.ico", s.handleFavicon)
 	mux.HandleFunc("/feeds/", s.handleFeed)
 	mux.HandleFunc("/items/", s.handleItem)
+	mux.HandleFunc("/embed/", s.handleEmbed)
 	// requestIDMiddleware wraps every route so a request_id is on r.Context()
 	// — and therefore on every log line the request produces, including the
 	// http.request wide event — before any handler runs. Wrapping once here,
@@ -494,6 +495,32 @@ func etagMatch(header, etag string) bool {
 	return false
 }
 
+// defaultCSP is the Content-Security-Policy every response on this plane
+// carries unless the handler set one of its own.
+//
+// It exists because /embed/{slug} (embed.go) is deliberately framable by
+// anyone, and a plane where one route opts IN to framing should not leave
+// the others opted in by silence. Feed documents, permalinks and the index
+// have no reason to be rendered inside a third party's chrome — a framed
+// permalink is a phishing surface and nothing else — so they say so.
+//
+// frame-ancestors only, not a full policy: the permalink page renders
+// sanitised model-authored HTML that may legitimately carry inline markup,
+// and tightening default-src here would be a separate change with its own
+// failure modes to think through. See TODOS.md A9-EM08.
+const defaultCSP = "frame-ancestors 'none'"
+
+// applyDefaultCSP sets defaultCSP unless the handler already chose a policy.
+// Both response writers below call it, which is what makes the header
+// present on every route regardless of which one served the request —
+// including the error paths, and including NewServerAndInvalidator's route
+// table, which does not go through requestIDMiddleware.
+func applyDefaultCSP(h http.Header) {
+	if h.Get("Content-Security-Policy") == "" {
+		h.Set("Content-Security-Policy", defaultCSP)
+	}
+}
+
 // writeStatus writes a plain-text status response (404, 405-adjacent errors,
 // 410, 500), suppressing the body on HEAD so every non-2xx path gets the same
 // "HEAD mirrors GET, minus the body" guarantee writeEntry gives the success
@@ -504,6 +531,7 @@ func writeStatus(w http.ResponseWriter, r *http.Request, msg string, code int) {
 	h := w.Header()
 	h.Set("Content-Type", "text/plain; charset=utf-8")
 	h.Set("X-Content-Type-Options", "nosniff")
+	applyDefaultCSP(h)
 	w.WriteHeader(code)
 	if r.Method == http.MethodHead {
 		return
@@ -520,6 +548,7 @@ func writeEntry(w http.ResponseWriter, r *http.Request, e Entry, cacheControl st
 		cacheControl = defaultCacheControl
 	}
 	h := w.Header()
+	applyDefaultCSP(h)
 	h.Set("Content-Type", e.ContentType)
 	h.Set("ETag", e.ETag)
 	h.Set("Last-Modified", e.LastModified)

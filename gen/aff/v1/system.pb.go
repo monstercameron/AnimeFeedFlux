@@ -1254,12 +1254,29 @@ type ProviderProfile struct {
 	// ApiKeyEnv names the environment variable holding this profile's key,
 	// e.g. "OPENROUTER_API_KEY". Never the key.
 	ApiKeyEnv string `protobuf:"bytes,3,opt,name=api_key_env,json=apiKeyEnv,proto3" json:"api_key_env,omitempty"`
-	// KeyPresent reports whether that variable is actually set on the server,
-	// so the operator can see a misconfiguration without the value ever being
-	// sent. Server-populated on read; ignored on write.
-	KeyPresent    bool `protobuf:"varint,4,opt,name=key_present,json=keyPresent,proto3" json:"key_present,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// KeyPresent reports whether this profile has a usable credential from
+	// EITHER source — a stored key (has_stored_key) or its named env var
+	// actually set on the server — without the value ever being sent.
+	// Server-populated on read; ignored on write.
+	KeyPresent bool `protobuf:"varint,4,opt,name=key_present,json=keyPresent,proto3" json:"key_present,omitempty"`
+	// ApiKey is WRITE-ONLY: a non-empty value on UpdateSettings stores the
+	// key for this profile, encrypted at rest with AFF_SECRET_KEY — the same
+	// scheme that protects the TOTP secret. It is NEVER returned: every
+	// response carries it empty, and the stored ciphertext lives in its own
+	// settings row, never inside this message. Storing keys at all is a
+	// 2026-08-15 revision of PLAN.md §4's environment-only rule — see §12.5
+	// and DEVLOG for the decision; api_key_env remains supported and a stored
+	// key wins over it when both exist.
+	ApiKey string `protobuf:"bytes,5,opt,name=api_key,json=apiKey,proto3" json:"api_key,omitempty"`
+	// HasStoredKey reports whether an encrypted key is stored for this
+	// profile. Server-populated on read; ignored on write (use
+	// clear_stored_key to remove one).
+	HasStoredKey bool `protobuf:"varint,6,opt,name=has_stored_key,json=hasStoredKey,proto3" json:"has_stored_key,omitempty"`
+	// ClearStoredKey, on UpdateSettings, deletes this profile's stored key.
+	// Ignored when api_key is also set in the same request.
+	ClearStoredKey bool `protobuf:"varint,7,opt,name=clear_stored_key,json=clearStoredKey,proto3" json:"clear_stored_key,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ProviderProfile) Reset() {
@@ -1316,6 +1333,27 @@ func (x *ProviderProfile) GetApiKeyEnv() string {
 func (x *ProviderProfile) GetKeyPresent() bool {
 	if x != nil {
 		return x.KeyPresent
+	}
+	return false
+}
+
+func (x *ProviderProfile) GetApiKey() string {
+	if x != nil {
+		return x.ApiKey
+	}
+	return ""
+}
+
+func (x *ProviderProfile) GetHasStoredKey() bool {
+	if x != nil {
+		return x.HasStoredKey
+	}
+	return false
+}
+
+func (x *ProviderProfile) GetClearStoredKey() bool {
+	if x != nil {
+		return x.ClearStoredKey
 	}
 	return false
 }
@@ -1527,10 +1565,23 @@ type Settings_Provider struct {
 	// built-in OpenAI default.
 	ActiveProfile string `protobuf:"bytes,7,opt,name=active_profile,json=activeProfile,proto3" json:"active_profile,omitempty"`
 	// Profiles are operator-configured OpenAI-compatible endpoints (PLAN.md
-	// §12.5). They carry no key — see ProviderProfile.api_key_env.
-	Profiles      []*ProviderProfile `protobuf:"bytes,8,rep,name=profiles,proto3" json:"profiles,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// §12.5). See ProviderProfile for how their keys work.
+	Profiles []*ProviderProfile `protobuf:"bytes,8,rep,name=profiles,proto3" json:"profiles,omitempty"`
+	// DefaultApiKey is the built-in (profile-less) OpenAI provider's
+	// WRITE-ONLY key input — same contract as ProviderProfile.api_key:
+	// non-empty on UpdateSettings stores it encrypted, every response
+	// carries it empty. The UI-stored key is the PRODUCTION path; the
+	// SCHEMAFLUX_API_KEY env var remains only as a dev/bootstrap fallback
+	// and a stored key wins over it (operator directive 2026-08-15).
+	DefaultApiKey string `protobuf:"bytes,9,opt,name=default_api_key,json=defaultApiKey,proto3" json:"default_api_key,omitempty"`
+	// DefaultKeyStored reports whether an encrypted key is stored for the
+	// built-in provider. Server-populated on read; ignored on write.
+	DefaultKeyStored bool `protobuf:"varint,10,opt,name=default_key_stored,json=defaultKeyStored,proto3" json:"default_key_stored,omitempty"`
+	// ClearDefaultKey, on UpdateSettings, deletes the built-in provider's
+	// stored key. Ignored when default_api_key is also set.
+	ClearDefaultKey bool `protobuf:"varint,11,opt,name=clear_default_key,json=clearDefaultKey,proto3" json:"clear_default_key,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Settings_Provider) Reset() {
@@ -1617,6 +1668,27 @@ func (x *Settings_Provider) GetProfiles() []*ProviderProfile {
 		return x.Profiles
 	}
 	return nil
+}
+
+func (x *Settings_Provider) GetDefaultApiKey() string {
+	if x != nil {
+		return x.DefaultApiKey
+	}
+	return ""
+}
+
+func (x *Settings_Provider) GetDefaultKeyStored() bool {
+	if x != nil {
+		return x.DefaultKeyStored
+	}
+	return false
+}
+
+func (x *Settings_Provider) GetClearDefaultKey() bool {
+	if x != nil {
+		return x.ClearDefaultKey
+	}
+	return false
 }
 
 type Settings_Generation struct {
@@ -1817,7 +1889,8 @@ const file_aff_v1_system_proto_rawDesc = "" +
 	"PriceEntry\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12.\n" +
 	"\x14usd_per_1k_tokens_in\x18\x02 \x01(\x01R\x10usdPer1kTokensIn\x120\n" +
-	"\x15usd_per_1k_tokens_out\x18\x03 \x01(\x01R\x11usdPer1kTokensOut\"\xe2\t\n" +
+	"\x15usd_per_1k_tokens_out\x18\x03 \x01(\x01R\x11usdPer1kTokensOut\"\xe4\n" +
+	"\n" +
 	"\bSettings\x125\n" +
 	"\bprovider\x18\n" +
 	" \x01(\v2\x19.aff.v1.Settings.ProviderR\bprovider\x12;\n" +
@@ -1826,7 +1899,7 @@ const file_aff_v1_system_proto_rawDesc = "" +
 	"generation\x12;\n" +
 	"\n" +
 	"publishing\x18\x1e \x01(\v2\x1b.aff.v1.Settings.PublishingR\n" +
-	"publishing\x1a\xd2\x02\n" +
+	"publishing\x1a\xd4\x03\n" +
 	"\bProvider\x12'\n" +
 	"\x0factive_provider\x18\x01 \x01(\tR\x0eactiveProvider\x12#\n" +
 	"\rdefault_model\x18\x02 \x01(\tR\fdefaultModel\x12'\n" +
@@ -1836,7 +1909,11 @@ const file_aff_v1_system_proto_rawDesc = "" +
 	"priceTable\x12\x16\n" +
 	"\x06effort\x18\x06 \x01(\tR\x06effort\x12%\n" +
 	"\x0eactive_profile\x18\a \x01(\tR\ractiveProfile\x123\n" +
-	"\bprofiles\x18\b \x03(\v2\x17.aff.v1.ProviderProfileR\bprofiles\x1a\x8d\x03\n" +
+	"\bprofiles\x18\b \x03(\v2\x17.aff.v1.ProviderProfileR\bprofiles\x12&\n" +
+	"\x0fdefault_api_key\x18\t \x01(\tR\rdefaultApiKey\x12,\n" +
+	"\x12default_key_stored\x18\n" +
+	" \x01(\bR\x10defaultKeyStored\x12*\n" +
+	"\x11clear_default_key\x18\v \x01(\bR\x0fclearDefaultKey\x1a\x8d\x03\n" +
 	"\n" +
 	"Generation\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12;\n" +
@@ -1918,13 +1995,16 @@ const file_aff_v1_system_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x19\n" +
 	"\bowned_by\x18\x02 \x01(\tR\aownedBy\x12\x12\n" +
 	"\x04chat\x18\x03 \x01(\bR\x04chat\x12\x1c\n" +
-	"\tembedding\x18\x04 \x01(\bR\tembedding\"\x81\x01\n" +
+	"\tembedding\x18\x04 \x01(\bR\tembedding\"\xea\x01\n" +
 	"\x0fProviderProfile\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
 	"\bbase_url\x18\x02 \x01(\tR\abaseUrl\x12\x1e\n" +
 	"\vapi_key_env\x18\x03 \x01(\tR\tapiKeyEnv\x12\x1f\n" +
 	"\vkey_present\x18\x04 \x01(\bR\n" +
-	"keyPresent\"5\n" +
+	"keyPresent\x12\x17\n" +
+	"\aapi_key\x18\x05 \x01(\tR\x06apiKey\x12$\n" +
+	"\x0ehas_stored_key\x18\x06 \x01(\bR\fhasStoredKey\x12(\n" +
+	"\x10clear_stored_key\x18\a \x01(\bR\x0eclearStoredKey\"5\n" +
 	"\x1fSystemServiceCostHistoryRequest\x12\x12\n" +
 	"\x04days\x18\x01 \x01(\x05R\x04days\"m\n" +
 	" SystemServiceCostHistoryResponse\x12,\n" +

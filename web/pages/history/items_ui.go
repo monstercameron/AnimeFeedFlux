@@ -9,7 +9,6 @@ import (
 	"time"
 
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
-	"github.com/monstercameron/GoWebComponents/v5/i18n"
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -1062,6 +1061,14 @@ var formattedDates = map[int64]string{}
 
 const formattedDatesCap = 512
 
+// formatTimestamp renders both callers' timestamps (an item's PublishedAt,
+// a revision's At) via runStamp — UTC with seconds, the same convention
+// runs_ui.go uses for its diagnostics panel and for the same reason: J10's
+// sanity assertions require every item's PublishedAt to be unique and
+// strictly decreasing, and e2eweb's J10 harness has already caught a real
+// violation of that (two items sharing one second). A date-only column
+// (the previous behavior, i18n.FormatDate at DateStyleMedium) cannot show
+// that bug at all; seconds can.
 func formatTimestamp(ts *timestamppb.Timestamp) string {
 	if ts == nil {
 		return ""
@@ -1070,7 +1077,7 @@ func formatTimestamp(ts *timestamppb.Timestamp) string {
 	if s, ok := formattedDates[key]; ok {
 		return s
 	}
-	s := i18n.FormatDate("en", ts.AsTime(), i18n.DateOptions{Style: i18n.DateStyleMedium})
+	s := runStamp(ts.AsTime())
 	if len(formattedDates) >= formattedDatesCap {
 		formattedDates = make(map[int64]string, formattedDatesCap)
 	}

@@ -358,6 +358,7 @@ func runsTable(t Catalog, s runsLoadState, toggleExpand func(int64), deleteRun f
 			// kebab column's own empty h.Th below) rather than a fabricated
 			// label string.
 			h.Th(h.ClassStr("history-th-num"), ""),
+			h.Th(t.T("history.runs.col_started", nil)),
 			h.Th(t.T("history.runs.col_status", nil)),
 			h.Th(t.T("history.runs.col_trigger", nil)),
 			h.Th(t.T("history.runs.col_duration", nil)),
@@ -391,6 +392,16 @@ func runRow(t Catalog, r *affv1.Run, rowNumber int, expanded bool, log string, t
 	if r.StartedAt != nil && r.FinishedAt != nil {
 		duration = formatRunDuration(r.FinishedAt.AsTime().Sub(r.StartedAt.AsTime()))
 	}
+	// Same runStamp used by the expanded detail panel below (§5.5/J5:
+	// diagnosing a run means holding this timestamp against the log lines
+	// and other runs' timestamps, all UTC-with-seconds, without a mental
+	// timezone conversion) — the list previously had no date/time at all,
+	// only a relative "Last build" on /generate and this row's own position
+	// in the (already time-ordered) list to go on.
+	started := ""
+	if r.StartedAt != nil {
+		started = runStamp(r.StartedAt.AsTime())
+	}
 	runID := r.Id
 	// A failed run must be "findable by scanning, not by reading" (J5) —
 	// the status cell already says "Failed" in text, but a scan needs a
@@ -406,6 +417,7 @@ func runRow(t Catalog, r *affv1.Run, rowNumber int, expanded bool, log string, t
 		h.Tr(
 			h.ClassStr(rowClass),
 			h.Td(h.ClassStr("history-td-num"), i18n.FormatNumber("en", float64(rowNumber), i18n.NumberOptions{MaximumFractionDigits: 0})),
+			h.Td(started),
 			h.Td(runStatusLabel(t, r.Status)),
 			h.Td(runTriggerLabel(t, r.Trigger)),
 			h.Td(duration),
@@ -451,7 +463,7 @@ func runRow(t Catalog, r *affv1.Run, rowNumber int, expanded bool, log string, t
 		// measured in a browser after the operator reported the expanded
 		// content "isn't right"; the class below is what lets that rule
 		// exclude this cell.
-		h.If(expanded, h.Tr(h.Td(h.ClassStr("history-run-log-cell"), h.Attr("colspan", "9"),
+		h.If(expanded, h.Tr(h.Td(h.ClassStr("history-run-log-cell"), h.Attr("colspan", "10"),
 			h.Div(h.ClassStr("history-run-log"),
 				runDetailFacts(t, r, duration),
 				h.H3(t.T("history.runs.reject_reasons", nil)),

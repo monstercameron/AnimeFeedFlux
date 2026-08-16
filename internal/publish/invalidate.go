@@ -92,5 +92,6 @@ func NewServerAndInvalidator(deps Deps) (http.Handler, Invalidator) {
 	mux.HandleFunc("/favicon.ico", s.handleFavicon)
 	mux.HandleFunc("/feeds/", s.handleFeed)
 	mux.HandleFunc("/items/", s.handleItem)
+	mux.HandleFunc("/embed/", s.handleEmbed)
 	return mux, cacheInvalidator{c: s.cache}
 }

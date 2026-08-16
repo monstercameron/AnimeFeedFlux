@@ -30,6 +30,21 @@ func emitScheduleStyles() {
 		css.Padding(tokens.Space(4)),
 	)
 
+	// Every select in the schedule gets an explicitly THEMED closed state —
+	// background, text, border — rather than relying on UA widget chrome,
+	// which follows color-scheme in real browsers but proved inconsistent
+	// enough (2026-08-15's white-select-in-dark-mode report) that nothing
+	// here should depend on it. The popup's option rows are covered by the
+	// global `select option` rule tokens.Emit declares.
+	css.Global(".af-schedule select",
+		css.Bg(tokens.Color(tokens.RoleSurface)),
+		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
+		css.Rounded(tokens.Radius(tokens.RadiusSm)),
+		css.PaddingX(tokens.Space(2)),
+		css.PaddingY(tokens.Space(1)),
+	)
+
 	// A row of the sentence. Wraps, because at a narrow width the honest
 	// failure is a second line, not a horizontal scrollbar.
 	css.Global(".af-schedule__row",

@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -176,5 +177,54 @@ func TestCheckOrigin(t *testing.T) {
 
 	if s.checkOrigin(nil) {
 		t.Errorf("checkOrigin(nil) = true, want false")
+	}
+}
+
+// --- client IP capture -----------------------------------------------------
+//
+// Every production connection arrives through nginx over loopback, so the
+// gRPC peer address is the proxy on every call. Session.ClientIP is what
+// carries the real one through to auth_events.ip and the login backoff; these
+// tests pin both the trust decision (X-Real-IP only) and the validation.
+
+func TestClientIPFromRequest_ReadsXRealIP(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("X-Real-IP", "203.0.113.7")
+	if got := clientIPFromRequest(r); got != "203.0.113.7" {
+		t.Fatalf("clientIPFromRequest = %q, want 203.0.113.7", got)
+	}
+}
+
+func TestClientIPFromRequest_IgnoresXForwardedFor(t *testing.T) {
+	// X-Forwarded-For is a client-APPENDABLE list — nginx's
+	// $proxy_add_x_forwarded_for appends the real address to whatever the
+	// client already sent, so its first entry is attacker-chosen. Honouring it
+	// would let an attacker rotate the header per request and never share a
+	// backoff bucket with themselves, which is strictly worse than the single
+	// shared bucket this whole change exists to fix.
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("X-Forwarded-For", "1.2.3.4, 203.0.113.7")
+	if got := clientIPFromRequest(r); got != "" {
+		t.Fatalf("clientIPFromRequest honoured X-Forwarded-For and returned %q", got)
+	}
+}
+
+func TestClientIPFromRequest_RejectsNonIPValues(t *testing.T) {
+	// An unparseable header must be discarded, not passed through: the value
+	// becomes a log field and a backoff map key, and neither should ever hold
+	// arbitrary attacker-supplied text.
+	for _, bad := range []string{"not-an-ip", "evil.example.com", "203.0.113.7, 1.2.3.4", "'; DROP TABLE"} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("X-Real-IP", bad)
+		if got := clientIPFromRequest(r); got != "" {
+			t.Errorf("clientIPFromRequest(%q) = %q, want empty", bad, got)
+		}
+	}
+}
+
+func TestClientIPFromRequest_EmptyWhenAbsent(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	if got := clientIPFromRequest(r); got != "" {
+		t.Fatalf("clientIPFromRequest with no header = %q, want empty", got)
 	}
 }

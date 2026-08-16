@@ -103,6 +103,46 @@ type Provider interface {
 	Name() string
 }
 
+// ItemFormats is stage 2's typed output (§9, two-stage generation,
+// 2026-08-15): the same raw item formatted once per output surface. Field
+// meanings and fallbacks are documented on internal/model.ItemFormats,
+// which internal/generate maps this onto; the two structs are separate so
+// this package keeps its no-model-imports layering.
+type ItemFormats struct {
+	FeedHTML  string `json:"feed_html"`
+	CardText  string `json:"card_text"`
+	EmbedText string `json:"embed_text"`
+	PageHTML  string `json:"page_html"`
+}
+
+// FormatRequest is one stage-2 formatting call: raw fields in the prompt,
+// four surface-optimized variants out.
+type FormatRequest struct {
+	Prompt    string
+	System    string
+	Model     string
+	Effort    string
+	RequestID string
+}
+
+// FormatResult carries the variants plus the same best-effort Raw
+// re-encoding Result documents.
+type FormatResult struct {
+	Formats ItemFormats
+	Raw     string
+	Model   string
+}
+
+// Formatter is the OPTIONAL stage-2 capability. A separate interface rather
+// than a fourth Provider method so every existing Provider implementation —
+// the test fakes above all, but also any future minimal provider — keeps
+// compiling unchanged, and internal/generate degrades to raw-field
+// rendering (a correct, complete feed, §9's stage-1 output) when the
+// capability is absent, exactly as it does when a Format call fails.
+type Formatter interface {
+	Format(ctx context.Context, req FormatRequest) (FormatResult, error)
+}
+
 // SchemaFlux owns timeouts, budgets and retries. This adapter deliberately
 // adds none of its own.
 //
@@ -330,6 +370,41 @@ func buildSteering(req Request) string {
 		parts = append(parts, fmt.Sprintf("Return at most %d items in the \"items\" array.", req.MaxItems))
 	}
 	return strings.Join(parts, " ")
+}
+
+// Format implements Formatter: the stage-2 call, same client-snapshot and
+// classification discipline as Generate. ItemFormats is an object at the
+// schema root, so it needs no generatedBatch-style wrapper.
+func (p *SchemaFluxProvider) Format(ctx context.Context, req FormatRequest) (FormatResult, error) {
+	ctx = p.client.Context(ctx)
+
+	builder := schemaflux.Generating[ItemFormats](req.Prompt).Strict()
+	if req.System != "" {
+		builder = builder.Steer(req.System)
+	}
+	if req.Model != "" {
+		builder = builder.Model(req.Model)
+	}
+	switch req.Effort {
+	case "fast":
+		builder = builder.Fast()
+	case "quick":
+		builder = builder.Quick()
+	case "smart":
+		builder = builder.Smart()
+	}
+	if req.RequestID != "" {
+		builder = builder.RequestID(req.RequestID)
+	}
+
+	formats, err := builder.Run(ctx)
+	if err != nil {
+		classified := Classify(err)
+		logGenerateFailure(ctx, p.logger, req.Model, classified)
+		return FormatResult{}, classified
+	}
+	raw, _ := json.Marshal(formats)
+	return FormatResult{Formats: formats, Raw: string(raw), Model: req.Model}, nil
 }
 
 // Embed implements Provider. It always fails: SchemaFlux v1.1.0 does not

@@ -3,12 +3,60 @@
 package settings
 
 import (
+	"strconv"
+	"syscall/js"
+
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
 	affv1 "github.com/monstercameron/AnimeFeedFlux/gen/aff/v1"
 	affui "github.com/monstercameron/AnimeFeedFlux/web/ui"
 )
+
+// useSelectValueGuard re-asserts a <select>'s value against the browser's
+// own default-selection algorithm mis-firing during GWC's input→select swap
+// — the exact race web/pages/generate/modelpicker.go documents and fixes
+// (TODOS A7-22): the control renders as a text input until the model list
+// arrives, then swaps to a <select> whose 100+ options land across more
+// than one reconciler commit, and the browser's native selection settles on
+// an unrelated option with no event fired. Saved state stays correct; the
+// DOM lies. Same MutationObserver correction, applied here because the
+// settings page's model selects (and the price table's) have the identical
+// shape and were never given the fix.
+//
+// HOOK DISCIPLINE: this contains ui.UseEffectOf, so callers must invoke it
+// a FIXED number of times per render — top-level controls only, never once
+// per table row (the price table gets one shared guard over all its rows in
+// render_provider.go for exactly this reason).
+func useSelectValueGuard(id, value string, ready bool) {
+	effectKey := strconv.FormatBool(ready) + "|" + id + "|" + value
+	ui.UseEffectOf(func() func() {
+		if !ready {
+			return nil
+		}
+		el := js.Global().Get("document").Call("getElementById", id)
+		if !el.Truthy() {
+			return nil
+		}
+		correct := func() {
+			if el.Get("value").String() != value {
+				el.Set("value", value)
+			}
+		}
+		correct()
+		var cb js.Func
+		cb = js.FuncOf(func(this js.Value, args []js.Value) any {
+			correct()
+			return nil
+		})
+		observer := js.Global().Get("MutationObserver").New(cb)
+		observer.Call("observe", el, map[string]any{"childList": true, "subtree": true})
+		return func() {
+			observer.Call("disconnect")
+			cb.Release()
+		}
+	}, effectKey)
+}
 
 // modelselect.go turns the Provider section's two model fields from text
 // boxes into menus hydrated from the provider itself.
@@ -58,6 +106,8 @@ type modelSelectProps struct {
 // renderModelSelect renders either a menu of real models or, when the list
 // could not be fetched, the text input this field used to be.
 func renderModelSelect(p modelSelectProps, filter modelFilter) ui.Node {
+	// Unconditional, before any branch — hook rules (see useSelectValueGuard).
+	useSelectValueGuard(p.ID, p.Value, !p.Unavailable && len(p.Models) > 0)
 	if p.Unavailable || len(p.Models) == 0 {
 		return h.Div(
 			h.ClassStr("af-model-field"),
@@ -117,6 +167,67 @@ func renderModelSelect(p modelSelectProps, filter modelFilter) ui.Node {
 		h.Label(h.For(p.ID), h.Text(t(p.LabelKey))),
 		h.Select(opts...),
 	)
+}
+
+// renderPriceModelSelect is the price table's model cell: a rate is only
+// meaningful when it names a model the provider can actually run, so the
+// cell offers the same provider-reported list the two model fields above it
+// use rather than a typing test (a mistyped id here silently prices
+// nothing — every run of that model reports $0.0000). A bare <select> with
+// an aria-label, not a labeled field group, because it lives in a table
+// cell under a column header that already names it.
+//
+// Same two escapes as renderModelSelect, for the same reasons: when the
+// list is unavailable this degrades to the text input the cell used to be,
+// and a saved value the provider no longer lists stays present and
+// selected — opening the screen must never re-point a rate by itself.
+// NO hooks in here — this renders once per table row, and a variable number
+// of hook calls per render violates GWC's positional-hook rule. The value
+// guard the swap race needs (useSelectValueGuard's doc) is applied for ALL
+// rows at once by render_provider.go's single table-level effect, keyed on
+// the id passed here.
+func renderPriceModelSelect(id, value, ariaLabel string, models []*affv1.ProviderModel, unavailable bool, onChange func(string)) ui.Node {
+	if unavailable || len(models) == 0 {
+		return h.Input(h.ID(id), h.Type("text"), h.Value(value),
+			h.Aria("label", ariaLabel),
+			h.Attr("placeholder", t("settings.provider.model.choose")),
+			h.OnInput(ui.UseEvent(func(e ui.InputEvent) { onChange(e.GetValue()) })))
+	}
+
+	chat := make([]*affv1.ProviderModel, 0, len(models))
+	other := make([]*affv1.ProviderModel, 0, len(models))
+	known := false
+	for _, m := range models {
+		if m.GetId() == value {
+			known = true
+		}
+		if m.GetChat() {
+			chat = append(chat, m)
+		} else {
+			other = append(other, m)
+		}
+	}
+
+	opts := make([]any, 0, len(models)+6)
+	opts = append(opts,
+		h.ID(id),
+		h.Aria("label", ariaLabel),
+		h.OnChange(ui.UseEvent(func(e ui.InputEvent) { onChange(e.GetValue()) })),
+	)
+	if value == "" {
+		opts = append(opts, h.Option(h.Value(""), h.SelectedIf(true), h.Text(t("settings.provider.model.choose"))))
+	}
+	if !known && value != "" {
+		opts = append(opts, h.Option(
+			h.Value(value), h.SelectedIf(true),
+			h.Text(t("settings.provider.model.notListed", value)),
+		))
+	}
+	opts = append(opts, modelGroup(t("settings.provider.model.group.recommended"), chat, value))
+	if len(other) > 0 {
+		opts = append(opts, modelGroup(t("settings.provider.model.group.other"), other, value))
+	}
+	return h.Select(opts...)
 }
 
 // modelGroup renders one <optgroup>. The provider's own "owned by" value is

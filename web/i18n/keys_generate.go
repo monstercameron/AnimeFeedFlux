@@ -57,8 +57,14 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.sampler.view.rendered":  {Text: "Rendered"},
 	"generate.sampler.view.rawFields": {Text: "Raw fields"},
 	"generate.sampler.view.feedXML":   {Text: "Feed XML"},
+	"generate.sampler.view.embed":     {Text: "Embed"},
 	"generate.sampler.view.slackCard": {Text: "Slack card"},
 	"generate.sampler.view.unknown":   {Text: "Unknown view"},
+
+	// The embed view is the one candidate view rendered as a live iframe
+	// rather than as text, so it needs an accessible name of its own — a
+	// frame with no title is announced as "frame" and nothing else.
+	"generate.sampler.view.embedFrameTitle": {Text: "Embed preview"},
 
 	// generate.sampler.viewTabs.label is the accessible name for the
 	// four-candidate-view tablist (web/ui.Tabs, adopted in render_sampler.go
@@ -79,42 +85,47 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.sampler.candidateTab.5":      {Text: "5"},
 
 	// Editor (render_editor.go, logic.go).
-	"generate.editor.noSelection":               {Text: "Select a feed from the rail, or create a new one."},
-	"generate.editor.slug":                      {Text: "Slug"},
-	"generate.editor.slug.immutableReason":      {Text: "The slug can't be changed after a feed is created."},
-	"generate.editor.title":                     {Text: "Title"},
-	"generate.editor.description":               {Text: "Description"},
-	"generate.editor.language":                  {Text: "Language"},
-	"generate.editor.kind":                      {Text: "Kind"},
-	"generate.editor.kind.generative":           {Text: "Generative"},
-	"generate.editor.kind.grounded":             {Text: "Grounded"},
-	"generate.editor.kind.aggregate":            {Text: "Aggregate"},
-	"generate.editor.kind.unspecified":          {Text: "Unspecified"},
-	"generate.editor.schedule":                  {Text: "Schedule"},
-	"generate.editor.cron":                      {Text: "Cron expression"},
-	"generate.editor.timezone":                  {Text: "Timezone"},
-	"generate.editor.nextRunsUnavailable":       {Text: "Next runs unavailable"},
-	"generate.editor.cron.readback.raw":         {Text: "{arg1} ({arg2})"},
-	"generate.editor.cron.readback.everyMinute": {Text: "Every minute ({arg1})"},
-	"generate.editor.cron.readback.daily":       {Text: "Daily at {arg1} ({arg2})"},
-	"generate.editor.cron.readback.weekly":      {Text: "Every {arg1} at {arg2} ({arg3})"},
-	"generate.editor.cron.readback.monthly":     {Text: "Monthly on day {arg1} at {arg2} ({arg3})"},
-	"generate.editor.modelParams":               {Text: "Model parameters"},
-	"generate.editor.model":                     {Text: "Model"},
-	"generate.editor.temperature":               {Text: "Temperature"},
-	"generate.editor.itemsPerRun":               {Text: "Items per run"},
-	"generate.editor.feedWindow":                {Text: "Feed window"},
-	"generate.editor.prompts":                   {Text: "Prompts"},
-	"generate.editor.promptVariablesHint":       {Text: "Variables available in prompts are listed below."},
-	"generate.editor.systemPrompt":              {Text: "System prompt"},
-	"generate.editor.userPrompt":                {Text: "User prompt"},
-	"generate.editor.noveltyAndBudgets":         {Text: "Novelty and budgets"},
-	"generate.editor.noveltyThreshold":          {Text: "Novelty threshold"},
-	"generate.editor.dailyTokenBudget":          {Text: "Daily token budget"},
-	"generate.editor.dailyRunBudget":            {Text: "Daily run budget"},
-	"generate.editor.validate":                  {Text: "Validate"},
-	"generate.editor.save":                      {Text: "Save"},
-	"generate.editor.sources":                   {Text: "Sources"},
+	"generate.editor.noSelection":                  {Text: "Select a feed from the rail, or create a new one."},
+	"generate.editor.slug":                         {Text: "Slug"},
+	"generate.editor.slug.immutableReason":         {Text: "The slug can't be changed after a feed is created."},
+	"generate.editor.title":                        {Text: "Title"},
+	"generate.editor.description":                  {Text: "Description"},
+	"generate.editor.language":                     {Text: "Language"},
+	"generate.editor.kind":                         {Text: "Kind"},
+	"generate.editor.kind.generative":              {Text: "Generative"},
+	"generate.editor.kind.grounded":                {Text: "Grounded"},
+	"generate.editor.kind.aggregate":               {Text: "Aggregate"},
+	"generate.editor.kind.unspecified":             {Text: "Unspecified"},
+	"generate.editor.schedule":                     {Text: "Schedule"},
+	"generate.editor.schedule.mode":                {Text: "Runs"},
+	"generate.editor.schedule.mode.scheduled":      {Text: "On a schedule"},
+	"generate.editor.schedule.mode.adhoc":          {Text: "Only when I run it"},
+	"generate.editor.schedule.mode.watch":          {Text: "On a schedule, post only when something happens"},
+	"generate.editor.schedule.mode.help.scheduled": {Text: "Every firing generates and publishes."},
+	"generate.editor.schedule.mode.help.adhoc":     {Text: "Nothing fires automatically — Run Now is this feed's only trigger, and it is never flagged stale."},
+	"generate.editor.schedule.mode.help.watch":     {Text: "The schedule below is a check, not a quota: each firing the model looks for something worth posting, and quiet checks skip silently. To check the live web, make this a grounded feed and add sources — every check fetches them fresh and an item is released only when one carries a genuine, new development. Quiet stretches never flag the feed stale."},
+	"generate.editor.cron":                         {Text: "Cron expression"},
+	"generate.editor.timezone":                     {Text: "Timezone"},
+	"generate.editor.nextRunsUnavailable":          {Text: "Next runs unavailable"},
+	"generate.editor.cron.readback.raw":            {Text: "{arg1} ({arg2})"},
+	"generate.editor.cron.readback.everyMinute":    {Text: "Every minute ({arg1})"},
+	"generate.editor.cron.readback.daily":          {Text: "Daily at {arg1} ({arg2})"},
+	"generate.editor.cron.readback.weekly":         {Text: "Every {arg1} at {arg2} ({arg3})"},
+	"generate.editor.cron.readback.monthly":        {Text: "Monthly on day {arg1} at {arg2} ({arg3})"},
+	"generate.editor.modelParams":                  {Text: "Model parameters"},
+	"generate.editor.model":                        {Text: "Model"},
+	"generate.editor.temperature":                  {Text: "Temperature"},
+	"generate.editor.itemsPerRun":                  {Text: "Items per run"},
+	"generate.editor.feedWindow":                   {Text: "Feed window"},
+	"generate.editor.systemPrompt":                 {Text: "System prompt"},
+	"generate.editor.userPrompt":                   {Text: "User prompt"},
+	"generate.editor.noveltyAndBudgets":            {Text: "Novelty and budgets"},
+	"generate.editor.noveltyThreshold":             {Text: "Novelty threshold"},
+	"generate.editor.dailyTokenBudget":             {Text: "Daily token budget"},
+	"generate.editor.dailyRunBudget":               {Text: "Daily run budget"},
+	"generate.editor.validate":                     {Text: "Validate"},
+	"generate.editor.save":                         {Text: "Save"},
+	"generate.editor.sources":                      {Text: "Sources"},
 	// generate.editor.sourceUrl/sourceKind are the per-source row fields'
 	// visible/accessible labels (web/ui.Input, adopted in render_editor.go).
 	// The URL field previously had NO label at all (a bare h.Input with no
@@ -173,6 +184,15 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	// interface formatting, which is why this still goes through the
 	// catalogue instead of an "/%s" Textf.
 	"generate.rail.slugPath": {Text: "/{arg1}"},
+	// compactMeta is the sidebar row's one meta line: slug + last build,
+	// combined rather than the two separate labelled lines the old
+	// full-detail card used ("Last build: 3 days ago" / "Next run:
+	// unavailable" / a spend figure) — a compact row has room for one line,
+	// not three, and "Next run: unavailable" said exactly that on every
+	// row without exception (logic.go's JitteredRuns doc comment: no RPC
+	// computes a real jittered next-fire-time), which earns it no space at
+	// all, compact or not.
+	"generate.rail.compactMeta": {Text: "/{arg1} · {arg2}"},
 
 	// Sampler (render_sampler.go, logic.go).
 	// No longer "select or SAVE": SampleService takes a SampleDraft, so a
@@ -232,7 +252,11 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.workbench.menu.delete":  {Text: "Delete feed"},
 	"generate.workbench.newFeed":      {Text: "New feed"},
 	"generate.workbench.model":        {Text: "Model"},
-	"generate.workbench.modelDefault": {Text: "Default model"},
+	// The empty model value is a real, meaningful choice since 2026-08-15:
+	// the feed runs on whatever /settings/provider's default model is, NOW
+	// AND WHENEVER THAT SETTING CHANGES — a per-feed model is an override.
+	// The label says so; "Default model" read as a placeholder.
+	"generate.workbench.modelDefault": {Text: "Global default (from Settings)"},
 	// {arg1} is a model id the recipe names but the provider's list does not
 	// include — a deprecated id, or one served by a custom endpoint.
 	"generate.workbench.modelUnlisted":   {Text: "{arg1} (not listed)"},
@@ -276,8 +300,8 @@ var generateMessages = gwci18n.NamespaceCatalog{
 	"generate.runStatus.errorKind.unknown":   {Text: "an unrecorded reason"},
 	"generate.workbench.menu.history":        {Text: "See this feed's runs"},
 	"generate.rail.history":                  {Text: "See this feed's runs"},
-	"generate.workbench.feedsSummary":        {Text: "Feeds ({arg1}) — status, schedule, spend, delete"},
-	"generate.workbench.recipeSettings":      {Text: "Recipe settings — slug, schedule, budgets, window, sources"},
+	"generate.workbench.feedsSummary":        {Text: "Feeds ({arg1})"},
+	"generate.workbench.recipeSettings":      {Text: "Recipe settings — slug, budgets, window, sources"},
 	"generate.workbench.insertVariable":      {Text: "Insert:"},
 	// {arg1} = the template identifier, e.g. {{.Today}}.
 	"generate.workbench.insertNamed": {Text: "Insert {arg1} at the cursor"},

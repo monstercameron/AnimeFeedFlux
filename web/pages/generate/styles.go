@@ -58,30 +58,30 @@ func emitGenerateStyles() {
 		bodyFont(),
 	)
 
-	// The three panes: each its own scrolling card. maxHeightPane keeps a
-	// tall rail/editor/sampler from pushing the page's own scrollbar off
-	// past the viewport — this is a dense admin console someone reads at
-	// 2am, not a page that should require scrolling past a header to find
-	// the sampler's Promote button.
-	// docs/design-direction.md's layout section: "Rules, not cards" and
-	// "Radius 3px, uniformly" — panes get a hairline border, no shadow, and
-	// the smallest radius step this project's token scale has (RadiusSm),
-	// rather than the shadowed/rounded "card" look the previous RadiusLg
-	// gave them.
-	paneBase := []css.Rule{
+	// These three classes were the three-pane layout's own standalone panes
+	// (a hairline-bordered, RadiusSm, surface-filled "card" each — the
+	// `paneBase` this comment used to describe). The workbench rebuild
+	// (render_workbench.go) nested every one of them — the feed list inside
+	// `.af-gen__feeds`'s <details>, the recipe form inside `.af-gen__recipe`'s
+	// <details>, the sampler inside `.af-gen__preview`'s own column — without
+	// dropping their old panel styling, which is exactly the "box nested
+	// inside a box" docs/design-direction.md's "Rules, not cards" argues
+	// against: every one of those three sections got a bordered, radius'd,
+	// surface-filled card floating inside a section that already draws its
+	// own boundary. Flagged directly ("I still don't like this page")
+	// 2026-08-15 and traced here. Fixed: these are layout-only now — no
+	// border, no radius, no fill, no independent scroll region — and flow as
+	// plain content within whichever workbench section already contains
+	// them. The workbench's own sections (`.af-gen__feeds`/`.af-gen__work`/
+	// `.af-gen__recipe`, below) are the only boundaries this page draws now.
+	paneLayout := []css.Rule{
 		css.Display.Flex,
 		css.FlexDir.Col,
 		css.Gap(tokens.Space(4)),
-		css.Padding(tokens.Space(4)),
-		css.Bg(tokens.Color(tokens.RoleSurface)),
-		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
-		css.Rounded(tokens.Radius(tokens.RadiusSm)),
-		css.Raw("max-height", "calc(100vh - 8rem)"),
-		css.OverflowY.Auto,
 	}
-	css.Global(".af-generate__rail", paneBase...)
-	css.Global(".af-generate__editor", paneBase...)
-	css.Global(".af-generate__sampler", paneBase...)
+	css.Global(".af-generate__rail", paneLayout...)
+	css.Global(".af-generate__editor", paneLayout...)
+	css.Global(".af-generate__sampler", paneLayout...)
 	// The "no feed selected"/"select or save a feed" placeholder bodies
 	// (renderEditorEmpty/renderSamplerEmpty) reuse the same pane classes, so
 	// their muted copy needs no separate rule beyond the shared pane look.
@@ -102,11 +102,20 @@ func emitRailStyles() {
 		css.Items.Center,
 		css.Justify.Between,
 		css.Gap(tokens.Space(2)),
+		css.W(css.Length("100%")),
+		css.Raw("min-width", "0"),
+		css.Raw("padding-bottom", string(tokens.Space(2))),
+		css.BorderBottom(css.Px(1), tokens.Color(tokens.RoleBorder)),
 	)
-	css.Global(".af-rail__header h2",
-		css.FontSize(tokens.FontSize(tokens.TextLg)),
+	css.Global(".af-rail__header-title",
+		css.Raw("flex", "1 1 auto"),
+		css.Raw("min-width", "0"),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
 		css.FontWeight.Semibold,
-		css.Raw("margin", "0"),
+		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.Raw("overflow", "hidden"),
+		css.Raw("text-overflow", "ellipsis"),
+		css.Raw("white-space", "nowrap"),
 	)
 	// The kill-switch banner is the one place §12.3 insists a disabled
 	// control's REASON never reads as an afterthought — a filled danger
@@ -131,36 +140,56 @@ func emitRailStyles() {
 		css.FontSize(tokens.FontSize(tokens.TextSm)),
 		css.TextColor(tokens.Color(tokens.RoleDanger)),
 	)
+	// The list itself is edge to edge — no gap between rows, because the
+	// gap is what made each row read as a floating card. What actually
+	// separates one row from the next now is the ruled bottom hairline each
+	// row draws on itself (below), the same device a real timesheet uses
+	// between frames.
+	//
+	// This list is not internally capped or paginated — two earlier passes
+	// tried both (a nested `overflow-y: auto` scrollbox, then client-side
+	// pagination) to answer "what if you had 20 feeds", and both were
+	// symptom patches on a single-column skeleton that put a feed roster
+	// and a feed's own work area in the same vertical flow. Now the whole
+	// list — `.af-gen__sidebar`, below — is its own column with its own
+	// scroll, sibling to `.af-gen__main`, so it just scrolls, the way an
+	// inbox list does, needing neither a cap nor a pager.
 	css.Global(".af-rail__list",
 		css.Raw("list-style", "none"),
 		css.Padding(css.Zero),
 		css.Margin(css.Zero),
 		css.Display.Flex,
 		css.FlexDir.Col,
-		css.Gap(tokens.Space(2)),
+		css.W(css.Length("100%")),
+		css.Raw("min-width", "0"),
 	)
-	// A row is a rule-bounded frame, not a filled card — only the hairline
-	// border and, on the bottom, the tape's own baseline give it edges;
-	// selection reads as a redline-strength left rule (the vertical column
-	// divider docs/design-direction.md reserves for "exactly one boundary
-	// per view" — here, which frame is loaded into the editor) rather than
-	// an inset glow.
+	// A row is a ruled frame in a sheet, not a card floating in a list
+	// (docs/design-direction.md: "Rules, not cards"). No border-box, no
+	// radius, no per-row fill — a bottom hairline is the only rule between
+	// rows, full width, and the left edge carries a 3px accent bar (kept
+	// transparent at rest) for selection/staleness — the vertical "column
+	// divider" the direction doc reserves for exactly one boundary per view.
 	css.Global(".af-rail__row",
 		css.Display.Flex,
-		css.FlexDir.Col,
-		css.Gap(tokens.Space(1)),
-		css.Padding(tokens.Space(2)),
+		css.Items.Center,
+		css.Gap(tokens.Space(2)),
+		css.W(css.Length("100%")),
+		css.Raw("min-width", "0"),
+		css.Raw("box-sizing", "border-box"),
+		css.PaddingY(tokens.Space(2)),
 		css.PaddingX(tokens.Space(3)),
-		css.Rounded(tokens.Radius(tokens.RadiusSm)),
-		css.Raw("border", "1px solid "+string(tokens.Color(tokens.RoleBorder))),
 		css.Raw("border-left", "3px solid transparent"),
-		css.Bg(tokens.Color(tokens.RoleBg)),
+		css.BorderBottom(css.Px(1), tokens.Color(tokens.RoleBorder)),
 		css.Cursor.Pointer,
 		transitionColors(),
 	)
-	css.Global(".af-rail__row:hover", css.Bg(tokens.Color(tokens.RoleSurfaceRaised)))
+	css.Global(".af-rail__list > .af-rail__row:first-child",
+		css.BorderTop(css.Px(1), tokens.Color(tokens.RoleBorder)),
+	)
+	css.Global(".af-rail__row:hover", css.Bg(tokens.Color(tokens.RoleSurface)))
 	css.Global(".af-rail__row--selected",
 		css.Raw("border-left", "3px solid "+string(tokens.Color(tokens.RoleAccent))),
+		css.Bg(tokens.Color(tokens.RoleSurface)),
 	)
 	css.Global(".af-rail__row--disabled", css.OpacityNum(css.Num(0.6)))
 	css.Global(".af-rail__row--stale",
@@ -175,14 +204,36 @@ func emitRailStyles() {
 		// single boundary.
 		css.Raw("border-left", "3px solid "+string(tokens.Color(tokens.RoleAccent))),
 	)
-	// The row head: numbered gutter + title/slug, in that order, so the
-	// number reads first — "row 1 of the sheet", the same way a genga
+	// The compact row is a single line pair (title, then meta), laid out as
+	// a row (`.af-rail__row` above): status dot, then body (title-line +
+	// meta stacked), then actions pinned right. The dot replaces the old
+	// stale-flag CHIP as the row's health indicator — one glance, no line
+	// spent on a pill.
+	css.Global(".af-rail__row-dot",
+		css.Raw("flex", "0 0 auto"),
+		css.W(css.Px(8)),
+		css.H(css.Px(8)),
+		css.Rounded(tokens.Radius(tokens.RadiusFull)),
+		css.Bg(tokens.Color(tokens.RoleTextMuted)),
+	)
+	css.Global(".af-rail__row--stale .af-rail__row-dot", css.Bg(tokens.Color(tokens.RoleWarning)))
+	css.Global(".af-rail__row--disabled .af-rail__row-dot", css.Bg(tokens.Color(tokens.RoleBorder)))
+	css.Global(".af-rail__row-body",
+		css.Display.Flex,
+		css.FlexDir.Col,
+		css.Raw("flex", "1 1 auto"),
+		css.Raw("min-width", "0"),
+		css.Gap(css.Length("0.125rem")),
+	)
+	// The number reads first — "row 1 of the sheet", the same way a genga
 	// sheet's frame numbers lead each row (docs/design-direction.md's
 	// anchor).
-	css.Global(".af-rail__row-head",
+	css.Global(".af-rail__row-title-line",
 		css.Display.Flex,
-		css.Items.Start,
+		css.Items.Baseline,
 		css.Gap(tokens.Space(2)),
+		css.W(css.Length("100%")),
+		css.Raw("min-width", "0"),
 	)
 	css.Global(".af-rail__row-number",
 		css.Raw("flex", "0 0 auto"),
@@ -193,50 +244,34 @@ func emitRailStyles() {
 		css.Raw("font-variant-numeric", "tabular-nums"),
 		monoFont(),
 	)
-	css.Global(".af-rail__row-headtext",
-		css.Display.Flex,
-		css.FlexDir.Col,
-		css.Raw("min-width", "0"),
-	)
 	css.Global(".af-rail__row-title",
 		css.FontWeight.Semibold,
 		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+		css.Raw("flex", "1 1 auto"),
+		css.Raw("min-width", "0"),
+		css.Raw("overflow", "hidden"),
+		css.Raw("text-overflow", "ellipsis"),
+		css.Raw("white-space", "nowrap"),
 	)
-	css.Global(".af-rail__row-slug",
-		css.FontSize(tokens.FontSize(tokens.TextXs)),
-		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
-		monoFont(),
-	)
-	css.Global(".af-rail__stale-flag",
-		css.Display.InlineFlex,
-		css.Raw("align-self", "flex-start"),
-		css.PaddingX(tokens.Space(2)),
-		css.Rounded(tokens.Radius(tokens.RadiusFull)),
-		css.Bg(tokens.Color(tokens.RoleWarning)),
-		css.TextColor(tokens.Color(tokens.RoleWarningFg)),
-		css.FontSize(tokens.FontSize(tokens.TextXs)),
-		css.FontWeight.Semibold,
-	)
+	// The meta line combines slug + relative last-build into one string
+	// (generate.rail.compactMeta) rather than the old separate slug/spend/
+	// next-run lines — those either duplicated the strip's own stakes line
+	// or, for "next run", always read "unavailable" and earned no space.
 	css.Global(".af-rail__row-meta",
-		css.Display.Flex,
-		css.FlexDir.Row,
-		css.FlexWrap.Wrap,
-		css.Items.Baseline,
-		css.Gap(tokens.Space(3)),
+		css.Display.Block,
 		css.FontSize(tokens.FontSize(tokens.TextXs)),
 		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
-		css.Raw("font-variant-numeric", "tabular-nums"),
+		css.Raw("overflow", "hidden"),
+		css.Raw("text-overflow", "ellipsis"),
+		css.Raw("white-space", "nowrap"),
 		monoFont(),
-	)
-	css.Global(".af-rail__row-spend",
-		css.Raw("margin-left", "auto"),
-		css.TextColor(tokens.Color(tokens.RoleText)),
 	)
 	css.Global(".af-rail__row-actions",
 		css.Display.Flex,
 		css.Items.Center,
-		css.Gap(tokens.Space(2)),
-		css.Raw("margin-top", string(tokens.Space(1))),
+		css.Gap(tokens.Space(1)),
+		css.Raw("flex", "0 0 auto"),
 	)
 
 	emitTapeStyles()
@@ -251,18 +286,30 @@ func emitRailStyles() {
 // dimensions/color) — the per-tick horizontal position is inline (h.Style)
 // since it is per-item DATA, not a class-level style.
 func emitTapeStyles() {
+	// "Spend the boldness here. Everything around it stays quiet."
+	// (docs/design-direction.md). The tape was a 20px sliver squeezed
+	// between the title line and the meta line — legible, but nowhere near
+	// bold enough to be the thing this whole visual direction is built
+	// around. Given its own row and a visible edge-to-edge baseline instead
+	// of a 1px hairline glimpsed at the bottom of a cramped strip. Settled
+	// at 1.75rem, not the first pass's 2.25rem — that read well in
+	// isolation but cost too much of the row list's now-capped height
+	// (`.af-rail__list`'s `max-height`, added the same day for "what if you
+	// had 20 feeds") for what it added over 1.75rem; this is the width
+	// where it still reads as the boldest mark in the row without being the
+	// reason only three rows fit in the scroll window.
 	css.Global(".af-tape",
 		css.Raw("position", "relative"),
 		css.W(css.Length("100%")),
-		css.H(css.Length("1.25rem")),
+		css.H(css.Length("1.75rem")),
 		css.Raw("margin", string(tokens.Space(1))+" 0"),
 	)
 	css.Global(".af-tape__baseline",
 		css.Raw("position", "absolute"),
 		css.Raw("left", "0"),
 		css.Raw("right", "0"),
-		css.Raw("bottom", "2px"),
-		css.H(css.Px(1)),
+		css.Raw("bottom", "0"),
+		css.H(css.Px(2)),
 		css.Bg(tokens.Color(tokens.RoleBorder)),
 	)
 	// Ticks are the one bold, saturated mark on this whole page — the
@@ -272,9 +319,9 @@ func emitTapeStyles() {
 	css.Global(".af-tape__tick",
 		css.Raw("position", "absolute"),
 		css.Raw("top", "0"),
-		css.Raw("bottom", "2px"),
-		css.W(css.Px(2)),
-		css.Raw("transform", "translateX(-1px)"),
+		css.Raw("bottom", "0"),
+		css.W(css.Px(3)),
+		css.Raw("transform", "translateX(-1.5px)"),
 		css.Bg(tokens.Color(tokens.RoleAccent)),
 		css.Rounded(tokens.Radius(tokens.RadiusFull)),
 	)
@@ -356,27 +403,6 @@ func emitEditorStyles() {
 	// them to their own line rather than squeezing between the two buttons.
 	css.Global(".af-editor__actions > .af-form-error",
 		css.Raw("flex", "1 1 100%"),
-	)
-
-	// Prompt template variable identifiers — mono pills, not prose (§12.6:
-	// these must never be translated, see render_editor.go's own comment).
-	css.Global(".af-prompt-vars",
-		css.Raw("list-style", "none"),
-		css.Padding(css.Zero),
-		css.Margin(css.Zero),
-		css.Display.Flex,
-		css.FlexWrap.Wrap,
-		css.Gap(tokens.Space(2)),
-	)
-	css.Global(".af-prompt-vars li",
-		css.PaddingX(tokens.Space(2)),
-		css.PaddingY(css.Length("0.125rem")),
-		css.Rounded(tokens.Radius(tokens.RadiusSm)),
-		css.Bg(tokens.Color(tokens.RoleBg)),
-		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
-		css.FontSize(tokens.FontSize(tokens.TextXs)),
-		css.TextColor(tokens.Color(tokens.RoleTextMuted)),
-		monoFont(),
 	)
 
 	// Grounded sources list.
@@ -501,6 +527,26 @@ func emitSamplerStyles() {
 		css.Raw("white-space", "pre-wrap"),
 		css.Raw("overflow-wrap", "anywhere"),
 		monoFont(),
+	)
+	// The embed preview's frame. It matches .af-candidate__content's box —
+	// same width, radius, border — so switching tabs does not make the panel
+	// jump, but it is a fixed height rather than a max-height: the framed
+	// document sizes itself to its frame (the embed's own list scrolls
+	// inside it, PLAN.md §6.1), so a height that collapsed to content would
+	// be a frame with nothing to render into.
+	//
+	// No background of its own: the embed paints its own, in whichever
+	// scheme the operator's browser reports, and a token background behind
+	// it would show as a mismatched border ring in one of the two themes.
+	css.Global(".af-candidate__embed",
+		css.Display.Block,
+		css.W(css.Length("100%")),
+		css.Raw("box-sizing", "border-box"),
+		css.Raw("height", "22rem"),
+		css.Raw("border", "0"),
+		css.Rounded(tokens.Radius(tokens.RadiusSm)),
+		css.Raw("outline", "1px solid "+string(tokens.Color(tokens.RoleBorder))),
+		css.Raw("outline-offset", "-1px"),
 	)
 	css.Global(".af-candidate__novelty",
 		css.FontSize(tokens.FontSize(tokens.TextSm)),
@@ -659,13 +705,67 @@ func init() {
 // See render_workbench.go's doc comment for what the previous three-column
 // arrangement got wrong.
 func emitWorkbenchStyles() {
+	// Two columns, siblings: a persistent, compact, independently-scrolling
+	// sidebar beside a main column holding everything about whichever ONE
+	// feed is loaded. Each has its own height and its own overflow — this
+	// is the structural change render_workbench.go's doc comment describes;
+	// every earlier pass kept a single stacked column and only restyled
+	// what was inside it.
 	css.Global(".af-gen",
 		css.Display.Flex,
-		css.FlexDir.Col,
-		css.Gap(tokens.Space(4)),
+		css.Items.Start,
+		css.Gap(tokens.Space(5)),
 		css.W(css.Length("100%")),
 		bodyFont(),
 		css.TextColor(tokens.Color(tokens.RoleText)),
+	)
+	css.Global(".af-gen", narrowMedia(
+		css.FlexDir.Col,
+	)...)
+	// The sidebar is a real column with its own scroll: pinned to the
+	// viewport height minus the page chrome above it, so it neither grows
+	// past the fold nor drags the main column's scroll position with it.
+	css.Global(".af-gen__sidebar",
+		css.Raw("flex", "0 0 20rem"),
+		css.Raw("min-width", "0"),
+		css.Display.Flex,
+		css.FlexDir.Col,
+		css.Gap(tokens.Space(2)),
+		css.Raw("position", "sticky"),
+		css.Raw("top", "0"),
+		css.Raw("align-self", "flex-start"),
+		css.Raw("height", "100vh"),
+		css.OverflowY.Auto,
+		css.PaddingX(tokens.Space(3)),
+		css.Raw("border-right", "1px solid "+string(tokens.Color(tokens.RoleBorder))),
+	)
+	css.Global(".af-gen__sidebar", narrowMedia(
+		css.Raw("flex", "1 1 auto"),
+		css.Raw("min-width", "0"),
+		css.W(css.Length("100%")),
+		// The wide rule's align-self:flex-start (so the sticky sidebar does
+		// not stretch to the page's full height) also disables cross-axis
+		// stretch in THIS column flex layout — cross axis here is WIDTH, not
+		// height, so leaving it set left the sidebar sized to its own
+		// content instead of the viewport, which is what pushed the whole
+		// page wider than 390px. Restore stretch so it fills the column.
+		css.Raw("align-self", "stretch"),
+		css.Raw("position", "static"),
+		css.Raw("height", "auto"),
+		css.Raw("max-height", "40vh"),
+		css.Raw("border-right", "0"),
+		css.BorderBottom(css.Px(1), tokens.Color(tokens.RoleBorder)),
+	)...)
+	// The main column carries everything about the one loaded feed, and
+	// scrolls independently of the sidebar — this is what closes the
+	// "two scrolls with dependencies between them" bug: sibling scroll
+	// regions, not one nested inside the other on the same axis.
+	css.Global(".af-gen__main",
+		css.Raw("flex", "1 1 auto"),
+		css.Raw("min-width", "0"),
+		css.Display.Flex,
+		css.FlexDir.Col,
+		css.Gap(tokens.Space(4)),
 	)
 
 	// The strip is sticky because the Preview button is the page's verb: it
@@ -684,39 +784,97 @@ func emitWorkbenchStyles() {
 		css.Bg(tokens.Color(tokens.RoleBg)),
 		css.BorderBottom(css.Px(1), tokens.Color(tokens.RoleBorder)),
 	)
-	css.Global(".af-gen__strip-left, .af-gen__strip-right",
+	// Three zones now, not two: which feed (identity), how it will be
+	// generated (params, one joined cluster), and the verb (right). Flagged
+	// directly ("wtf, use the front end design skill") after the first
+	// redesign pass left this row as seven-odd identically-bordered boxes
+	// in a line — fixing the box-nesting elsewhere on the page did nothing
+	// for the one row every operator looks at first and most often.
+	css.Global(".af-gen__strip-identity, .af-gen__strip-right",
 		css.Display.Flex,
 		css.Items.Center,
 		css.Gap(tokens.Space(2)),
 		css.Raw("flex-wrap", "wrap"),
 	)
 	// The act zone is separated from the configure zone by a rule and real
-	// space, not only by the button's fill. Seven controls in identical
-	// bordered boxes with the verb last gave the eye no entry point; the
-	// divider says "everything left of here describes the run, everything
-	// right of here starts it".
+	// space, not only by the button's fill: the divider says "everything
+	// left of here describes the run, everything right of here starts it".
 	css.Global(".af-gen__strip-right",
+		css.Raw("margin-left", "auto"),
 		css.Gap(tokens.Space(3)),
 		css.Raw("padding-left", string(tokens.Space(5))),
 		css.Raw("border-left", "1px solid "+string(tokens.Color(tokens.RoleBorder))),
 	)
 	css.Global(".af-gen__strip-right", narrowMedia(
+		css.Raw("margin-left", "0"),
 		css.Raw("border-left", "0"),
 		css.Raw("padding-left", "0"),
 	)...)
-	css.Global(".af-gen__strip select, .af-gen__strip input",
-		css.FontSize(tokens.FontSize(tokens.TextSm)),
+	// The feed picker is the strip's TITLE, not one of its form fields — it
+	// names the thing every other control acts on. No box: a bottom rule
+	// only, set at the strip's largest, boldest type, so it reads at a
+	// glance the way a document's own title does rather than competing with
+	// a temperature field for the eye.
+	css.Global(".af-gen__strip-identity select:first-child",
+		css.Raw("appearance", "none"),
+		css.Raw("border", "0"),
+		css.Raw("border-radius", "0"),
+		css.BorderBottom(css.Px(2), tokens.Color(tokens.RoleBorderStrong)),
+		css.Bg(css.Transparent),
 		css.PaddingY(tokens.Space(1)),
-		css.PaddingX(tokens.Space(2)),
+		css.PaddingX(css.Zero),
+		css.TextColor(tokens.Color(tokens.RoleText)),
+		css.FontSize(tokens.FontSize(tokens.TextLg)),
+		css.FontWeight.Semibold,
+		css.Raw("max-width", "16rem"),
+		css.Raw("text-overflow", "ellipsis"),
+	)
+	css.Global(".af-gen__strip-identity select:first-child:focus-visible",
+		css.Raw("outline", "2px solid "+string(tokens.Color(tokens.RoleFocusRing))),
+		css.Raw("outline-offset", string(tokens.Space(1))),
+	)
+	// New/Save keep their existing button treatment (`.af-gen__new,
+	// .af-gen__save` below); the ⋯ menu keeps web/ui's own Kebab styling —
+	// neither needed a new rule here, only the title-sized feed picker did.
+	// The instrument cluster: model / effort / candidates / temperature as
+	// ONE joined control, not four floating boxes. A single border and fill
+	// around the whole group; each cell inside is borderless and separated
+	// only by a hairline — the same "rule, not a box" device the rest of
+	// the page uses, applied here to say these four are one control with
+	// four dials, because that is what they actually are: every one of them
+	// tunes the SAME upcoming call.
+	css.Global(".af-gen__strip-params",
+		css.Display.Flex,
+		css.Items.Stretch,
 		css.Border(css.Px(1), tokens.Color(tokens.RoleBorder)),
 		css.Rounded(tokens.Radius(tokens.RadiusSm)),
-		css.Bg(tokens.Color(tokens.RoleBg)),
+		css.Bg(tokens.Color(tokens.RoleSurface)),
+		css.Raw("flex-wrap", "wrap"),
+		css.Raw("overflow", "hidden"),
+	)
+	css.Global(".af-gen__strip-cell",
+		css.Display.Flex,
+		css.Items.Center,
+		css.Raw("border-right", "1px solid "+string(tokens.Color(tokens.RoleBorder))),
+	)
+	css.Global(".af-gen__strip-cell:last-child", css.Raw("border-right", "0"))
+	css.Global(".af-gen__strip-params select, .af-gen__strip-params input",
+		css.FontSize(tokens.FontSize(tokens.TextSm)),
+		css.PaddingY(tokens.Space(2)),
+		css.PaddingX(tokens.Space(3)),
+		css.Raw("border", "0"),
+		css.Raw("border-radius", "0"),
+		css.Bg(css.Transparent),
 		css.TextColor(tokens.Color(tokens.RoleText)),
 	)
-	css.Global(".af-gen__model", css.W(css.Length("14rem")), monoFont())
+	css.Global(".af-gen__strip-params select:focus-visible, .af-gen__strip-params input:focus-visible",
+		css.Raw("outline", "2px solid "+string(tokens.Color(tokens.RoleFocusRing))),
+		css.Raw("outline-offset", "-2px"),
+	)
+	css.Global(".af-gen__model", css.W(css.Length("11rem")), monoFont())
 	// The temperature override holds one number; sized to it so it does not
 	// read as an equal partner to the model menu beside it.
-	css.Global(".af-gen__temp", css.W(css.Length("5rem")), monoFont())
+	css.Global(".af-gen__temp", css.W(css.Length("4.5rem")), monoFont())
 	// Retry keeps the quiet text-action treatment: it is a recovery control
 	// that only exists when the feed list failed, not one of the verbs.
 	css.Global(".af-gen__retry",
@@ -854,12 +1012,30 @@ func emitWorkbenchStyles() {
 	// partner. The min-height keeps the preview pane from collapsing to
 	// nothing before the first sample, so the page does not visibly reflow
 	// the moment a result arrives.
+	//
+	// The gap between them carries the redline — docs/design-direction.md's
+	// "vertical column divider, used sparingly... the loudest thing on the
+	// page... exactly one boundary per view". This page's other redline use
+	// (the rail row's left accent bar) is emphasis on a selected/stale row,
+	// not a column boundary; this is the one genuine pane-to-pane divider,
+	// and it did not exist before this pass — the two columns previously
+	// shared a plain gap with nothing marking where the prompt ends and its
+	// output begins.
 	css.Global(".af-gen__work",
 		css.Display.Grid,
-		css.Raw("grid-template-columns", "minmax(0, 1fr) minmax(0, 1fr)"),
+		css.Raw("grid-template-columns", "minmax(0, 1fr) 2px minmax(0, 1fr)"),
 		css.Gap(tokens.Space(5)),
 		css.Items.Start,
 	)
+	css.Global(".af-gen__work-divider",
+		css.Raw("align-self", "stretch"),
+		css.W(css.Px(2)),
+		css.Bg(tokens.Color(tokens.RoleDanger)),
+		css.Raw("opacity", "0.55"),
+	)
+	css.Global(".af-gen__work-divider", narrowMedia(
+		css.Display.None,
+	)...)
 	css.Global(".af-gen__prompts, .af-gen__preview",
 		css.Display.Flex,
 		css.FlexDir.Col,

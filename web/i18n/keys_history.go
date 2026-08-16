@@ -81,6 +81,7 @@ var historyMessages = gwci18n.NamespaceCatalog{
 	"history.runs.filter_after":         {Text: "Started after"},
 	"history.runs.filter_before":        {Text: "Started before"},
 	"history.runs.filter_clear":         {Text: "Clear filters"},
+	"history.runs.col_started":          {Text: "Started"},
 	"history.runs.col_status":           {Text: "Status"},
 	"history.runs.col_trigger":          {Text: "Trigger"},
 	"history.runs.col_duration":         {Text: "Duration"},

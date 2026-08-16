@@ -91,8 +91,21 @@ message Settings {
     // built-in OpenAI default.
     string active_profile = 7;
     // Profiles are operator-configured OpenAI-compatible endpoints (PLAN.md
-    // §12.5). They carry no key — see ProviderProfile.api_key_env.
+    // §12.5). See ProviderProfile for how their keys work.
     repeated ProviderProfile profiles = 8;
+    // DefaultApiKey is the built-in (profile-less) OpenAI provider's
+    // WRITE-ONLY key input — same contract as ProviderProfile.api_key:
+    // non-empty on UpdateSettings stores it encrypted, every response
+    // carries it empty. The UI-stored key is the PRODUCTION path; the
+    // SCHEMAFLUX_API_KEY env var remains only as a dev/bootstrap fallback
+    // and a stored key wins over it (operator directive 2026-08-15).
+    string default_api_key = 9;
+    // DefaultKeyStored reports whether an encrypted key is stored for the
+    // built-in provider. Server-populated on read; ignored on write.
+    bool default_key_stored = 10;
+    // ClearDefaultKey, on UpdateSettings, deletes the built-in provider's
+    // stored key. Ignored when default_api_key is also set.
+    bool clear_default_key = 11;
   }
   message Generation {
     bool enabled = 1;
@@ -296,10 +309,27 @@ message ProviderProfile {
   // ApiKeyEnv names the environment variable holding this profile's key,
   // e.g. "OPENROUTER_API_KEY". Never the key.
   string api_key_env = 3;
-  // KeyPresent reports whether that variable is actually set on the server,
-  // so the operator can see a misconfiguration without the value ever being
-  // sent. Server-populated on read; ignored on write.
+  // KeyPresent reports whether this profile has a usable credential from
+  // EITHER source — a stored key (has_stored_key) or its named env var
+  // actually set on the server — without the value ever being sent.
+  // Server-populated on read; ignored on write.
   bool key_present = 4;
+  // ApiKey is WRITE-ONLY: a non-empty value on UpdateSettings stores the
+  // key for this profile, encrypted at rest with AFF_SECRET_KEY — the same
+  // scheme that protects the TOTP secret. It is NEVER returned: every
+  // response carries it empty, and the stored ciphertext lives in its own
+  // settings row, never inside this message. Storing keys at all is a
+  // 2026-08-15 revision of PLAN.md §4's environment-only rule — see §12.5
+  // and DEVLOG for the decision; api_key_env remains supported and a stored
+  // key wins over it when both exist.
+  string api_key = 5;
+  // HasStoredKey reports whether an encrypted key is stored for this
+  // profile. Server-populated on read; ignored on write (use
+  // clear_stored_key to remove one).
+  bool has_stored_key = 6;
+  // ClearStoredKey, on UpdateSettings, deletes this profile's stored key.
+  // Ignored when api_key is also set in the same request.
+  bool clear_stored_key = 7;
 }
 
 // SystemServiceCostHistoryRequest asks for daily provider spend.

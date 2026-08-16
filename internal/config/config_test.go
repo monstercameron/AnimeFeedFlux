@@ -470,3 +470,35 @@ func TestSecretsHaveALengthFloor(t *testing.T) {
 		t.Error("a five-character AFF_PASSWORD_PEPPER was accepted")
 	}
 }
+
+// TestSecretRejectsThePlaceholderFromTheExampleEnvFile pins the gap the
+// length floor alone left open: deploy/animefeedflux.env.example ships
+// AFF_SECRET_KEY=changeme-generate-a-real-one, which is 28 characters and so
+// clears SecretMinLength comfortably. An operator who installed the example
+// verbatim therefore booted cleanly with a key published in this repository
+// encrypting the TOTP secret at rest — the same failure the floor was raised
+// to prevent (A8-33), just one notch further out.
+func TestSecretRejectsThePlaceholderFromTheExampleEnvFile(t *testing.T) {
+	for _, placeholder := range []string{
+		"changeme-generate-a-real-one", // verbatim from the example file
+		"CHANGEME-generate-a-real-one", // case must not be an escape hatch
+		"changeme-for-real-later",      // half-edited is still not generated
+		"replace-me-with-a-real-value",
+	} {
+		base := valid()
+		base["AFF_SECRET_KEY"] = placeholder
+		if _, err := Load(env(base)); err == nil {
+			t.Errorf("placeholder AFF_SECRET_KEY %q was accepted", placeholder)
+		}
+	}
+}
+
+func TestSecretAcceptsAGeneratedValue(t *testing.T) {
+	base := valid()
+	// Shape of `openssl rand -base64 48` output: no placeholder marker, well
+	// over the floor. Must still load, or the check above is too eager.
+	base["AFF_SECRET_KEY"] = "sQ8vN2pLxK4mR7tYzB1cW6fH9jD3gA5eU0iO8kP2nT4rV7xZ"
+	if _, err := Load(env(base)); err != nil {
+		t.Fatalf("a generated-looking AFF_SECRET_KEY was rejected: %v", err)
+	}
+}

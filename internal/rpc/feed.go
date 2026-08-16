@@ -335,11 +335,12 @@ func feedSourcesToProto(in []feedspec.Source) []*affv1.SourceSpec {
 // spec, §14.2) without a guard here.
 func feedSpecFromProto(ps *affv1.FeedSpec) feedspec.Spec {
 	return feedspec.Spec{
-		Cron:        ps.GetCron(),
-		Timezone:    ps.GetTimezone(),
-		Recurrence:  recurrenceFromProto(ps.GetRecurrence()),
-		ItemsPerRun: int(ps.GetItemsPerRun()),
-		FeedWindow:  int(ps.GetFeedWindow()),
+		ScheduleMode: ps.GetScheduleMode(),
+		Cron:         ps.GetCron(),
+		Timezone:     ps.GetTimezone(),
+		Recurrence:   recurrenceFromProto(ps.GetRecurrence()),
+		ItemsPerRun:  int(ps.GetItemsPerRun()),
+		FeedWindow:   int(ps.GetFeedWindow()),
 		Model: feedspec.ModelParams{
 			Model:       ps.GetModel(),
 			Temperature: ps.GetTemperature(),
@@ -369,6 +370,7 @@ func feedSpecFromProto(ps *affv1.FeedSpec) feedspec.Spec {
 
 func feedSpecToProto(spec feedspec.Spec) *affv1.FeedSpec {
 	return &affv1.FeedSpec{
+		ScheduleMode:         spec.ScheduleMode,
 		Cron:                 spec.Cron,
 		Timezone:             spec.Timezone,
 		Recurrence:           recurrenceToProto(spec.Recurrence),
@@ -482,6 +484,8 @@ func feedProblemMessage(reason string) string {
 		return "items per run is out of range"
 	case feedspec.ReasonFeedWindowRange:
 		return "feed window is out of range"
+	case feedspec.ReasonModelNotChat:
+		return "model is an embedding model, not a text-generation model"
 	default:
 		return reason
 	}

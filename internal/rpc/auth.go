@@ -966,7 +966,36 @@ func (s *AuthServer) VerifyCurrentCredentials(ctx context.Context, password, tot
 	return s.verifyCurrentCredentials(ctx, password, totpCode, now)
 }
 
+// Backoff is applied HERE rather than at each call site, for the same reason
+// errAuthFailed is one sentinel rather than four identical strings: this is
+// the single function every re-proof goes through, so making it the place
+// that counts failures is what makes "re-proof is rate limited" true of
+// callers that do not exist yet.
+//
+// It was true of none of them. Login and RecoverWithCode called
+// backoff.recordFailure; ChangePassword, RegenerateRecoveryCodes,
+// ReenrollTOTP and SystemServer.Backup all re-proved password + TOTP through
+// this function and never touched the tracker at all. A caller holding a
+// stolen session could therefore brute-force the password and the TOTP code
+// at full speed, against the one gate that exists specifically because §4
+// says a live session token must NOT be sufficient on its own for those
+// actions. Backup was the worst of the four because it also recorded no
+// auth_events row, so the attempts were not merely unlimited but invisible.
+//
+// The marginal gain to an attacker was never "reach these RPCs" — they
+// already held the session. It was learning the PASSWORD, which survives
+// session revocation and is the thing most likely to be reused somewhere
+// else. That is worth a rate limit even inside an authenticated surface.
 func (s *AuthServer) verifyCurrentCredentials(ctx context.Context, password, totpCode string, now time.Time) error {
+	ip := clientIP(ctx)
+	if !s.devInsecureAuth && s.backoff.blocked(ip, now) {
+		// Reported as an ordinary credential failure, not as its own status:
+		// every caller maps errCredentialCheckFailed to errAuthFailed, and
+		// "you are being throttled" is exactly the kind of distinguishable
+		// signal §4's one-generic-message rule exists to withhold.
+		return errCredentialCheckFailed
+	}
+
 	admin, err := s.store.GetAdmin(ctx)
 	if err != nil {
 		return fmt.Errorf("rpc: loading admin: %w", err)
@@ -976,6 +1005,7 @@ func (s *AuthServer) verifyCurrentCredentials(ctx context.Context, password, tot
 		return fmt.Errorf("rpc: verifying password: %w", verr)
 	}
 	if !pwOK {
+		s.backoff.recordFailure(ip, now)
 		return errCredentialCheckFailed
 	}
 	totpOK, err := s.verifyTOTPCode(ctx, totpCode, now)
@@ -983,8 +1013,13 @@ func (s *AuthServer) verifyCurrentCredentials(ctx context.Context, password, tot
 		return err
 	}
 	if !totpOK {
+		s.backoff.recordFailure(ip, now)
 		return errCredentialCheckFailed
 	}
+	// A completed re-proof clears the counter exactly as a completed Login
+	// does — the operator has just demonstrated both factors, so the failures
+	// that preceded it were theirs and typo-shaped, not an attack in progress.
+	s.backoff.recordSuccess(ip)
 	return nil
 }
 
@@ -1191,9 +1226,28 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// clientIP pulls the peer address gRPC attaches to ctx, stripping the port —
-// auth_events.ip and the backoff tracker key on the address alone.
+// clientIP resolves the address auth_events.ip records and the backoff
+// tracker keys on.
+//
+// The bridge's captured client address wins over the gRPC peer address, and
+// the ordering is the whole point. Every production connection arrives
+// through nginx over loopback, so peer.FromContext reports the PROXY on every
+// call — meaning auth_events.ip recorded 127.0.0.1 for every login attempt
+// the system would ever see, and backoffTracker, documented as "per-IP",
+// degenerated into a single global counter keyed on that one constant. The
+// practical effect was the opposite of the intent: one attacker's failures
+// throttled the legitimate operator, and the attacker gained nothing from
+// being distinguished from them because nobody was.
+//
+// See bridge.Session.ClientIP for why X-Real-IP specifically (and not
+// X-Forwarded-For, which the client can prepend to) is safe to believe here.
+// It is empty for any caller not on a bridge — cmd/aff over plain gRPC, this
+// package's tests — so those keep the peer address they always had, which for
+// them is genuinely the client.
 func clientIP(ctx context.Context) string {
+	if sess, ok := bridge.SessionFromContext(ctx); ok && sess.ClientIP != "" {
+		return sess.ClientIP
+	}
 	p, ok := peer.FromContext(ctx)
 	if !ok || p.Addr == nil {
 		return ""

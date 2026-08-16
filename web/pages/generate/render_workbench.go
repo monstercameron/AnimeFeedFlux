@@ -67,20 +67,26 @@ var promptVariables = []string{
 // workbenchProps is everything the layout needs that it does not own.
 type workbenchProps struct {
 	Strip   ui.Node
+	Tape    ui.Node
 	Stakes  ui.Node
 	Prompts ui.Node
 	Preview ui.Node
-	Recipe  ui.Node
+	// Schedule is the always-visible scheduler section
+	// (renderScheduleSection) — deliberately NOT part of Recipe, which
+	// lives behind the collapsed drawer below it.
+	Schedule ui.Node
+	Recipe   ui.Node
 
-	// Feeds is the feed list — the management surface for every feed, with
-	// its own disclosure rather than nested inside Recipe's.
-	Feeds     ui.Node
-	FeedsOpen bool
+	// Feeds is the permanent sidebar (render_rail.go's renderRail) — every
+	// feed, compact, always visible, independently scrolling. Not a
+	// disclosure: see renderWorkbench's doc comment for why the earlier
+	// stacked-and-collapsible version of this kept being wrong in a new way
+	// every time it was patched.
+	Feeds ui.Node
 	// RecipeOpen forces the recipe drawer open. Creating a feed REQUIRES
 	// fields that live in it (slug, title, schedule), so leaving it shut on a
 	// new draft asks the operator to guess where the form is.
 	RecipeOpen bool
-	FeedCount  int
 	// FeedConfirm is the delete confirmation modal. Rendered at the top level
 	// so it is not inside a collapsed <details>, which would hide the dialog
 	// that the collapsed thing just opened.
@@ -125,51 +131,66 @@ func renderStakes(p stakesProps) ui.Node {
 	return h.Div(parts...)
 }
 
-// renderWorkbench composes the three regions. It holds no state of its own:
-// every region is built by the caller from Render's existing state, so this
+// renderWorkbench composes the page. It holds no state of its own: every
+// region is built by the caller from Render's existing state, so this
 // function is pure layout and can be reasoned about as such.
+//
+// # A genuinely different shape, not a repainted one
+//
+// This page went through several passes that all kept the SAME skeleton — a
+// sticky strip, then a "Feeds" section, then the prompt/preview work area,
+// then a recipe disclosure, everything stacked in one column — and only
+// changed how each piece was styled: box borders removed, a tape enlarged,
+// the strip regrouped, the feed list capped and then paginated. Every one of
+// those was a real fix for a real bug, and none of them was what was asked
+// for, which was called out directly: "you kept giving me the same
+// fundamental layout." The list capping/pagination churn was itself a
+// symptom — a single stacked column with a "Feeds" SECTION was fighting the
+// fact that a feed roster and a feed's own work area are two different
+// things an operator looks at differently (scan the roster vs. focus on
+// one), and no amount of restyling that one section was going to resolve
+// that; it needed to stop being a section.
+//
+// So: two columns, not one. A persistent, compact, independently-scrolling
+// sidebar (`.af-gen__sidebar`, render_rail.go) — every feed, always visible,
+// never a disclosure to open or a list to page through — beside a main
+// column (`.af-gen__main`) holding everything about whichever ONE feed is
+// loaded: the strip, its tape, its stakes, the prompt/preview work area, its
+// recipe settings. Each column has its OWN height and its OWN scroll
+// (styles.go), which is also what closes the "two scrolls with dependencies
+// between them" bug for good: sibling columns with independent scroll
+// regions is the normal, unambiguous version of that pattern (an inbox next
+// to a reading pane) — the broken version was one scroll region nested
+// INSIDE another, on the same axis, with the outer one's sticky chrome
+// depending on it.
 func renderWorkbench(p workbenchProps) ui.Node {
 	return h.Div(
 		h.ClassStr("af-gen"),
-		h.Div(h.ClassStr("af-gen__strip"), p.Strip),
-		p.Stakes,
-		p.FeedConfirm,
-		renderFeedsDisclosure(p),
-		h.Div(h.ClassStr("af-gen__work"),
-			h.Section(h.ClassStr("af-gen__prompts"), p.Prompts),
-			h.Section(h.ClassStr("af-gen__preview"), p.Preview),
-		),
-		// The recipe stays collapsed for an EXISTING feed — those are
-		// set-once fields, and having them open is what made this page a form
-		// with a preview bolted on. A new draft is the exception; see
-		// RecipeOpen.
-		renderRecipeDisclosure(p),
-	)
-}
-
-// renderFeedsDisclosure wraps the feed list in a <details>.
-//
-// The args are SPREAD into h.Tag, not passed as one slice. h.Tag is variadic
-// (`Tag(name string, args ...any)`), so handing it a []any makes the slice
-// itself an argument — it is neither a prop nor a node, and GWC stringifies
-// it, which put a literal "0x58930000" on the page above the feed list. A
-// pointer rendered as body text is the visible end of that mistake; the
-// invisible end is that the element got none of its props.
-//
-// `open` is a boolean HTML attribute: its presence is what opens the element
-// and its value is ignored, so `open="false"` would still be open. It has to
-// be omitted entirely when closed.
-func renderFeedsDisclosure(p workbenchProps) ui.Node {
-	t := deps.I18n
-	args := []any{h.ClassStr("af-gen__feeds")}
-	if p.FeedsOpen {
-		args = append(args, h.Attr("open", "open"))
-	}
-	args = append(args,
-		h.Tag("summary", nil, h.Text(t.T("generate.workbench.feedsSummary", strconv.Itoa(p.FeedCount)))),
 		p.Feeds,
+		h.Div(h.ClassStr("af-gen__main"),
+			h.Div(h.ClassStr("af-gen__strip"), p.Strip),
+			p.Tape,
+			p.Stakes,
+			p.FeedConfirm,
+			h.Div(h.ClassStr("af-gen__work"),
+				h.Section(h.ClassStr("af-gen__prompts"), p.Prompts),
+				h.Div(h.ClassStr("af-gen__work-divider"), h.Aria("hidden", "true")),
+				h.Section(h.ClassStr("af-gen__preview"), p.Preview),
+			),
+			// The scheduler, ALWAYS visible for a loaded feed (2026-08-15):
+			// the one control deciding WHEN a feed does anything does not
+			// belong behind a disclosure — the operator literally could not
+			// find it there. Set-once identity fields stay in the drawer
+			// below; the schedule is not set-once, it is the thing an
+			// operator comes back to adjust.
+			p.Schedule,
+			// The recipe stays collapsed for an EXISTING feed — those are
+			// set-once fields, and having them open is what made this page a
+			// form with a preview bolted on. A new draft is the exception;
+			// see RecipeOpen.
+			renderRecipeDisclosure(p),
+		),
 	)
-	return h.Tag("details", args...)
 }
 
 // renderRecipeDisclosure wraps the recipe form, opened when the draft needs
@@ -199,6 +220,17 @@ type promptFieldProps struct {
 	// gets them: the system prompt is standing instruction text, and §7's
 	// variables are about the per-run data the user prompt interpolates.
 	Chips bool
+}
+
+// fieldErrNode renders a server FieldError for key as af-field-error text, or
+// nothing if the field has none. The workbench's own system/user prompt
+// fields (this file) are the only place those two errors show now — the
+// recipe drawer's copy of the same two fields (render_editor.go) was removed
+// as a redundant duplicate of these, so its fieldError("system_prompt_
+// template"/"user_prompt_template") calls went with it.
+func fieldErrNode(fe FieldErrors, key string) ui.Node {
+	msg, ok := fe.For(key)
+	return h.If(ok, h.Div(h.ClassStr("af-field-error"), h.Text(msg)))
 }
 
 // renderPromptField is a labelled mono textarea, optionally with the
@@ -509,7 +541,11 @@ func renderStrip(p stripProps) ui.Node {
 	}
 
 	return h.Fragment(
-		h.Div(h.ClassStr("af-gen__strip-left"),
+		// Zone 1: which sheet is loaded, and its CRUD. The feed select reads
+		// as a title, not a form field — it names the thing every other
+		// control on this strip acts on, so it gets the strip's largest
+		// type rather than competing at the same size as a temperature box.
+		h.Div(h.ClassStr("af-gen__strip-identity"),
 			h.Select(feedOpts...),
 			h.Button(h.Type("button"), h.ClassStr("af-gen__new"),
 				h.OnClick(ui.UseEvent(func() { p.OnNew() })),
@@ -548,31 +584,43 @@ func renderStrip(p stripProps) ui.Node {
 					}
 				})),
 				h.Text(t.T("generate.workbench.retryFeeds")))),
-			renderStripModel(p),
-			h.Select(effortOpts...),
-			h.Select(sizeOpts...),
+		),
+		// Zone 2: how it will be generated — model, effort, candidate count,
+		// temperature. Four fields that were four identical floating boxes
+		// (the "wall of gray boxes" the redesign was called out for) are one
+		// joined instrument cluster: a single bordered strip with a hairline
+		// between cells instead of four separate borders and four gaps. It
+		// reads as one control with four dials, which is what it actually
+		// is — every one of these is a knob on the SAME upcoming call, not
+		// four independent settings.
+		h.Div(h.ClassStr("af-gen__strip-params"),
+			h.Div(h.ClassStr("af-gen__strip-cell"), renderStripModel(p)),
+			h.Div(h.ClassStr("af-gen__strip-cell"), h.Select(effortOpts...)),
+			h.Div(h.ClassStr("af-gen__strip-cell"), h.Select(sizeOpts...)),
 			// Temperature is a sample-time OVERRIDE, not a recipe field, so
 			// it belongs on the strip with the other inputs that change what
 			// a preview produces rather than in the collapsed recipe form.
-			h.Input(h.ID("gen-strip-temp"), h.Type("number"),
-				h.ClassStr("af-gen__temp"),
-				h.Attr("step", "0.1"), h.Attr("min", "0"), h.Attr("max", "2"),
-				h.Aria("label", t.T("generate.workbench.temp")),
-				// The title says what §8.1 says: SchemaFlux exposes no
-				// temperature control, so this value is carried but not yet
-				// applied. A knob that silently does nothing is worse than
-				// one that admits it.
-				h.Attr("title", t.T("generate.workbench.temp.inert")),
-				// Zero means "no override", so the field shows empty rather
-				// than a literal 0 that reads as temperature=0 — the one
-				// value an operator might actually have meant to set.
-				h.Value(tempFieldValue(p.Temp)),
-				h.Attr("placeholder", t.T("generate.workbench.tempPlaceholder")),
-				h.OnInput(func(v string) {
-					if f, err := strconv.ParseFloat(v, 64); err == nil {
-						p.OnTemp(f)
-					}
-				})),
+			h.Div(h.ClassStr("af-gen__strip-cell"),
+				h.Input(h.ID("gen-strip-temp"), h.Type("number"),
+					h.ClassStr("af-gen__temp"),
+					h.Attr("step", "0.1"), h.Attr("min", "0"), h.Attr("max", "2"),
+					h.Aria("label", t.T("generate.workbench.temp")),
+					// The title says what §8.1 says: SchemaFlux exposes no
+					// temperature control, so this value is carried but not yet
+					// applied. A knob that silently does nothing is worse than
+					// one that admits it.
+					h.Attr("title", t.T("generate.workbench.temp.inert")),
+					// Zero means "no override", so the field shows empty rather
+					// than a literal 0 that reads as temperature=0 — the one
+					// value an operator might actually have meant to set.
+					h.Value(tempFieldValue(p.Temp)),
+					h.Attr("placeholder", t.T("generate.workbench.tempPlaceholder")),
+					h.OnInput(func(v string) {
+						if f, err := strconv.ParseFloat(v, 64); err == nil {
+							p.OnTemp(f)
+						}
+					})),
+			),
 		),
 		h.Div(h.ClassStr("af-gen__strip-right"),
 			// The cost sits ON the button's row, not in a panel elsewhere:

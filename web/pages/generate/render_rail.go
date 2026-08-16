@@ -42,12 +42,7 @@ type railProps struct {
 	StaleThresholdMinutes int32
 	Resource              fetch.AsyncResource[[]*affv1.Feed]
 	Stats                 fetch.AsyncResource[*affv1.SystemServiceStatsResponse]
-	// Items/Runs feed the tape and the 7-day spend column — see render.go's
-	// itemsRes/runsRes doc comments for why they are fetched flat (one
-	// request across every feed) rather than per-row.
-	Items    fetch.AsyncResource[[]*affv1.Item]
-	Runs     fetch.AsyncResource[[]*affv1.Run]
-	Selected string
+	Selected              string
 	// Err is the last toggle-enabled/Run Now mutation failure, distinct
 	// from Resource.Error (the list load) — TODOS.md D0-10: a mutation
 	// failure and a load failure are different things and must not share
@@ -74,14 +69,22 @@ type railProps struct {
 	OnKebabOpen func(slug string, open bool)
 }
 
+// renderRail is the persistent sidebar (render_workbench.go's two-column
+// shell): a compact, independently-scrolling feed list, sibling to the main
+// content column rather than a section stacked above/inside it. It fills the
+// viewport height on its own (styles.go's `.af-gen__sidebar`) and scrolls
+// natively — no cap, no pager. That replaced BOTH earlier attempts at "what
+// if you had 20 feeds" (a nested `overflow-y:auto` scrollbox, then
+// client-side pagination): a sidebar that just scrolls, the way an inbox
+// list does, needs neither, and is the one shape that does not fight the
+// page's own scroll — it is not stacked in the same vertical flow as the
+// page at all, so there is nothing for it to fight.
 func renderRail(p railProps) ui.Node {
 	t := deps.I18n
 	wt := wui.T(t.T)
 	fmtr := deps.Formatters
 	rs := p.Resource.Get()
 	feeds := rs.Value
-	items := p.Items.Get().Value
-	runs := p.Runs.Get().Value
 
 	killSwitchReason := ""
 	if p.Stats.Get().Ready && !p.Stats.Get().Value.GetGenerationEnabled() {
@@ -108,29 +111,31 @@ func renderRail(p railProps) ui.Node {
 			// anchor: "a numbered gutter on sequences" — the rail's own
 			// row-order is one, same as a timesheet's frame numbers) —
 			// position in the already-loaded, already-ordered feeds slice,
-			// not a stable feed id, so it reflects "row 1..N of what's on
-			// screen" the way a physical sheet's numbers do.
-			indexOf := make(map[int64]int, len(feeds))
-			for i, f := range feeds {
-				indexOf[f.GetId()] = i
-			}
+			// not a stable feed id, so it reflects "row 1..N" the way a
+			// physical sheet's numbers do.
 			listArgs := []any{h.ClassStr("af-rail__list")}
 			listArgs = append(listArgs, anyNodes(h.MapKeyedComponent(feeds, func(f *affv1.Feed) any { return f.GetId() }, func(f *affv1.Feed) ui.Node {
-				return renderRailRow(t, fmtr, f, indexOf[f.GetId()]+1, f.GetSlug() == p.Selected,
-					itemsForFeed(items, f.GetId()), feedSpend(runs, f.GetId()),
-					p.StaleThresholdMinutes,
-					p.OnSelect, p.OnToggleEnabled, p.OnRunNow, p.OnDelete, p.OnHistory,
-					p.KebabOpen == f.GetSlug(), p.OnKebabOpen)
+				idx := 0
+				for i, ff := range feeds {
+					if ff.GetId() == f.GetId() {
+						idx = i
+						break
+					}
+				}
+				return renderRailRow(t, fmtr, f, idx+1, f.GetSlug() == p.Selected,
+					p.StaleThresholdMinutes, p.OnSelect, p.OnToggleEnabled,
+					p.KebabOpen == f.GetSlug(), p.OnKebabOpen,
+					p.OnRunNow, p.OnDelete, p.OnHistory)
 			}))...)
 			return []ui.Node{h.Ul(listArgs...)}
 		},
 	})
 
 	return h.Aside(
-		h.ClassStr("af-generate__rail"),
+		h.ClassStr("af-gen__sidebar"),
 		h.Div(
 			h.ClassStr("af-rail__header"),
-			h.H2(h.Text(t.T("generate.rail.title"))),
+			h.Span(h.ClassStr("af-rail__header-title"), t.T("generate.workbench.feedsSummary", formatCount(len(feeds)))),
 			wui.Button(wui.ButtonProps{T: wt, ID: "generate-rail-new", LabelKey: "generate.rail.newFeed", Variant: wui.ButtonPrimary, OnClick: p.OnNew}),
 		),
 		h.If(killSwitchReason != "", h.Div(
@@ -147,7 +152,22 @@ func renderRail(p railProps) ui.Node {
 	)
 }
 
-func renderRailRow(t Translator, fmtr Formatters, f *affv1.Feed, rowNumber int, selected bool, feedItems []*affv1.Item, spend7d float64, staleThresholdMinutes int32, onSelect func(string), onToggle func(*affv1.Feed), onRunNow func(*affv1.Feed), onDelete func(*affv1.Feed), onHistory func(*affv1.Feed), kebabOpen bool, onKebabOpen func(string, bool)) ui.Node {
+// renderRailRow is ONE compact row in the sidebar — two lines, not the
+// six-field detail card this used to be. The tape, the stale-flag CHIP
+// (staleness itself still shows, as a dot), "Next run: unavailable" (which
+// always said exactly that — see the removed comment this file used to
+// carry about the missing jittered-time RPC — showing a fact that is never
+// anything but "unavailable" earns no space in a compact row) and the 7-day
+// spend figure all moved OUT of the row: the tape and stale flag now render
+// once, prominently, in the main column's header for whichever feed is
+// actually loaded (render.go, docs/design-direction.md's "spend the
+// boldness [on the tape]" — spending it on the ONE feed being worked on,
+// not diluted across N rows in a 20rem-wide list, is truer to that
+// direction than the old wide-card version ever was). Run Now moved into
+// this row's own kebab alongside History/Delete — it duplicates the
+// strip's Run Now once a feed is selected, but a feed you have NOT selected
+// still needs a way to run it without switching to it first.
+func renderRailRow(t Translator, fmtr Formatters, f *affv1.Feed, rowNumber int, selected bool, staleThresholdMinutes int32, onSelect func(string), onToggle func(*affv1.Feed), kebabOpen bool, onKebabOpen func(string, bool), onRunNow, onDelete, onHistory func(*affv1.Feed)) ui.Node {
 	wt := wui.T(t.T)
 	now := time.Now()
 	var lastBuilt *time.Time
@@ -170,7 +190,6 @@ func renderRailRow(t Translator, fmtr Formatters, f *affv1.Feed, rowNumber int, 
 	enabled := f.GetEnabled()
 	feed := f
 	toggleFn := onToggle
-	runNowFn := onRunNow
 
 	return h.Li(
 		h.ClassStr(h.ClassMap(map[string]bool{
@@ -180,75 +199,46 @@ func renderRailRow(t Translator, fmtr Formatters, f *affv1.Feed, rowNumber int, 
 			"af-rail__row--stale":    stale,
 		})),
 		h.OnClick(func() { onSelect(slug) }),
-		// The numbered gutter (docs/design-direction.md's anchor: a feed
-		// row IS a timesheet frame) plus title/slug — kept in one head row
-		// so the number reads as belonging to the frame beside it, not as a
-		// stray column.
-		h.Div(h.ClassStr("af-rail__row-head"),
-			h.Span(h.ClassStr("af-rail__row-number"), h.Aria("hidden", "true"), h.Text(formatCount(rowNumber))),
-			h.Div(h.ClassStr("af-rail__row-headtext"),
-				h.Div(h.ClassStr("af-rail__row-title"), h.Text(f.GetTitle())),
-				h.Div(h.ClassStr("af-rail__row-slug"), h.Text(t.T("generate.rail.slugPath", slug))),
+		// The status dot replaces the old row's stale-flag CHIP and the
+		// numbered gutter's own column — one glance says "healthy / stale /
+		// off" without spending a whole line on a pill. The number stays,
+		// small, ahead of the title (docs/design-direction.md's anchor: a
+		// feed row is a timesheet frame, and frame numbers lead the row).
+		h.Span(h.ClassStr("af-rail__row-dot"), h.Aria("hidden", "true")),
+		h.Div(h.ClassStr("af-rail__row-body"),
+			h.Div(h.ClassStr("af-rail__row-title-line"),
+				h.Span(h.ClassStr("af-rail__row-number"), h.Aria("hidden", "true"), h.Text(formatCount(rowNumber))),
+				h.Span(h.ClassStr("af-rail__row-title"), h.Text(f.GetTitle())),
+			),
+			h.Div(h.ClassStr("af-rail__row-meta"),
+				h.Text(t.T("generate.rail.compactMeta", slug, lastBuildText)),
 			),
 		),
-		h.If(stale, h.Span(h.ClassStr("af-rail__stale-flag"), h.Text(t.T("generate.rail.stale")))),
-		// The tape: this feed's recent publish history as ticks along time,
-		// one per item, positioned by published_at
-		// (docs/design-direction.md, "Signature: the tape") — the one
-		// element this whole visual direction is built to earn.
-		renderTape(feedItems, now),
-		h.Div(h.ClassStr("af-rail__row-meta"),
-			h.Span(h.Text(t.T("generate.common.labelValue", t.T("generate.rail.lastBuild"), lastBuildText))),
-			// "Next run" honestly says it cannot compute a jittered time
-			// today rather than showing a fabricated or nominal one — see
-			// logic.go's JitteredRuns doc comment: the Feed proto carries
-			// jitter_offset_seconds but no nominal next-fire-time field or
-			// RPC to derive one from, which TODOS.md D2-09/PLAN.md §14.3
-			// assume exists. Recorded in this task's final report as a
-			// §12.3 assumption that did not hold.
-			h.Span(h.Text(t.T("generate.common.labelValue", t.T("generate.rail.nextRun"), t.T("generate.rail.nextRunUnavailable")))),
-			// 7-day spend, unlabeled: this page cannot import web/i18n (see
-			// deps.go/doc.go) and no generate.rail.* catalogue key exists
-			// for "7-day spend" today — inventing English text here would
-			// be exactly the second, competing catalogue i18n.go's own doc
-			// comment warns against, and this task's file scope excludes
-			// web/i18n, where the key would have to be added. Shown as a
-			// bare tabular currency figure (matching the sampler's own
-			// unlabeled-adjacent-to-labelled convention is not available
-			// either, so this is a known gap — see this task's final
-			// report) rather than omitted outright, since PLAN.md's "make
-			// spending money deliberate" still wants the number on screen.
-			h.Span(h.ClassStr("af-rail__row-spend"), h.Text(fmtr.Currency(spend7d))),
-		),
-		// The toggle/Run Now controls sit inside the row's own click target
-		// (the whole <li> selects the feed on click) — wui.Toggle/wui.Button
-		// take a func() OnClick/OnChange with no DOM event to call
+		// The toggle/kebab sit inside the row's own click target (the whole
+		// <li> selects the feed on click) — wui.Toggle/wui.Kebab take a
+		// func() OnClick/OnChange with no DOM event to call
 		// StopPropagation on, so there is no way to ask the CONTROL itself
-		// to stop the bubble (a real web/ui gap for "interactive control
-		// nested in a clickable row" — see this task's final report). This
-		// wrapper div intercepts the bubbled click instead: by the time a
-		// click reaches an ancestor's handler, the target control's own
-		// handler has already run (DOM "at target" phase happens before
-		// bubbling), so stopping propagation here is equivalent to calling
+		// to stop the bubble (a real web/ui gap). This wrapper div
+		// intercepts the bubbled click instead: by the time a click reaches
+		// an ancestor's handler, the target control's own handler has
+		// already run (DOM "at target" phase happens before bubbling), so
+		// stopping propagation here is equivalent to calling
 		// StopPropagation on the control and needs no web/ui change.
 		h.Div(h.ClassStr("af-rail__row-actions"), h.OnClick(func(ev ui.Event) { ev.StopPropagation() }),
 			wui.Toggle(wui.ToggleProps{
 				T: wt, ID: "generate-rail-toggle-" + slug, LabelKey: "generate.rail.enabledLabel",
 				Checked: enabled, OnChange: func(bool) { toggleFn(feed) },
 			}),
-			wui.Button(wui.ButtonProps{
-				T: wt, ID: "generate-rail-runnow-" + slug, LabelKey: "generate.rail.runNow",
-				Variant: wui.ButtonSecondary, OnClick: func() { runNowFn(feed) },
-			}),
-			// Delete lives behind the ⋯, never as a button beside Run Now
-			// (§12.6 / D0-15): the two would sit adjacent in a dense list of
-			// rows that all look alike.
 			wui.Kebab(wui.KebabProps{
 				T: wt, ID: "generate-rail-kebab-" + slug,
 				LabelKey: "generate.rail.actionsFor", LabelArgs: []any{f.GetTitle()},
 				Open:         kebabOpen,
 				OnOpenChange: func(open bool) { onKebabOpen(slug, open) },
 				Items: []wui.KebabItem{
+					{
+						ID: "generate-rail-runnow-" + slug, LabelKey: "generate.rail.runNow",
+						OnSelect: func() { onRunNow(feed) },
+					},
 					{
 						ID: "generate-rail-history-" + slug, LabelKey: "generate.rail.history",
 						OnSelect: func() { onHistory(feed) },
@@ -278,24 +268,6 @@ func itemsForFeed(items []*affv1.Item, feedID int64) []*affv1.Item {
 		}
 	}
 	return out
-}
-
-// feedSpend sums Run.EstCostUsd (the only cost figure this page has any RPC
-// for — Feed and SystemService carry none, see render.go's runsRes doc
-// comment) for one feed across whatever window runsRes was itself fetched
-// over (tapeWindowDays, currently 14 — "7-day spend" per the task brief is
-// approximated by this same window rather than a second, narrower RPC).
-func feedSpend(runs []*affv1.Run, feedID int64) float64 {
-	if feedID == 0 {
-		return 0
-	}
-	var total float64
-	for _, r := range runs {
-		if r.GetFeedId() == feedID {
-			total += r.GetEstCostUsd()
-		}
-	}
-	return total
 }
 
 // renderTape draws the signature element (docs/design-direction.md,

@@ -121,6 +121,19 @@ type smpSampleStore interface {
 // result is discarded".
 type smpEnabledCheck func(ctx context.Context) (enabled bool, reason string, err error)
 
+// smpPriceLookup resolves a model's per-token rate, matching
+// *budget.Table's own Lookup signature (declared narrowly here so this
+// package depends on the method, not the concrete type). It exists because
+// smpFeedLookup's price comes from the SAVED recipe's model — correct for
+// "sample this recipe" — but a draft overriding the model (smpApplyDraft)
+// changes what should be priced without changing what smpFeedLookup already
+// resolved. Nil is valid (matches every other optional dependency here) and
+// simply leaves an overridden model unpriced, same as an unknown model
+// already does.
+type smpPriceLookup interface {
+	Lookup(model string) (budget.Price, bool)
+}
+
 // SampleServerConfig bundles every dependency SampleServer needs. Now
 // defaults to time.Now when nil, the same pattern generate.Deps uses, so
 // tests get deterministic timestamps without a wall-clock race.
@@ -132,8 +145,13 @@ type SampleServerConfig struct {
 	Provider llm.Provider
 	IDs      ids.Source
 	Budget   smpBudgetChecker
-	Samples  smpSampleStore
-	Enabled  smpEnabledCheck
+	// Prices re-derives PriceInputPerMToken/PriceOutputPerMToken when a draft
+	// overrides the model (see smpPriceLookup). Optional: nil leaves an
+	// overridden model's price at whatever smpFeedLookup resolved for the
+	// SAVED model, which is wrong but no worse than the bug this fixes.
+	Prices  smpPriceLookup
+	Samples smpSampleStore
+	Enabled smpEnabledCheck
 
 	// PublicHost is the bare hostname used to build Tag URI guids and feed
 	// URLs for the rendered-XML preview (PLAN.md §5.1), e.g.
@@ -321,7 +339,7 @@ func (s *SampleServer) prepareSample(ctx context.Context, feedID int64, sampleSi
 	// provider call, so a draft is subject to exactly the same checks a
 	// saved recipe is. Nothing here is written back: `spec` is a value, and
 	// this function never persists it.
-	if err := smpApplyDraft(&spec, draft); err != nil {
+	if err := smpApplyDraft(&spec, draft, s.cfg.Prices); err != nil {
 		return model.Feed{}, generate.SampleResult{}, nil, err
 	}
 
@@ -648,6 +666,12 @@ func (s *SampleServer) buildCandidates(ctx context.Context, feed model.Feed, spe
 		}
 		c.RenderedXml = xml
 
+		embed, err := s.renderCandidateEmbed(feed, it)
+		if err != nil {
+			return nil, err
+		}
+		c.EmbedPreviewHtml = embed
+
 		if feed.Kind == model.KindGenerative {
 			c.Novelty = s.noveltyVerdict(ctx, feed.ID, it)
 		}
@@ -694,12 +718,44 @@ func smpSlackPreview(it model.Item) string {
 // item, and this calls it rather than re-implementing a second one that
 // could drift.
 func (s *SampleServer) renderCandidateXML(feed model.Feed, it model.Item) (string, error) {
+	doc, err := render.RSS(s.candidateChannel(feed, it))
+	if err != nil {
+		return "", fmt.Errorf("rendering candidate item: %w", err)
+	}
+	return smpExtractItemFragment(string(doc))
+}
+
+// candidateChannel builds the synthetic one-item Channel every candidate
+// preview renders through.
+//
+// One constructor, not one per preview: the previews exist to answer "what
+// will this look like once published", and two channels assembled separately
+// would eventually disagree about a URL or a Tag URI epoch and make one
+// preview quietly lie about a detail the other got right.
+func (s *SampleServer) candidateChannel(feed model.Feed, it model.Item) model.Channel {
 	tagYear := feed.CreatedAt.Year()
 	if tagYear == 0 {
 		tagYear = s.now().Year()
 	}
+
+	// A sampled item has no published_at: generate.Sample deliberately skips
+	// stampItems (runner.go), because a dry run persists nothing and a
+	// timestamp is assigned at promote time, "stamped now" (§12.3). So the
+	// item reaching a preview carries the zero time — and a preview is the
+	// one place that zero becomes visible, rendering as "1 Jan 0001,
+	// 00:00 UTC" in the embed and as a year-0001 pubDate in the feed XML
+	// view, which every date rule in internal/feedvalidate treats as an
+	// error. Promote is what this preview is previewing, so previewing it
+	// with the timestamp promote would assign is the honest answer.
+	//
+	// Set here rather than in either renderer so both views agree, and only
+	// when it is actually missing, so a real item passed through this path
+	// keeps its own date.
+	if it.PublishedAt.IsZero() {
+		it.PublishedAt = s.now()
+	}
 	host := s.cfg.PublicHost
-	channel := model.Channel{
+	return model.Channel{
 		Feed:      feed,
 		SelfURL:   fmt.Sprintf("https://%s/feeds/%s.xml", host, feed.Slug),
 		HTMLURL:   fmt.Sprintf("https://%s/", host),
@@ -710,11 +766,30 @@ func (s *SampleServer) renderCandidateXML(feed model.Feed, it model.Item) (strin
 		Generator: s.cfg.Generator,
 		DocsURL:   "https://www.rssboard.org/rss-specification",
 	}
-	doc, err := render.RSS(channel)
+}
+
+// renderCandidateEmbed renders the embed document (PLAN.md §6.1) this
+// candidate would appear in, through the SAME render.Embed the public
+// /embed/{slug} route uses — for the same reason renderCandidateXML calls
+// render.RSS rather than templating an <item> by hand.
+//
+// It matters more here than for the XML view. The embed is the surface that
+// ends up on somebody else's page, and its one hard rule is that it renders
+// SummaryText only — never BodyHTML, never AnswerHTML (§5.5, §6.1). A
+// preview built from a second, admin-only renderer could show a
+// spoiler-free card while the real one leaked, or the reverse, and the
+// preview would be worse than none: it would be reassuring and wrong.
+//
+// The window is deliberately the whole document with one item in it. An
+// operator sampling a candidate is asking "what will this look like on the
+// page" and the answer includes the heading, the rules, and the subscribe
+// link — not just their own row.
+func (s *SampleServer) renderCandidateEmbed(feed model.Feed, it model.Item) (string, error) {
+	doc, err := render.Embed(s.candidateChannel(feed, it), render.EmbedOptions{})
 	if err != nil {
-		return "", fmt.Errorf("rendering candidate item: %w", err)
+		return "", fmt.Errorf("rendering candidate embed: %w", err)
 	}
-	return smpExtractItemFragment(string(doc))
+	return string(doc), nil
 }
 
 // smpExtractItemFragment pulls the single <item>...</item> block (including
@@ -773,7 +848,7 @@ func (s *SampleServer) noveltyVerdict(ctx context.Context, feedID int64, it mode
 // a named field error at the moment the operator typed it, rather than a
 // provider call that spends money and then fails on a template the server
 // could have rejected for free.
-func smpApplyDraft(spec *generate.Spec, draft *affv1.SampleDraft) error {
+func smpApplyDraft(spec *generate.Spec, draft *affv1.SampleDraft, prices smpPriceLookup) error {
 	if draft == nil {
 		return nil
 	}
@@ -783,8 +858,24 @@ func smpApplyDraft(spec *generate.Spec, draft *affv1.SampleDraft) error {
 	if v := draft.GetUserPrompt(); v != "" {
 		spec.UserPromptTemplate = v
 	}
-	if v := draft.GetModel(); v != "" {
+	if v := draft.GetModel(); v != "" && v != spec.Model {
 		spec.Model = v
+		// Re-price against the OVERRIDDEN model. Without this, spec's price
+		// fields stay whatever smpFeedLookup resolved for the saved recipe's
+		// model — silently wrong (not just stale) once the draft targets a
+		// different model, and the operator has no way to see it: the
+		// candidate cost simply reads a number priced for a model that was
+		// never called. Unknown-to-the-table still prices at zero, same as
+		// the saved model would.
+		if prices != nil {
+			if p, ok := prices.Lookup(v); ok {
+				spec.PriceInputPerMToken = p.InputPerMTok
+				spec.PriceOutputPerMToken = p.OutputPerMTok
+			} else {
+				spec.PriceInputPerMToken = 0
+				spec.PriceOutputPerMToken = 0
+			}
+		}
 	}
 	if v := draft.GetEffort(); v != "" {
 		if !smpValidEfforts[v] {

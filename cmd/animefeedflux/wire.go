@@ -315,19 +315,69 @@ func applyPriceTable(t *budget.Table, entries []*affv1.PriceEntry) {
 	}
 }
 
+// providerDefaults are the settings-page values a recipe inherits when it
+// pins nothing of its own (PLAN.md §12.3, revised 2026-08-15: "the model per
+// feed defaults to the global model set in Settings; recipes store
+// overrides"). Read live per run, never cached from boot, for the same
+// reason loadGenerationSettings reads live: the admin UI must not show a
+// default the engine stopped honouring a restart ago.
+type providerDefaults struct {
+	Model  string
+	Effort string
+}
+
+// loadProviderDefaults reads settings.provider directly, mirroring
+// loadGenerationSettings' approach (and its reasons). A missing row or field
+// falls back to the same constants the RPC layer seeds on read, so the
+// engine and the settings screen agree on what "default" means from first
+// boot.
+func loadProviderDefaults(ctx context.Context, r store.Reader) providerDefaults {
+	defaults := providerDefaults{Model: rpc.DefaultProviderModel, Effort: rpc.DefaultProviderEffort}
+	var raw string
+	err := r.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'provider'`).Scan(&raw)
+	if err != nil {
+		// sql.ErrNoRows is a fresh install; anything else degrades to the
+		// same constants rather than failing a run over a settings read.
+		return defaults
+	}
+	p := &affv1.Settings_Provider{}
+	if err := json.Unmarshal([]byte(raw), p); err != nil {
+		return defaults
+	}
+	if v := strings.TrimSpace(p.GetDefaultModel()); v != "" {
+		defaults.Model = v
+	}
+	if v := strings.TrimSpace(p.GetEffort()); v != "" {
+		defaults.Effort = v
+	}
+	return defaults
+}
+
 // generateSpecFrom maps the recipe layer (internal/feedspec) onto the
 // pipeline layer (internal/generate) — the two packages deliberately don't
 // know about each other (generate/runner.go's header), so this file is the
 // only place the mapping happens.
-func generateSpecFrom(fs feedspec.Spec, trigger string, prices *budget.Table) generate.Spec {
+//
+// defaults fills what the recipe left unpinned: an empty recipe model runs
+// on the settings' default model (per-feed values are OVERRIDES, 2026-08-15),
+// and effort — which recipes cannot pin at all — is always the settings
+// tier. The price lookup uses the RESOLVED model, so an inherited model's
+// rate prices the run rather than a blank lookup pricing it at zero.
+func generateSpecFrom(fs feedspec.Spec, trigger string, prices *budget.Table, defaults providerDefaults) generate.Spec {
+	resolvedModel := strings.TrimSpace(fs.Model.Model)
+	if resolvedModel == "" {
+		resolvedModel = defaults.Model
+	}
 	var priceIn, priceOut float64
-	if p, ok := prices.Lookup(fs.Model.Model); ok {
+	if p, ok := prices.Lookup(resolvedModel); ok {
 		priceIn, priceOut = p.InputPerMTok, p.OutputPerMTok
 	}
 	return generate.Spec{
 		SystemPrompt:         fs.SystemPrompt,
 		UserPromptTemplate:   fs.UserPrompt,
-		Model:                fs.Model.Model,
+		Model:                resolvedModel,
+		Effort:               defaults.Effort,
+		WatchMode:            fs.IsWatch(),
 		Temperature:          fs.Model.Temperature,
 		ItemsPerRun:          fs.ItemsPerRun,
 		RecentTitlesN:        fs.Novelty.ExcludeLast,
@@ -845,7 +895,8 @@ func (e *genExecutor) Execute(ctx context.Context, feedID int64, trigger string)
 		IDs:      e.ids,
 		Metrics:  e.metrics,
 	}
-	result, err := generate.Run(ctx, deps, row.Feed, generateSpecFrom(fs, trigger, e.prices))
+	result, err := generate.Run(ctx, deps, row.Feed,
+		generateSpecFrom(fs, trigger, e.prices, loadProviderDefaults(ctx, e.st.Reader())))
 	if err == nil && result.Run.Status == generate.StatusCompleted && e.inv != nil {
 		// RULE-6: every write that changes a feed's published shape
 		// invalidates its render cache, AFTER commit, never before (a
@@ -1034,7 +1085,8 @@ func (e *wireRunExecutor) ExecuteRun(feedID, runID int64) {
 			IDs:      e.ids,
 			Metrics:  e.metrics,
 		}
-		result, err := generate.Run(ctx, deps, row.Feed, generateSpecFrom(fs, "manual", e.prices))
+		result, err := generate.Run(ctx, deps, row.Feed,
+			generateSpecFrom(fs, "manual", e.prices, loadProviderDefaults(ctx, e.st.Reader())))
 		if err == nil && result.Run.Status == generate.StatusCompleted && e.inv != nil {
 			invalidateFeedAndAggregates(ctx, e.st, e.inv, row.Slug)
 		}
@@ -1064,7 +1116,7 @@ func (l feedLookup) GetFeedForSample(ctx context.Context, feedID int64) (model.F
 	if err != nil {
 		return model.Feed{}, generate.Spec{}, err
 	}
-	return row.Feed, generateSpecFrom(fs, "", l.prices), nil
+	return row.Feed, generateSpecFrom(fs, "", l.prices, loadProviderDefaults(ctx, l.st.Reader())), nil
 }
 
 // sampleBudget implements rpc's smpBudgetChecker over the identical
@@ -1176,6 +1228,13 @@ func buildScheduler(
 		fs, err := specFromRow(row)
 		if err != nil {
 			log.Warn("scheduler: skipping feed with unparsable recipe", "feed_slug", row.Slug, "error", err)
+			continue
+		}
+		// Ad-hoc feeds are never scheduled: Run Now is their only trigger
+		// (§7 revision 2026-08-15). Skipped BEFORE Firing() so a manual-only
+		// feed with a stale or absent schedule never logs "unusable
+		// schedule" for fields nothing reads.
+		if fs.IsAdhoc() {
 			continue
 		}
 		// Spec.Firing picks the structured recurrence when the feed has one
@@ -1415,6 +1474,9 @@ func buildControlPlane(
 	runSrv := rpc.NewRunServer(st, log)
 	sysSrv := rpc.NewSystemServer(st, log,
 		rpc.WithVersionInfo(version, commit, time.Now()),
+		// Stored provider API keys are encrypted at rest with the same
+		// AFF_SECRET_KEY that protects the TOTP secret.
+		rpc.WithSecretKey([]byte(cfg.SecretKey.Reveal())),
 		// Backup returns the whole database — every hash in it — so it is
 		// gated on the same password + TOTP re-proof as ChangePassword,
 		// rather than on merely holding a live session (A8-40).
@@ -1439,6 +1501,7 @@ func buildControlPlane(
 		IDs:        ids.NewSource(),
 		Budget:     sampleBudget{st: st},
 		Samples:    st,
+		Prices:     prices,
 		PublicHost: cfg.PublicBaseURL.Host,
 		Generator:  "AnimeFeedFlux " + version,
 		Enabled: func(ctx context.Context) (bool, string, error) {
@@ -1793,7 +1856,12 @@ func runAll(ctx context.Context, cfg *config.Config, log *slog.Logger) int {
 	// The resolver gets its own SystemServer rather than the one
 	// buildControlPlane builds below, because that one does not exist yet at
 	// this point and this needs nothing from it beyond the settings read.
-	endpoints := rpc.NewProviderEndpointResolver(rpc.NewSystemServer(st, log), st.Reader())
+	endpoints := rpc.NewProviderEndpointResolver(
+		// WithSecretKey here too: this resolver is what hands generation and
+		// embedding their credentials, so it must be able to decrypt keys
+		// stored from /settings/provider, not just read env vars.
+		rpc.NewSystemServer(st, log, rpc.WithSecretKey([]byte(cfg.SecretKey.Reveal()))),
+		st.Reader())
 	provider := newResolvingProvider(endpoints, defaultProvider, log)
 	embedder := newResolvingEmbedder(endpoints, defaultEmbedder, embeddingModel, embeddingDim, log)
 

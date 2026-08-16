@@ -269,7 +269,40 @@ func (v *validator) secret(name string, required bool) string {
 			"must be at least %d characters — it is hashed into an encryption key, so a short value means a low-entropy key protecting the TOTP secret at rest (got %d)",
 			SecretMinLength, len(raw)))
 	}
+	if isPlaceholderSecret(raw) {
+		v.bad(name, "is still the placeholder from deploy/animefeedflux.env.example — generate a real value with `openssl rand -base64 48`")
+	}
 	return raw
+}
+
+// placeholderMarkers are the substrings that identify a value copied out of
+// deploy/animefeedflux.env.example rather than generated.
+//
+// The length floor above is necessary but not sufficient, and the gap was
+// real: the shipped example carries
+// AFF_SECRET_KEY=changeme-generate-a-real-one, which is 28 characters — over
+// the 16-byte floor — so an operator who installed the example file verbatim
+// booted cleanly with a PUBLICLY KNOWN key encrypting the TOTP secret at
+// rest. That is the same failure A8-33 raised the floor to prevent, one notch
+// further out: the floor measures length, and the thing that makes a
+// placeholder dangerous is not its length but that it is published in this
+// repository.
+//
+// Matched case-insensitively on a substring, not compared for equality
+// against the exact example strings: an operator who edits the placeholder to
+// `changeme-for-real-later` has still not generated a key, and a check that
+// only caught the byte-exact original would wave that through.
+var placeholderMarkers = []string{"changeme", "change-me", "replace-me", "your-key-here"}
+
+// isPlaceholderSecret reports whether raw looks like an unedited example value.
+func isPlaceholderSecret(raw string) bool {
+	lower := strings.ToLower(raw)
+	for _, marker := range placeholderMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (v *validator) required(name string) string {

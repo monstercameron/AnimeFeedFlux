@@ -1365,3 +1365,82 @@ func TestItemListSearchMatchesPrefix(t *testing.T) {
 		t.Errorf(`search("...") = %v, want every item (no filter applied)`, got)
 	}
 }
+
+// --- markup sanitization at the RPC boundary --------------------------------
+//
+// internal/generate sanitizes what the GENERATION pipeline produces. This
+// service is a second, independent ingress into the same published-item table,
+// and its values land in render/permalink.go and render/rss.go's
+// content:encoded completely unescaped — so it has to do its own sanitizing
+// rather than inherit a guarantee from a pipeline it never went through.
+
+func TestItemCreate_SanitizesBodyAndAnswerHTML(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-sanitize-create")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId:      feedID,
+		Title:       "T",
+		SummaryText: "s",
+		BodyHtml:    `<p>body<script>alert(1)</script></p>`,
+		AnswerHtml:  `<p onclick="steal()">answer<script>alert(2)</script></p>`,
+		PublishedAt: timestamppb.New(itemOrdinaryPublishedAt),
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	got := created.GetItem()
+	if strings.Contains(got.GetBodyHtml(), "script") {
+		t.Errorf("body_html stored with script markup intact: %q", got.GetBodyHtml())
+	}
+	if strings.Contains(got.GetAnswerHtml(), "script") {
+		t.Errorf("answer_html stored with script markup intact: %q", got.GetAnswerHtml())
+	}
+	if strings.Contains(strings.ToLower(got.GetAnswerHtml()), "onclick") {
+		t.Errorf("answer_html kept an event handler attribute: %q", got.GetAnswerHtml())
+	}
+	// The real content survives — this is sanitization, not rejection.
+	if !strings.Contains(got.GetBodyHtml(), "body") || !strings.Contains(got.GetAnswerHtml(), "answer") {
+		t.Errorf("sanitizing destroyed legitimate content: body=%q answer=%q",
+			got.GetBodyHtml(), got.GetAnswerHtml())
+	}
+}
+
+func TestItemUpdate_SanitizesBodyAndAnswerHTML(t *testing.T) {
+	srv, st, _ := newItemTestServer(t)
+	ctx := t.Context()
+	feedID := itemMustCreateFeed(t, st, "feed-sanitize-update")
+
+	created, err := srv.Create(ctx, &affv1.ItemServiceCreateRequest{Item: &affv1.Item{
+		FeedId: feedID, Title: "T", SummaryText: "s", BodyHtml: "<p>b</p>",
+		PublishedAt: timestamppb.New(itemOrdinaryPublishedAt),
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	updated, err := srv.Update(ctx, &affv1.ItemServiceUpdateRequest{
+		Item: &affv1.Item{
+			Id:          created.GetItem().GetId(),
+			Title:       "T2",
+			SummaryText: "s2",
+			BodyHtml:    `<p>b2<script>alert(1)</script></p>`,
+			AnswerHtml:  `<img src=x onerror="alert(2)">answer`,
+			PublishedAt: timestamppb.New(itemOrdinaryPublishedAt),
+		},
+		ExpectedVersion: created.GetItem().GetVersion(),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	got := updated.GetItem()
+	if strings.Contains(got.GetBodyHtml(), "script") {
+		t.Errorf("body_html updated with script markup intact: %q", got.GetBodyHtml())
+	}
+	if strings.Contains(strings.ToLower(got.GetAnswerHtml()), "onerror") {
+		t.Errorf("answer_html updated with an event handler intact: %q", got.GetAnswerHtml())
+	}
+}

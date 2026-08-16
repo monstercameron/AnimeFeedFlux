@@ -3,6 +3,9 @@
 package generatepage
 
 import (
+	"strconv"
+	"syscall/js"
+
 	h "github.com/monstercameron/GoWebComponents/v5/html/shorthand"
 	"github.com/monstercameron/GoWebComponents/v5/ui"
 
@@ -52,6 +55,69 @@ type modelPickerProps struct {
 // rather than silently retargeted to something else.
 func renderModelPicker(p modelPickerProps) ui.Node {
 	t := deps.I18n
+
+	// Force the DOM's actual selection to agree with p.Value once the
+	// <select> exists (TODOS.md A7-22, confirmed live 2026-08-14).
+	//
+	// Root cause, traced into GoWebComponents/v5@v5.0.1's reconciler rather
+	// than this file: the control renders as a plain <input> while the
+	// model list is unavailable/loading, then swaps to a <select> carrying
+	// 100+ <option>s across two <optgroup>s once ListModels resolves. That
+	// swap reproducibly lands the browser's actual selection on an
+	// unrelated option — observed settling on the FIRST option of the
+	// LAST-inserted <optgroup>, i.e. an embedding model, not on the ""
+	// placeholder this file's own SelectedIf(true) declares below. No
+	// change/input DOM event fires when this happens (instrumented and
+	// confirmed: this is the browser's native "no option marked selected on
+	// this large a tree" resolution outracing GWC's per-option property
+	// writes, not anything reading the wrong prop). Because no event fires,
+	// Go-side state (p.Value, and therefore what actually gets saved) stays
+	// correct even when the DOM visibly disagrees — verified by saving
+	// under the bug and reading the row back fresh: the saved model was
+	// always "".
+	//
+	// A single post-commit correction is NOT enough: instrumented and
+	// confirmed the wrong auto-selection lands on a LATER DOM mutation than
+	// this effect's own — the reconciler appends the two <optgroup>s (100+
+	// <option>s) to the <select> across more than one commit, and the
+	// browser's own default-selection algorithm mis-fires on one of the
+	// later appends, after an effect running once at mount already found
+	// the value correct. So this watches every subsequent child mutation
+	// via MutationObserver and re-asserts p.Value each time, converging to
+	// correct regardless of how many discrete appends the swap takes —
+	// bypassing GWC's declarative diff (which does not reliably win this
+	// race) with a direct DOM write, the same escape hatch
+	// renderVariableChips already uses for a different case where props
+	// alone are not enough.
+	ready := !p.Unavailable && len(p.Models) > 0
+	effectKey := strconv.FormatBool(ready) + "|" + p.Value
+	ui.UseEffectOf(func() func() {
+		if !ready {
+			return nil
+		}
+		el := js.Global().Get("document").Call("getElementById", p.ID)
+		if !el.Truthy() {
+			return nil
+		}
+		value := p.Value
+		correct := func() {
+			if el.Get("value").String() != value {
+				el.Set("value", value)
+			}
+		}
+		correct()
+		var cb js.Func
+		cb = js.FuncOf(func(this js.Value, args []js.Value) any {
+			correct()
+			return nil
+		})
+		observer := js.Global().Get("MutationObserver").New(cb)
+		observer.Call("observe", el, map[string]any{"childList": true, "subtree": true})
+		return func() {
+			observer.Call("disconnect")
+			cb.Release()
+		}
+	}, effectKey)
 
 	if p.Unavailable || len(p.Models) == 0 {
 		reason := p.Reason

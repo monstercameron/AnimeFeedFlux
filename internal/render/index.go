@@ -109,7 +109,19 @@ func writeFeedEntry(b *bytes.Buffer, baseURL string, f model.Feed) {
 	writeSubscribeLink(b, baseURL, f, "xml", "RSS")
 	writeSubscribeLink(b, baseURL, f, "atom", "Atom")
 	writeSubscribeLink(b, baseURL, f, "json", "JSON Feed")
+	b.WriteString(`        <a href="`)
+	b.WriteString(EscapeText(baseURL + "/embed/" + f.Slug))
+	b.WriteString(`">Embed</a>` + "\n")
 	b.WriteString("      </p>\n")
+
+	// The iframe markup, spelled out rather than described. This is the only
+	// surface that tells anyone the embed route exists, and "there is an
+	// embed at /embed/{slug}" is not the same as knowing the attributes that
+	// make it render at a sensible size — a reader who has to guess at those
+	// will guess wrong and conclude the feature is broken.
+	b.WriteString("      <pre><code>")
+	b.WriteString(EscapeText(EmbedSnippet(baseURL, f.Slug)))
+	b.WriteString("</code></pre>\n")
 
 	b.WriteString("    </li>\n")
 }

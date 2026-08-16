@@ -153,3 +153,84 @@ func TestSaveSettingsRefusesAnUnknownBackend(t *testing.T) {
 		}
 	}
 }
+
+// --- api_key_env allowlist --------------------------------------------------
+//
+// api_key_env is an operator-supplied environment variable NAME, paired with
+// an operator-supplied base_url. Unconstrained, that is a "read any variable
+// in this process and POST it to a host of my choosing" primitive wearing a
+// settings form — and the variables it could read include the two secrets
+// (AFF_SECRET_KEY, AFF_PASSWORD_PEPPER) whose entire purpose is to live
+// nowhere the database does, i.e. to survive exactly the compromise that
+// would let someone edit these settings in the first place.
+
+func TestResolveProviderEndpointRefusesApplicationSecretsAsAPIKeyEnv(t *testing.T) {
+	// Every secret this deployment actually holds — see
+	// deploy/animefeedflux.env.example, which is the complete list of what is
+	// in this process's environment.
+	secrets := map[string]string{
+		"AFF_SECRET_KEY":             "the-totp-at-rest-key",
+		"AFF_PASSWORD_PEPPER":        "the-pepper",
+		"AFF_BACKUP_ENCRYPTION_KEY":  "the-backup-key",
+		"OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer real-token",
+		"AFF_SLACK_WEBHOOK_URL":      "https://hooks.slack.com/services/real",
+	}
+	getenv := func(k string) string { return secrets[k] }
+
+	for name := range secrets {
+		p := &affv1.Settings_Provider{
+			ActiveProfile: "exfil",
+			Profiles: []*affv1.ProviderProfile{
+				{Name: "exfil", BaseUrl: "https://attacker.example.com/v1", ApiKeyEnv: name},
+			},
+		}
+		got := ResolveProviderEndpoint(p, getenv)
+		if got.APIKey != "" {
+			t.Errorf("api_key_env=%q leaked %q to an operator-supplied base URL", name, got.APIKey)
+		}
+	}
+}
+
+func TestResolveProviderEndpointDoesNotFallBackToTheDefaultKeyOnARefusedName(t *testing.T) {
+	// Fail closed to EMPTY, never to the deployment default key — the same
+	// rule ResolveProviderEndpoint's doc comment already states for an unset
+	// profile variable. Falling back would send the real OpenAI credential to
+	// whatever base URL the profile names, which is the disclosure this is
+	// supposed to prevent, arrived at by a different road.
+	getenv := func(k string) string {
+		if k == sysProviderAPIKeyEnv {
+			return "the-real-deployment-key"
+		}
+		return "some-other-value"
+	}
+	p := &affv1.Settings_Provider{
+		ActiveProfile: "exfil",
+		Profiles: []*affv1.ProviderProfile{
+			{Name: "exfil", BaseUrl: "https://attacker.example.com/v1", ApiKeyEnv: "AFF_SECRET_KEY"},
+		},
+	}
+	if got := ResolveProviderEndpoint(p, getenv); got.APIKey != "" {
+		t.Fatalf("refused api_key_env fell back to %q", got.APIKey)
+	}
+}
+
+func TestResolveProviderEndpointStillAcceptsOrdinaryProviderKeyNames(t *testing.T) {
+	// The allowlist must not cost a legitimate configuration: these are the
+	// shapes an operator actually types, and the ones this file's other tests
+	// already use.
+	for _, name := range []string{"OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "LOCAL_KEY", "OR_KEY", "GROQ_TOKEN"} {
+		getenv := func(k string) string {
+			if k == name {
+				return "profile-key"
+			}
+			return ""
+		}
+		p := &affv1.Settings_Provider{
+			ActiveProfile: "p",
+			Profiles:      []*affv1.ProviderProfile{{Name: "p", ApiKeyEnv: name}},
+		}
+		if got := ResolveProviderEndpoint(p, getenv); got.APIKey != "profile-key" {
+			t.Errorf("legitimate api_key_env %q resolved to %q, want the profile key", name, got.APIKey)
+		}
+	}
+}

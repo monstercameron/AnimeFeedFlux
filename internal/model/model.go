@@ -64,6 +64,72 @@ type Feed struct {
 }
 
 // Item is one published entry.
+// ItemFormats is the stage-2 output: the same raw item, formatted once per
+// output surface so each is optimized for how that surface actually
+// renders (§9, two-stage generation, 2026-08-15). JSON tags are the
+// persistence format (items.formats_json) — stable, additive-only.
+//
+// The mapping each renderer applies, with the raw-field fallback:
+//
+//	FeedHTML  -> content:encoded / atom content   (falls back to BodyHTML)
+//	CardText  -> <description> / og:description,
+//	             i.e. the Slack card              (falls back to SummaryText)
+//	EmbedText -> the /embed/{slug} widget line    (falls back to SummaryText)
+//	PageHTML  -> the item permalink page body     (falls back to BodyHTML)
+type ItemFormats struct {
+	FeedHTML  string `json:"feed_html,omitempty"`
+	CardText  string `json:"card_text,omitempty"`
+	EmbedText string `json:"embed_text,omitempty"`
+	PageHTML  string `json:"page_html,omitempty"`
+}
+
+// Empty reports whether no variant is set at all — the "render everything
+// from raw fields" state.
+func (f ItemFormats) Empty() bool {
+	return f.FeedHTML == "" && f.CardText == "" && f.EmbedText == "" && f.PageHTML == ""
+}
+
+// The four Render* accessors below are THE way a renderer reads item
+// content: variant when stage 2 produced one, raw field otherwise. Putting
+// the fallback here — rather than as an if at every render call site —
+// means a renderer cannot accidentally prefer a raw field over its variant
+// or, worse, a variant meant for a different surface.
+
+// RenderCardText is the plain-text teaser surface: RSS <description>,
+// atom <summary>, JSON Feed summary, og:description — what Slack's card
+// shows (§5.5).
+func (it Item) RenderCardText() string {
+	if it.Formats.CardText != "" {
+		return it.Formats.CardText
+	}
+	return it.SummaryText
+}
+
+// RenderFeedHTML is the rich body feed readers show: content:encoded and
+// atom content.
+func (it Item) RenderFeedHTML() string {
+	if it.Formats.FeedHTML != "" {
+		return it.Formats.FeedHTML
+	}
+	return it.BodyHTML
+}
+
+// RenderPageHTML is the item permalink page's body.
+func (it Item) RenderPageHTML() string {
+	if it.Formats.PageHTML != "" {
+		return it.Formats.PageHTML
+	}
+	return it.BodyHTML
+}
+
+// RenderEmbedText is the one-line text the /embed/{slug} widget shows.
+func (it Item) RenderEmbedText() string {
+	if it.Formats.EmbedText != "" {
+		return it.Formats.EmbedText
+	}
+	return it.SummaryText
+}
+
 type Item struct {
 	ID     int64
 	FeedID int64
@@ -91,6 +157,15 @@ type Item struct {
 	// AnswerHTML is trivia only. It must never reach SummaryText or
 	// og:description, or the channel preview spoils the question (§5.5).
 	AnswerHTML string
+
+	// Formats holds the per-surface presentation variants stage 2 of
+	// generation produced (§9, revised 2026-08-15). Every field is
+	// optional: an empty variant means "render this surface from the raw
+	// fields above", which is also the state of every item generated
+	// before stage 2 existed, an item whose formatting call failed, and an
+	// item edited after generation (editing clears variants rather than
+	// serving stale ones).
+	Formats ItemFormats
 
 	// Link is the item's destination: our permalink for generative items, the
 	// publisher's article for grounded ones.

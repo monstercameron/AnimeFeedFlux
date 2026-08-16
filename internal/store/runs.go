@@ -221,9 +221,9 @@ func (s *Store) Heartbeat(ctx context.Context, runID int64) error {
 // done" apart from "crashed after committing" (§15).
 const insertRunItemSQL = `
 	INSERT INTO items (feed_id, item_key, content_hash, title, summary_text, body_html,
-	                    answer_html, link, source_name, published_at, origin, run_id,
+	                    answer_html, link, source_name, formats_json, published_at, origin, run_id,
 	                    created_at, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // CommitRun inserts items and closes the run row in ONE transaction. This is
 // the §9 rule and the reason this function takes both together: a crash
@@ -284,10 +284,14 @@ func (s *Store) CommitRun(ctx context.Context, runID int64, items []model.Item, 
 
 	now := formatTime(time.Now())
 	for _, it := range items {
+		formatsJSON, ferr := encodeFormats(it.Formats)
+		if ferr != nil {
+			return ferr
+		}
 		res, err := tx.ExecContext(ctx, insertRunItemSQL,
 			it.FeedID, it.ItemKey, it.ContentHash, it.Title, it.SummaryText, it.BodyHTML,
 			nullString(it.AnswerHTML), nullString(it.Link), nullString(it.SourceName),
-			formatTime(it.PublishedAt), string(it.Origin), runID,
+			formatsJSON, formatTime(it.PublishedAt), string(it.Origin), runID,
 			now, now,
 		)
 		if err != nil {
