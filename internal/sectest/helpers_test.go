@@ -72,7 +72,10 @@ func openTestStore(t tHelper) *store.Store {
 // already enrolled at testPassword and a known TOTP secret, so tests can
 // compute valid codes with totp.GenerateCode the same way a legitimate
 // authenticator app would.
-func newTestServer(t tHelper) (srv *rpc.AuthServer, st *store.Store, totpSecret string) {
+// opts pass through to NewAuthServer — used by exactly one test (SEC-46) to
+// disable TOTP replay rejection; see that test for why. Every other test
+// runs the production configuration.
+func newTestServer(t tHelper, opts ...rpc.AuthServerOption) (srv *rpc.AuthServer, st *store.Store, totpSecret string) {
 	t.Helper()
 	st = openTestStore(t)
 
@@ -99,7 +102,7 @@ func newTestServer(t tHelper) (srv *rpc.AuthServer, st *store.Store, totpSecret 
 		t.Fatalf("set totp secret: %v", err)
 	}
 
-	srv, err = rpc.NewAuthServer(st, testSecretKey)
+	srv, err = rpc.NewAuthServer(st, testSecretKey, opts...)
 	if err != nil {
 		t.Fatalf("new auth server: %v", err)
 	}

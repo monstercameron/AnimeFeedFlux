@@ -16,26 +16,25 @@ import (
 // an attacker who already has a session keeps it regardless of how strong
 // the new password is.
 func TestChangePassword_RevokesOtherSessions(t *testing.T) {
-	srv, st, secret := newTestServer(t)
-	// Two independent logins ("two browsers/devices"), then ChangePassword
-	// from the second one. ValidateCode accepts the current TOTP step and its
-	// immediate ±1 neighbours (§4's drift window), so the three calls need
-	// three DISTINCT steps to avoid a same-step replay — while each stays
-	// inside the window around the wall clock at the moment the SERVER
-	// validates.
-	//
-	// Each offset is therefore computed at call time, not from one instant
-	// captured up front. Steps are aligned to absolute unix time (unix/30),
-	// not to any captured `base`: once the wall clock crosses a boundary
-	// between capturing base and the server validating — which argon2id at
-	// DefaultParams under a parallel suite run easily takes — a base-30s code
-	// sits two steps from the server's centre and is refused. That surfaced
-	// as an intermittent "authentication failed" that reads exactly like a
-	// real auth bug. Anchoring mid-step leaves 15s of slack either side.
-	tokenA := login(t, srv, secret, "10.30.0.1", stepTime(0))
-	tokenB := login(t, srv, secret, "10.30.0.2", stepTime(1))
+	// TOTP replay rejection is DISABLED for this one test — the same
+	// rpc.WithDevInsecureAuth production refuses on non-loopback listeners —
+	// because this test's subject is session revocation, not replay, and
+	// replay rejection is precisely what made it flaky: three TOTP-checked
+	// calls need three DISTINCT steps, one of them necessarily the previous
+	// step with only ~15s of drift-window slack, and each call spends
+	// multiple argon2id verifications before its code is even looked at.
+	// Under CI's -race and a parallel suite that slack was intermittently
+	// exceeded and the test failed with a generic "authentication failed"
+	// that reads exactly like a real auth bug (observed locally 2026-08-15
+	// and twice in CI the same day). With replay off, every call uses a
+	// current-step code computed at call time — deterministic at any
+	// machine speed. Replay rejection itself keeps its own dedicated,
+	// single-call test (SEC-44), which has no such timing shape.
+	srv, st, secret := newTestServer(t, rpc.WithDevInsecureAuth())
+	tokenA := login(t, srv, secret, "10.30.0.1", time.Now())
+	tokenB := login(t, srv, secret, "10.30.0.2", time.Now())
 
-	changeAt := stepTime(-1)
+	changeAt := time.Now()
 	newPassword := "a brand new much longer passphrase for sec46"
 
 	ctx := rpc.ContextWithSessionToken(t.Context(), tokenB)
@@ -81,13 +80,4 @@ func TestChangePassword_RevokesOtherSessions(t *testing.T) {
 	if ok, _, verr := auth.Verify(testPassword, admin.PasswordHash); verr == nil && ok {
 		t.Error("the OLD password still verifies against the stored hash after a change")
 	}
-}
-
-// stepTime returns an instant mid-way through the TOTP step `steps` away
-// from the one the wall clock is in right now. See the comment in
-// TestChangePassword_RevokesOtherSessions for why the offset is taken from
-// the live clock rather than a captured instant.
-func stepTime(steps int64) time.Time {
-	step := time.Now().Unix()/30 + steps
-	return time.Unix(step*30+15, 0)
 }
