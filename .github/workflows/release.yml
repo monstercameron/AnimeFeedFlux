@@ -56,7 +56,7 @@ jobs:
       # A failing test must fail the job BEFORE anything is pushed (§15.3).
       # Otherwise CI cheerfully publishes a broken image and the registry ends up
       # holding artefacts nobody should ever deploy.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         if: steps.check.outputs.has_go == 'true'
         with:
           go-version-file: go.mod
