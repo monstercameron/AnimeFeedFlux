@@ -8,7 +8,7 @@
 #
 # Pinned by digest-free tag deliberately: dependabot watches this file and an
 # update arrives as a PR to read, not as a silent base-image drift.
-FROM golang:1.26-alpine AS build
+FROM golang:1.27-alpine AS build
 
 WORKDIR /src
 
